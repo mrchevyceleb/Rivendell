@@ -22,6 +22,7 @@ import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
 import { useRepos } from '../chat/hooks/useRepos';
 import { useStickyScroll } from '../chat/hooks/useStickyScroll';
+import { Markdown } from '../chat/components/primitives/Markdown';
 import { Button, Chip } from '../components/Primitives';
 import { useScribeEvents } from '../hooks/useRoomData';
 import { useScribeSocket } from '../hooks/useScribeSocket';
@@ -314,6 +315,7 @@ function Composer({
   onFreshStart,
   claudeCommands,
   codexCommands,
+  agentName,
 }: {
   disabled: boolean;
   streaming: boolean;
@@ -323,6 +325,7 @@ function Composer({
   onFreshStart: () => void;
   claudeCommands: CommandEntry[];
   codexCommands: CommandEntry[];
+  agentName: string;
 }) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -388,7 +391,7 @@ function Composer({
               submit();
             }
           }}
-          placeholder={disabled ? 'Finding ASSISTANT-HUB...' : streaming ? 'Steer the current turn...' : 'Speak, and Elrond shall listen...'}
+          placeholder={disabled ? 'Finding ASSISTANT-HUB...' : streaming ? 'Steer the current turn...' : `Speak, and ${agentName} shall listen...`}
           rows={1}
         />
         <button
@@ -478,10 +481,10 @@ function ChatBlockView({ block, companion }: { block: ChatBlock; companion: Comp
       <AgentAvatar companion={companion} />
       <div>
         <header>
-          <strong>Elrond</strong>
+          <strong>{companionLabel[companion]}</strong>
           <span>{formatTime(block.ts)}</span>
         </header>
-        <div className="assistant-text">{block.text}</div>
+        <div className="assistant-text"><Markdown>{block.text}</Markdown></div>
       </div>
     </article>
   );
