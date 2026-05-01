@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { ReactNode } from 'react';
 
 // A literary-styled wrapper around react-markdown. Sam returns markdown by
@@ -9,6 +10,7 @@ export function Markdown({ children }: { children: string }) {
   return (
     <div className="sw-md">
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         components={{
           p: ({ children }) => (
             <p style={{ margin: '0 0 8px', lineHeight: 1.55 }}>{children}</p>
@@ -91,6 +93,52 @@ export function Markdown({ children }: { children: string }) {
             }}>{children}</blockquote>
           ),
           hr: () => <hr className="sw-rule" style={{ margin: '12px 0' }} />,
+          table: ({ children }) => (
+            <div style={{ overflowX: 'auto', margin: '8px 0' }}>
+              <table style={{
+                borderCollapse: 'collapse',
+                fontSize: 13,
+                lineHeight: 1.45,
+              }}>{children}</table>
+            </div>
+          ),
+          thead: ({ children }) => (
+            <thead style={{ borderBottom: '1px solid var(--rule)' }}>{children}</thead>
+          ),
+          th: ({ children }) => (
+            <th style={{
+              textAlign: 'left',
+              padding: '6px 12px 6px 0',
+              fontWeight: 600,
+              color: 'var(--ink)',
+              fontFamily: 'var(--serif-display)',
+              fontStyle: 'italic',
+            }}>{children}</th>
+          ),
+          td: ({ children }) => (
+            <td style={{
+              padding: '4px 12px 4px 0',
+              borderTop: '1px solid var(--rule-soft)',
+              verticalAlign: 'top',
+            }}>{children}</td>
+          ),
+          del: ({ children }) => (
+            <del style={{ color: 'var(--ink-faint)' }}>{children}</del>
+          ),
+          input: (props: any) => {
+            // GFM task list checkboxes — render as read-only visual markers.
+            if (props.type === 'checkbox') {
+              return (
+                <input
+                  type="checkbox"
+                  checked={!!props.checked}
+                  readOnly
+                  style={{ marginRight: 6, verticalAlign: 'middle' }}
+                />
+              );
+            }
+            return <input {...props} />;
+          },
         }}
       >
         {children}

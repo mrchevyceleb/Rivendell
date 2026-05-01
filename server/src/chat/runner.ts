@@ -114,6 +114,10 @@ class ClaudeSession {
     });
 
     this.child.on('exit', (code, signal) => {
+      const idleMs = Date.now() - this.lastActivityAtMs;
+      console.log(
+        `[chat ${this.cli}] child exit cwd=${this.cwd} code=${code} signal=${signal ?? '-'} initSeen=${this.initSeen} idleMs=${idleMs}`,
+      );
       if (!this.initSeen) {
         this.exitedBeforeInit = true;
         if (this.pendingResumeId) void setSessionId(this.cli, this.cwd, '');

@@ -114,12 +114,25 @@ export async function registerChat(app: express.Express, server: Server): Promis
         busy = false;
         safeSend({ type: 'turnEnd', sessionId: sev.sessionId, seq: se.seq });
       } else if (sev.type === 'error') {
-        safeSend({ type: 'error', message: sev.message, seq: se.seq });
+        // Only surface stderr/spawn errors during an active turn. Idle CLI
+        // chatter (death-rattle warnings, harmless deprecation notices) used
+        // to flash a red banner in the chat for no good reason.
+        if (busy) {
+          safeSend({ type: 'error', message: sev.message, seq: se.seq });
+        } else {
+          console.log(`[chat ws#${wsId}] swallowed idle stderr: ${String(sev.message).slice(0, 200)}`);
+        }
       } else if (sev.type === 'closed') {
-        safeSend({ type: 'sessionClosed', code: sev.code, seq: se.seq });
         // The CLI process is dead. Drop the stale promise + subscription so
         // the next send can rebind via getOrCreateSession, which resumes from
         // the saved session id when possible.
+        if (busy) {
+          // Mid-turn death is a real failure — tell the client.
+          safeSend({ type: 'sessionClosed', code: sev.code, seq: se.seq });
+        } else {
+          // Idle exit: swallow it. Next `send` will respawn transparently.
+          console.log(`[chat ws#${wsId}] swallowed idle session close (code=${sev.code})`);
+        }
         sessionPromise = null;
         busy = false;
         unsubscribe?.();

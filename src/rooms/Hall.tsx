@@ -3,6 +3,7 @@ import {
   CircleStop,
   GitBranch,
   History,
+  Info,
   PanelRightClose,
   PanelRightOpen,
   Plus,
@@ -11,6 +12,7 @@ import {
   Sparkles,
   SquarePen,
   TerminalSquare,
+  X,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { ChatBlock, CommandEntry, CompanionId, Repo } from '../chat/data/types';
@@ -63,6 +65,9 @@ export function Hall() {
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(() => readPromptParam());
   const [title, setTitle] = useState('a fresh errand');
   const [scribeCollapsed, setScribeCollapsed] = useState(() => localStorage.getItem(SCRIBE_COLLAPSED_KEY) === 'true');
+  // Mobile-only: collapses the verbose status / repo / command-count strip into
+  // a tap-to-expand panel so messages aren't pushed off the first screen.
+  const [mobileInfoOpen, setMobileInfoOpen] = useState(false);
   const restoreRef = useRef(readActive()?.repoPath ?? null);
   const dateLabel = new Intl.DateTimeFormat([], { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
 
@@ -134,16 +139,20 @@ export function Hall() {
   };
 
   return (
-    <div className={`hall-chat ${scribeCollapsed ? 'is-scribe-collapsed' : ''}`}>
+    <div className={`hall-chat ${scribeCollapsed ? 'is-scribe-collapsed' : ''} ${mobileInfoOpen ? 'is-mobile-info-open' : ''}`}>
       <header className="hall-chat-topbar">
         <div className="hall-presence">
           <Signet size={40} color="var(--r-gold)">
             <Evenstar size={20} color="var(--r-gold)" />
           </Signet>
-          <div>
+          <div className="hall-presence-text">
             <div className="agent-title">
               <strong>Elrond</strong>
-              <span>Lord of Imladris</span>
+              <span className="agent-subtitle">Lord of Imladris</span>
+              <span className="agent-status-inline" aria-hidden="true">
+                <span className={`live-orb ${chat.status === 'ready' || chat.status === 'streaming' ? 'is-live' : ''}`} />
+                {statusCopy[chat.status]}
+              </span>
             </div>
             <div className="agent-state">
               <span className={`live-orb ${chat.status === 'ready' || chat.status === 'streaming' ? 'is-live' : ''}`} />
@@ -162,7 +171,17 @@ export function Hall() {
             ))}
           </div>
           <button
-            className="rail-icon-button"
+            className={`rail-icon-button hall-info-toggle ${mobileInfoOpen ? 'is-active' : ''}`}
+            type="button"
+            onClick={() => setMobileInfoOpen((value) => !value)}
+            title={mobileInfoOpen ? 'Hide details' : 'Show repo & status'}
+            aria-label={mobileInfoOpen ? 'Hide details' : 'Show repo and status'}
+            aria-expanded={mobileInfoOpen}
+          >
+            {mobileInfoOpen ? <X size={17} /> : <Info size={17} />}
+          </button>
+          <button
+            className="rail-icon-button hall-rail-toggle"
             type="button"
             onClick={() => setScribeCollapsed((value) => !value)}
             title={scribeCollapsed ? 'Expand Scribe rail' : 'Collapse Scribe rail'}
@@ -175,7 +194,7 @@ export function Hall() {
 
       <div className="hall-chat-body">
         <main className="chat-main">
-          <div className="chat-context-bar">
+          <div className={`chat-context-bar ${mobileInfoOpen ? 'is-mobile-open' : ''}`}>
             <div className="repo-picker">
               <button className="repo-current locked" title="Elrond always works in ASSISTANT-HUB">
                 <GitBranch size={15} />

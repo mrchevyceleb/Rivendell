@@ -1,4 +1,3 @@
-import { useEffect, useRef } from 'react';
 import { SamPortrait, Dinkus, Chip } from '../primitives/atoms';
 import {
   SamMessage,
@@ -7,6 +6,7 @@ import {
   ChatInput,
 } from '../primitives/chat';
 import { Markdown } from '../primitives/Markdown';
+import { useStickyScroll } from '../../hooks/useStickyScroll';
 import type { ChatBlock, CommandEntry } from '../../data/types';
 import type { CommandSet } from '../../utils/commandAutocomplete';
 
@@ -67,32 +67,7 @@ export function Conversation({
   onStop,
   acceptImages = true,
 }: ConversationProps) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const stickyRef = useRef(true);
-
-  // Pin to bottom on every blocks update unless the user has scrolled up.
-  // Two layers: scrollIntoView on a sentinel covers most cases, and an rAF
-  // pass after that catches the case where layout hadn't finished when
-  // useEffect first ran.
-  useEffect(() => {
-    if (!stickyRef.current) return;
-    const pin = () => {
-      bottomRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' });
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    };
-    pin();
-    const id = requestAnimationFrame(pin);
-    return () => cancelAnimationFrame(id);
-  }, [blocks, status]);
-
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickyRef.current = distanceFromBottom < 120;
-  };
+  const { scrollRef, bottomRef, contentRef, onScroll } = useStickyScroll();
 
   return (
     <div
@@ -115,7 +90,7 @@ export function Conversation({
           padding: '28px 0 0',
         }}
       >
-        <div style={{ maxWidth: 760, margin: '0 auto', padding: '0 48px' }}>
+        <div ref={contentRef} style={{ maxWidth: 760, margin: '0 auto', padding: '0 48px' }}>
           <div
             style={{
               textAlign: 'center',

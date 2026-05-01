@@ -2275,10 +2275,16 @@ button {
   font-style: italic;
 }
 
-.agent-title span {
+.agent-title .agent-subtitle {
   color: var(--r-ink-mute);
   font-size: 11px;
   text-transform: uppercase;
+}
+
+/* Tiny inline status used only on the compact mobile header. Hidden on
+   desktop so the existing .agent-state line carries the status copy. */
+.agent-status-inline {
+  display: none;
 }
 
 .agent-state {
@@ -2294,6 +2300,16 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* Mobile-only info toggle. Hidden on desktop where the context-bar already
+   shows the same details inline below the topbar. */
+.rail-icon-button.hall-info-toggle {
+  display: none;
+}
+
+.hall-presence-text {
+  min-width: 0;
 }
 
 .companion-toggle {
@@ -3465,33 +3481,132 @@ button {
 
   .hall-chat {
     height: calc(100vh - 76px);
+    position: relative;
   }
 
+  /* Compact one-row header on mobile so the conversation isn't pushed off
+     the first screen. The verbose status / repo / commands strip is hidden
+     by default and revealed via the info toggle as an overlay panel. */
   .hall-chat-topbar {
-    min-height: auto;
-    padding: 14px 18px;
-    align-items: flex-start;
-    flex-direction: column;
+    min-height: 56px;
+    padding: 8px 12px;
+    align-items: center;
+    flex-direction: row;
+    gap: 8px;
+  }
+
+  .hall-presence {
+    gap: 8px;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+
+  /* Shrink the Signet on mobile to ~31px so the row stays around 56px tall. */
+  .hall-presence > :first-child {
+    flex-shrink: 0;
+    transform: scale(0.78);
+    transform-origin: left center;
+    margin-right: -6px;
+  }
+
+  .hall-presence-text {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .agent-title {
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .agent-title strong {
+    font-size: 17px;
+  }
+
+  .agent-subtitle {
+    display: none;
+  }
+
+  .agent-status-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--r-ink-mute);
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  .agent-state {
+    display: none;
   }
 
   .hall-chat-controls {
-    width: 100%;
-    justify-content: space-between;
+    margin-left: auto;
+    width: auto;
+    gap: 6px;
+    flex: 0 0 auto;
   }
 
   .companion-toggle {
-    flex: 1;
+    flex: 0 0 auto;
+    padding: 3px;
   }
 
   .companion-toggle button {
-    flex: 1;
+    flex: 0 0 auto;
     justify-content: center;
-    padding-inline: 8px;
+    padding: 5px 9px;
+    font-size: 11px;
+    gap: 5px;
   }
 
+  /* Compact 32x32 squares for the icon buttons so the row stays tight. */
+  .hall-chat-topbar .rail-icon-button {
+    width: 32px;
+    height: 32px;
+  }
+
+  .rail-icon-button.hall-info-toggle {
+    display: inline-grid;
+  }
+
+  .rail-icon-button.hall-info-toggle.is-active {
+    border-color: var(--r-line-gold);
+    color: var(--r-gold);
+    background: rgba(212, 175, 99, 0.1);
+  }
+
+  /* The repo / status / commands strip overlays the transcript on mobile so
+     opening it doesn't reflow the messages. */
   .chat-context-bar {
-    padding: 12px 18px;
-    display: block;
+    display: none;
+  }
+
+  .chat-context-bar.is-mobile-open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 12px 16px 14px;
+    position: absolute;
+    top: 56px;
+    left: 0;
+    right: 0;
+    background: color-mix(in srgb, var(--r-bg) 96%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--r-line);
+    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.28);
+    z-index: 5;
+  }
+
+  .chat-context-bar.is-mobile-open .repo-picker {
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: none;
   }
 
   .repo-current {
@@ -3503,11 +3618,14 @@ button {
     width: calc(100vw - 36px);
   }
 
-  .chat-meta-strip {
+  .chat-context-bar.is-mobile-open .chat-meta-strip {
+    flex: 0 0 auto;
     min-width: 0;
     justify-content: flex-start;
     flex-wrap: wrap;
-    margin-top: 10px;
+    margin-top: 0;
+    text-align: left;
+    gap: 8px;
   }
 
   .chat-transcript {

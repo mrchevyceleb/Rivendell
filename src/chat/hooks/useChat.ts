@@ -219,6 +219,15 @@ export function useChat(opts: {
   const { repo, cli, enabled, initialMessage, onInitialMessageSent } = opts;
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [status, setStatus] = useState<Status>('idle');
+  // Mirror status into a ref so WS handlers can read the latest value
+  // without depending on render closure (used by error-suppression logic).
+  const statusRef = useRef<Status>('idle');
+  statusRef.current = status;
+  /** True between a user send/steer and the next turnStart/turnEnd/error.
+   *  Lets us surface errors that happen during the brief window after
+   *  send() before the server flips us to 'streaming' (e.g. respawn
+   *  failures after an idle CLI close). */
+  const pendingSendRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -360,10 +369,14 @@ export function useChat(opts: {
             initialMessageRef.current = null;
             onInitialMessageSentRef.current?.();
           }
+          pendingSendRef.current = false;
           setError(null);
           setStatus('streaming');
         }
-        else if (msg.type === 'turnEnd') setStatus('ready');
+        else if (msg.type === 'turnEnd') {
+          pendingSendRef.current = false;
+          setStatus('ready');
+        }
         else if (msg.type === 'freshStarted') {
           setBlocks([]);
           setUsage(null);
@@ -400,11 +413,28 @@ export function useChat(opts: {
             });
           }
         }
-        else if (msg.type === 'error') setError(msg.message);
+        else if (msg.type === 'error') {
+          // Surface errors when a turn is in flight OR when the user just
+          // sent and we're still waiting on the server to flip to
+          // 'streaming' (covers respawn failures after an idle CLI close).
+          // Otherwise it's idle CLI chatter and the server has already
+          // filtered the worst of it; just log.
+          const inFlight =
+            statusRef.current === 'streaming' ||
+            statusRef.current === 'connecting' ||
+            pendingSendRef.current;
+          if (inFlight) {
+            pendingSendRef.current = false;
+            setError(msg.message);
+          } else {
+            console.warn('[chat] suppressed idle error:', msg.message);
+          }
+        }
       };
       ws.onclose = () => {
         if (teardownRef.current) return;
         if (initialSendInFlightRef.current) initialSendInFlightRef.current = false;
+        pendingSendRef.current = false;
         setStatus('closed');
         const attempt = Math.min(reconnectAttemptRef.current, 3);
         const delay = Math.min(1000 * 2 ** attempt, 8000);
@@ -444,6 +474,7 @@ export function useChat(opts: {
       setError('Sam is not on the line. Please wait a moment.');
       return;
     }
+    pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'send', text, images }));
   };
@@ -482,6 +513,7 @@ export function useChat(opts: {
       setError('Sam is not on the line. Please wait a moment.');
       return;
     }
+    pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, text, images }));
   };

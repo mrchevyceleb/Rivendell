@@ -6,6 +6,7 @@ import {
   ToolCall,
 } from '../primitives/chat';
 import { Markdown } from '../primitives/Markdown';
+import { useStickyScroll } from '../../hooks/useStickyScroll';
 import { commandText, getCommandSuggestion, getCommandSuggestionMulti, type CommandSet } from '../../utils/commandAutocomplete';
 
 function timeLabel(ts: number): string {
@@ -625,23 +626,9 @@ export function MobileConversation({
   const [draft, setDraft] = useState('');
   const [pendingImages, setPendingImages] = useState<Array<{ id: string; mediaType: string; base64: string; previewUrl: string }>>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
-  const stickyRef = useRef(true);
+  const { scrollRef, bottomRef, contentRef, onScroll } = useStickyScroll();
   const [composerHeight, setComposerHeight] = useState(132);
-
-  useEffect(() => {
-    if (!stickyRef.current) return;
-    const pin = () => {
-      bottomRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' });
-      const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
-    };
-    pin();
-    const id = requestAnimationFrame(pin);
-    return () => cancelAnimationFrame(id);
-  }, [blocks, status]);
 
   useEffect(() => {
     const el = composerRef.current;
@@ -656,13 +643,6 @@ export function MobileConversation({
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
-
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickyRef.current = distanceFromBottom < 120;
-  };
 
   const ingestFiles = async (files: FileList | File[]) => {
     if (!acceptImages) return;
@@ -846,6 +826,7 @@ export function MobileConversation({
           background: 'var(--vellum)',
         }}
       >
+       <div ref={contentRef}>
         <div className="sw-folio" style={{ textAlign: 'center', marginBottom: 8, fontSize: 12 }}>
           {agent.toLowerCase()} · {repo}
         </div>
@@ -937,6 +918,7 @@ export function MobileConversation({
 
         <div style={{ height: 8 }} />
         <div ref={bottomRef} aria-hidden style={{ height: 1 }} />
+       </div>
       </div>
 
       {/* Composer */}

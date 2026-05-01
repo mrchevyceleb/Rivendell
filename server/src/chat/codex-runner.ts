@@ -225,6 +225,9 @@ export class CodexSession {
     });
 
     child.on('exit', async (code) => {
+      console.log(
+        `[chat codex] child exit cwd=${this.cwd} code=${code} threadId=${this.threadId ?? '-'}`,
+      );
       this.busy = false;
       this.currentChild = null;
       cleanupImages();
