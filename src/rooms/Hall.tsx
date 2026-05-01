@@ -375,6 +375,17 @@ function Composer({
           placeholder={disabled ? 'Finding ASSISTANT-HUB...' : streaming ? 'Steer the current turn...' : 'Speak, and Elrond shall listen...'}
           rows={1}
         />
+        <button
+          className="send-button"
+          type="button"
+          disabled={disabled || !value.trim()}
+          onClick={submit}
+          title={streaming ? 'Steer' : 'Send'}
+          aria-label={streaming ? 'Steer' : 'Send'}
+        >
+          <Send size={15} />
+          <span className="send-button-label">{streaming ? 'Steer' : 'Send'}</span>
+        </button>
       </div>
       <div className="composer-footer">
         <div>
@@ -403,10 +414,6 @@ function Composer({
             </button>
           ) : null}
         </div>
-        <button className="send-button" type="button" disabled={disabled || !value.trim()} onClick={submit}>
-          <Send size={15} />
-          {streaming ? 'Steer' : 'Send'}
-        </button>
       </div>
     </footer>
   );

@@ -2768,6 +2768,41 @@ button {
    suggestion tail. Press Tab or → at end of input to accept. */
 .composer-input-wrap {
   position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.composer-input-wrap > textarea {
+  flex: 1;
+  min-width: 0;
+}
+
+.composer-input-wrap > .send-button {
+  flex: 0 0 auto;
+  border: 1px solid var(--r-gold-soft);
+  border-radius: 7px;
+  background: rgba(212, 175, 99, 0.1);
+  color: var(--r-gold);
+  height: 34px;
+  min-width: 34px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.composer-input-wrap > .send-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.send-button-label {
+  display: inline;
 }
 
 .composer-ghost {
@@ -2828,18 +2863,6 @@ button {
   align-items: center;
   gap: 6px;
   cursor: pointer;
-}
-
-.composer-footer .send-button {
-  border-color: var(--r-gold-soft);
-  color: var(--r-gold);
-  background: rgba(212, 175, 99, 0.1);
-  padding-inline: 13px;
-}
-
-.composer-footer .send-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .scribe-rail {
@@ -3656,12 +3679,18 @@ button {
   }
 
   .composer-footer {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: center;
   }
 
-  .composer-footer .send-button {
-    justify-content: center;
+  /* Icon-only send button on the right of the input on mobile. */
+  .composer-input-wrap > .send-button {
+    height: 36px;
+    min-width: 36px;
+    padding: 0;
+  }
+
+  .send-button-label {
+    display: none;
   }
 
   .library-shell {
