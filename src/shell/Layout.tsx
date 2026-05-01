@@ -77,6 +77,15 @@ export function Layout({ active, onNavigate, theme, onThemeChange, collapsed, on
         </div>
       </aside>
       <main className="main-pane">{children}</main>
+      <button
+        type="button"
+        className="mobile-theme-toggle"
+        onClick={() => onThemeChange(theme === 'dark' ? 'light' : 'dark')}
+        title={theme === 'dark' ? 'Switch to dawn (light theme)' : 'Switch to night (dark theme)'}
+        aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      >
+        {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+      </button>
       <nav className="mobile-tabs" aria-label="Primary rooms">
         {visibleMobile.map((key) => {
           const room = rooms.find((entry) => entry.key === key);

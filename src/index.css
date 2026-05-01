@@ -1241,13 +1241,21 @@ button {
 
 .message-list article {
   display: grid;
-  grid-template-columns: 12px 160px minmax(0, 1fr) 135px 46px;
+  grid-template-columns: 12px 160px minmax(0, 1fr) 135px auto;
   gap: 12px;
   align-items: center;
   border: 1px solid var(--r-line);
   border-radius: 8px;
   background: var(--r-bg-deep);
   padding: 12px 14px;
+}
+
+.message-row-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-end;
+  white-space: nowrap;
 }
 
 .message-list article.unread {
@@ -2075,6 +2083,61 @@ button {
   accent-color: var(--r-gold);
 }
 
+.cron-optional {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  font-weight: 500;
+  color: var(--r-ink-mute);
+  background: rgba(196, 213, 247, 0.06);
+  border: 1px solid var(--r-line);
+}
+
+.cron-advanced {
+  margin-top: 18px;
+  border-top: 1px dashed var(--r-line);
+  padding-top: 12px;
+}
+
+.cron-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 6px 0;
+  color: var(--r-ink-soft);
+  font-family: var(--r-body);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.cron-advanced-toggle:hover {
+  color: var(--r-gold);
+}
+
+.cron-advanced-toggle small {
+  margin-left: 6px;
+  color: var(--r-ink-faint);
+  font-size: 11.5px;
+  font-style: italic;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.cron-advanced-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .cron-editor-actions,
 .cron-detail-actions {
   margin-top: 14px;
@@ -2228,6 +2291,10 @@ button {
 }
 
 .mobile-tabs {
+  display: none;
+}
+
+.mobile-theme-toggle {
   display: none;
 }
 
@@ -2818,6 +2885,78 @@ button {
   cursor: not-allowed;
 }
 
+.composer-attach {
+  flex: 0 0 auto;
+  height: 34px;
+  width: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--r-line);
+  border-radius: 7px;
+  background: var(--r-bg-deep);
+  color: var(--r-ink-soft);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.composer-attach:hover {
+  color: var(--r-gold);
+  border-color: var(--r-line-gold);
+  background: rgba(212, 175, 99, 0.06);
+}
+
+.composer-attach:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-image-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.composer-image-thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--r-line-gold);
+  background: var(--r-bg-deep);
+}
+
+.composer-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.composer-image-thumb button {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.composer-image-thumb button:hover {
+  background: rgba(0, 0, 0, 0.85);
+}
+
 .send-button-label {
   display: inline;
 }
@@ -2880,6 +3019,36 @@ button {
   align-items: center;
   gap: 6px;
   cursor: pointer;
+}
+
+.composer-context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--r-ink-faint);
+  font-size: 11.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.composer-context-meter-track {
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--r-line);
+  overflow: hidden;
+  display: inline-block;
+}
+
+.composer-context-meter-fill {
+  display: block;
+  height: 100%;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.composer-context-meter-label {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
 }
 
 .scribe-rail {
@@ -3501,6 +3670,33 @@ button {
     background: color-mix(in srgb, var(--r-bg) 90%, transparent);
     backdrop-filter: blur(18px);
     z-index: 10;
+  }
+
+  .mobile-theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 10px);
+    right: calc(env(safe-area-inset-right, 0px) + 10px);
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: 1px solid var(--r-line-gold);
+    background: color-mix(in srgb, var(--r-bg-raised) 78%, transparent);
+    color: var(--r-gold);
+    backdrop-filter: blur(14px);
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+    z-index: 11;
+    cursor: pointer;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+  }
+
+  .mobile-theme-toggle:hover,
+  .mobile-theme-toggle:active {
+    background: color-mix(in srgb, var(--r-bg-raised) 92%, transparent);
+    box-shadow: var(--r-glow-gold);
+    transform: scale(1.05);
   }
 
   .mobile-tabs button {

@@ -1,4 +1,4 @@
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ReactNode } from 'react';
 import { useProxyViewer } from '../../../hooks/useProxyViewer';
@@ -14,10 +14,7 @@ import { annotateWorkspaceMentions, parseProxyHref } from '../../utils/proxyLink
 // and can render in-app cards instead of empty external links.
 function proxyUrlTransform(url: string): string {
   if (url.startsWith('rivendell-doc:') || url.startsWith('rivendell-folder:')) return url;
-  // Re-implement the safe-url default: allow http/https/mailto/tel and
-  // relative paths; drop everything else (including javascript:).
-  const safe = /^(https?:|mailto:|tel:|#|\/|\.)/i;
-  return safe.test(url) ? url : '';
+  return defaultUrlTransform(url);
 }
 
 export function Markdown({ children }: { children: string }) {

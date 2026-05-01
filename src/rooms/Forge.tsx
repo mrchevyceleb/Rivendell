@@ -1,6 +1,8 @@
 import {
   CalendarClock,
   Check,
+  ChevronDown,
+  ChevronRight,
   Cloud,
   Clock3,
   HelpCircle,
@@ -81,6 +83,7 @@ export function Forge() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(false);
   const [filterRuntime, setFilterRuntime] = useState<'all' | CronRuntime>('all');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const filteredJobs = useMemo(
     () => (filterRuntime === 'all' ? jobs : jobs.filter((job) => (job.runtime || 'railway') === filterRuntime)),
@@ -111,17 +114,23 @@ export function Forge() {
     setDraft(emptyDraft);
     setEditingId('new');
     setSelectedId(null);
+    setAdvancedOpen(false);
   };
 
   const startEdit = (job: CronJob) => {
-    setDraft(draftFromJob(job));
+    const next = draftFromJob(job);
+    setDraft(next);
     setEditingId(job.id);
     setSelectedId(job.id);
+    // Open Advanced automatically if this job uses any non-default knob, so
+    // the user sees what's actually set instead of having to hunt for it.
+    setAdvancedOpen(hasNonDefaultAdvanced(next));
   };
 
   const closeEditor = () => {
     setEditingId(null);
     setDraft(emptyDraft);
+    setAdvancedOpen(false);
   };
 
   const save = async (event: FormEvent) => {
@@ -316,75 +325,26 @@ export function Forge() {
                 </button>
               </div>
 
-              <div className="runtime-toggle-row">
-                <div>
-                  <p className="r-eyebrow-gold">Runtime</p>
-                  <p className="muted small">Where this schedule fires.</p>
-                </div>
-                <RuntimeToggle
-                  value={draft.runtime}
-                  onChange={(runtime) => setDraft({ ...draft, runtime })}
+              {/* Required basics — what most jobs actually need. */}
+              <label className="cron-field">
+                Name
+                <input
+                  value={draft.name}
+                  onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                  placeholder="Morning brief"
+                  autoFocus
                 />
-                <button
-                  type="button"
-                  className="r-icon-button"
-                  onClick={() => setShowGuide(true)}
-                  title="Which runtime should I pick?"
-                  aria-label="Runtime help"
-                >
-                  <HelpCircle size={14} />
-                </button>
-              </div>
+              </label>
 
-              {draftIsLocalAi ? (
-                <p className="runtime-hint">
-                  <Sparkles size={12} /> Bag End jobs run <code>claude -p</code> in <code>{draft.cwd || '<cwd>'}</code> with full Opus + repo access.
-                </p>
-              ) : draft.runtime === 'railway' ? (
-                <p className="runtime-hint">
-                  <Cloud size={12} /> Railway jobs run in-process on the always-on Railway server. Best for time-critical and stateless work.
-                </p>
-              ) : null}
-
-              <div className="cron-form-grid">
-                <label>
-                  Name
-                  <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="Morning brief" autoFocus />
-                </label>
-                <label>
-                  Cron expression
-                  <input value={draft.schedule} onChange={(event) => setDraft({ ...draft, schedule: event.target.value })} placeholder="0 9 * * *" />
-                </label>
-                <label>
-                  Action type
-                  <select value={draft.actionType} onChange={(event) => setDraft({ ...draft, actionType: event.target.value })}>
-                    <option value="ai_prompt">ai_prompt — Claude does the work</option>
-                    <option value="tool_call">tool_call — call an MCP tool directly</option>
-                    <option value="webhook">webhook — POST to a URL</option>
-                  </select>
-                </label>
-                <label>
-                  Tool name
-                  <input
-                    value={draft.toolName}
-                    onChange={(event) => setDraft({ ...draft, toolName: event.target.value })}
-                    placeholder={draft.actionType === 'tool_call' ? 'gmail_send' : 'Optional MCP tool'}
-                    disabled={draft.actionType === 'webhook'}
-                  />
-                </label>
-                <label>
-                  Delivery
-                  <select value={draft.deliveryChannel} onChange={(event) => setDraft({ ...draft, deliveryChannel: event.target.value })}>
-                    <option value="log_only">log_only — silent, just records</option>
-                    <option value="telegram">telegram — DM Matt</option>
-                    <option value="email">email — send to Matt</option>
-                  </select>
-                </label>
-                <label>
-                  Max tokens
-                  <input type="number" min={256} step={128} value={draft.maxTokens} onChange={(event) => setDraft({ ...draft, maxTokens: Number(event.target.value) })} />
-                </label>
-              </div>
+              <label className="cron-field">
+                Schedule
+                <input
+                  value={draft.schedule}
+                  onChange={(event) => setDraft({ ...draft, schedule: event.target.value })}
+                  placeholder="0 9 * * *"
+                />
+                <small className="muted">Pick a preset below or type a cron expression.</small>
+              </label>
 
               <div className="cron-presets" aria-label="Schedule presets">
                 {schedulePresets.map((preset) => (
@@ -399,68 +359,160 @@ export function Forge() {
                 ))}
               </div>
 
-              {draftIsLocalAi ? (
-                <div className="cron-local-fields">
-                  <label className="cron-field">
-                    Working directory
-                    <input
-                      value={draft.cwd}
-                      onChange={(event) => setDraft({ ...draft, cwd: event.target.value })}
-                      placeholder="/Users/mjohnst/samwise/KG-Apps/operly"
-                    />
-                    <small className="muted">
-                      Required. Absolute path on Bag End where <code>claude -p</code> will run. Must be a real checkout the job can edit.
-                    </small>
-                  </label>
-                  <label className="cron-field">
-                    Permission mode
-                    <select
-                      value={draft.permissionMode}
-                      onChange={(event) => setDraft({ ...draft, permissionMode: event.target.value as CronPermissionMode })}
-                    >
-                      {permissionModes.map((mode) => (
-                        <option key={mode.value} value={mode.value}>
-                          {mode.label} — {mode.hint}
-                        </option>
-                      ))}
-                    </select>
-                    {draft.permissionMode === 'bypassPermissions' ? (
-                      <small className="warn">
-                        <ShieldAlert size={11} /> Unattended bypass. The CLI will run any tool/command without prompting. Only use for jobs you trust completely.
-                      </small>
-                    ) : (
-                      <small className="muted">Unattended jobs that need to edit + run shell usually want <code>bypassPermissions</code>.</small>
-                    )}
-                  </label>
-                </div>
-              ) : null}
-
               <label className="cron-field">
-                Description
-                <input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder="What this job does" />
-              </label>
-              <label className="cron-field">
-                Prompt or payload
+                Prompt
                 <textarea
                   value={draft.prompt}
                   onChange={(event) => setDraft({ ...draft, prompt: event.target.value })}
-                  placeholder={draft.runtime === 'local'
-                    ? 'Give Claude clear, scoped work it can complete in a single run. Reference files via paths, not /commands.'
-                    : 'Describe the recurring work. Be specific about output format and length.'}
+                  placeholder="Describe the recurring work. Be specific about output format and length."
                   rows={7}
                 />
               </label>
+
+              <label className="cron-field">
+                Delivery <span className="cron-optional">optional</span>
+                <select value={draft.deliveryChannel} onChange={(event) => setDraft({ ...draft, deliveryChannel: event.target.value })}>
+                  <option value="log_only">Just log it — silent, no message</option>
+                  <option value="telegram">Telegram — DM Matt</option>
+                  <option value="email">Email — send to Matt</option>
+                </select>
+              </label>
+
               <label className="cron-toggle">
                 <input
                   type="checkbox"
                   checked={draft.status === 'active'}
                   onChange={(event) => setDraft({ ...draft, status: event.target.checked ? 'active' : 'paused' })}
                 />
-                Active immediately
+                Turn on immediately
               </label>
+
+              {/* Advanced — collapsed by default. Most jobs never touch any of this. */}
+              <div className="cron-advanced">
+                <button
+                  type="button"
+                  className="cron-advanced-toggle"
+                  onClick={() => setAdvancedOpen((value) => !value)}
+                  aria-expanded={advancedOpen}
+                >
+                  {advancedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <span>Advanced</span>
+                  <small>runtime, action type, permissions — usually leave alone</small>
+                </button>
+
+                {advancedOpen ? (
+                  <div className="cron-advanced-body">
+                    <label className="cron-field">
+                      Description <span className="cron-optional">optional</span>
+                      <input
+                        value={draft.description}
+                        onChange={(event) => setDraft({ ...draft, description: event.target.value })}
+                        placeholder="What this job does"
+                      />
+                    </label>
+
+                    <div className="runtime-toggle-row">
+                      <div>
+                        <p className="r-eyebrow-gold">Runtime</p>
+                        <p className="muted small">Where this schedule fires. Default: Railway.</p>
+                      </div>
+                      <RuntimeToggle
+                        value={draft.runtime}
+                        onChange={(runtime) => setDraft({ ...draft, runtime })}
+                      />
+                      <button
+                        type="button"
+                        className="r-icon-button"
+                        onClick={() => setShowGuide(true)}
+                        title="Which runtime should I pick?"
+                        aria-label="Runtime help"
+                      >
+                        <HelpCircle size={14} />
+                      </button>
+                    </div>
+
+                    {draftIsLocalAi ? (
+                      <p className="runtime-hint">
+                        <Sparkles size={12} /> Bag End jobs run <code>claude -p</code> in <code>{draft.cwd || '<cwd>'}</code> with full Opus + repo access.
+                      </p>
+                    ) : draft.runtime === 'railway' ? (
+                      <p className="runtime-hint">
+                        <Cloud size={12} /> Railway jobs run in-process on the always-on Railway server. Best for time-critical and stateless work.
+                      </p>
+                    ) : null}
+
+                    <div className="cron-form-grid">
+                      <label>
+                        Action type
+                        <select value={draft.actionType} onChange={(event) => setDraft({ ...draft, actionType: event.target.value })}>
+                          <option value="ai_prompt">ai_prompt — Claude does the work</option>
+                          <option value="tool_call">tool_call — call an MCP tool directly</option>
+                          <option value="webhook">webhook — POST to a URL</option>
+                        </select>
+                      </label>
+                      <label>
+                        Tool name <span className="cron-optional">optional</span>
+                        <input
+                          value={draft.toolName}
+                          onChange={(event) => setDraft({ ...draft, toolName: event.target.value })}
+                          placeholder={draft.actionType === 'tool_call' ? 'gmail_send' : 'Optional MCP tool'}
+                          disabled={draft.actionType === 'webhook'}
+                        />
+                      </label>
+                      <label>
+                        Max tokens
+                        <input
+                          type="number"
+                          min={256}
+                          step={128}
+                          value={draft.maxTokens}
+                          onChange={(event) => setDraft({ ...draft, maxTokens: Number(event.target.value) })}
+                        />
+                      </label>
+                    </div>
+
+                    {draftIsLocalAi ? (
+                      <div className="cron-local-fields">
+                        <label className="cron-field">
+                          Working directory
+                          <input
+                            value={draft.cwd}
+                            onChange={(event) => setDraft({ ...draft, cwd: event.target.value })}
+                            placeholder="/Users/mjohnst/samwise/KG-Apps/operly"
+                          />
+                          <small className="muted">
+                            Required for Bag End ai_prompt jobs. Absolute path where <code>claude -p</code> will run.
+                          </small>
+                        </label>
+                        <label className="cron-field">
+                          Permission mode
+                          <select
+                            value={draft.permissionMode}
+                            onChange={(event) => setDraft({ ...draft, permissionMode: event.target.value as CronPermissionMode })}
+                          >
+                            {permissionModes.map((mode) => (
+                              <option key={mode.value} value={mode.value}>
+                                {mode.label} — {mode.hint}
+                              </option>
+                            ))}
+                          </select>
+                          {draft.permissionMode === 'bypassPermissions' ? (
+                            <small className="warn">
+                              <ShieldAlert size={11} /> Unattended bypass. The CLI will run any tool/command without prompting. Only use for jobs you trust completely.
+                            </small>
+                          ) : (
+                            <small className="muted">Unattended jobs that need to edit + run shell usually want <code>bypassPermissions</code>.</small>
+                          )}
+                        </label>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+
               {cwdMissing ? (
                 <p className="form-error">
-                  <ShieldAlert size={12} /> Bag End ai_prompt jobs need a working directory.
+                  <ShieldAlert size={12} /> Bag End ai_prompt jobs need a working directory. Open <strong>Advanced</strong> to set it.
                 </p>
               ) : null}
               <div className="cron-editor-actions">
@@ -673,6 +725,18 @@ function RuntimeGuide({ variant, onClose }: { variant?: 'empty' | 'banner'; onCl
         <em>"Does this need a real repo or smart reasoning?"</em> → Bag End.
       </p>
     </Surface>
+  );
+}
+
+function hasNonDefaultAdvanced(draft: CronDraft): boolean {
+  return (
+    draft.runtime !== emptyDraft.runtime ||
+    draft.actionType !== emptyDraft.actionType ||
+    Boolean(draft.toolName) ||
+    draft.maxTokens !== emptyDraft.maxTokens ||
+    Boolean(draft.cwd) ||
+    draft.permissionMode !== emptyDraft.permissionMode ||
+    Boolean(draft.description)
   );
 }
 

@@ -15,6 +15,24 @@ export type ContextUsage = {
 };
 
 const DEFAULT_WINDOW_TOKENS = 200_000;
+const LARGE_WINDOW_TOKENS = 1_000_000;
+const CODEX_WINDOW_TOKENS = 400_000; // GPT-5 family default
+
+// Pick the starting context window for a given CLI before we've seen any
+// model id from a system/init event. Codex's GPT-5 family is 400K; Claude
+// defaults to 200K and ratchets to 1M when the model id reveals the [1m] beta.
+function defaultWindowForCli(cli: CompanionId): number {
+  return cli === 'codex' ? CODEX_WINDOW_TOKENS : DEFAULT_WINDOW_TOKENS;
+}
+
+// Map a claude model id to its real context window. Opus 4.7 with the `[1m]`
+// beta suffix is 1M; everything else is the 200K default.
+function windowForClaudeModel(model: string | undefined): number {
+  if (!model) return DEFAULT_WINDOW_TOKENS;
+  const m = model.toLowerCase();
+  if (m.includes('[1m]') || m.includes('-1m')) return LARGE_WINDOW_TOKENS;
+  return DEFAULT_WINDOW_TOKENS;
+}
 
 let nextId = 1;
 const id = () => `b${nextId++}`;
@@ -230,6 +248,10 @@ export function useChat(opts: {
   const pendingSendRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<ContextUsage | null>(null);
+  // Window size for the active CLI. Seeded from the per-CLI default and
+  // refined by the `system/init` event (claude) or by the safety ratchet
+  // when observed usage exceeds the assumed window.
+  const windowTokensRef = useRef<number>(defaultWindowForCli(cli));
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -295,6 +317,11 @@ export function useChat(opts: {
     if (!enabled || !repo) return;
 
     teardownRef.current = false;
+    // Reset the assumed context window to the per-CLI default each time we
+    // (re)connect. The system/init event will refine it for claude; codex
+    // sticks at 400K unless usage forces a ratchet.
+    windowTokensRef.current = defaultWindowForCli(cli);
+    setUsage(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
     const stored = readStoredBlocks(cli, repo.path);
@@ -395,6 +422,17 @@ export function useChat(opts: {
         }
         else if (msg.type === 'stream') {
           setBlocks((prev) => reduce(prev, msg.event, turnIdRef));
+          // Pick up the model id from claude's system/init event so the
+          // context meter knows which window to divide against. Opus 4.7
+          // with the `[1m]` suffix is 1M; defaults stay at 200K.
+          if (
+            cli !== 'codex' &&
+            msg.event?.type === 'system' &&
+            msg.event?.subtype === 'init' &&
+            typeof msg.event?.model === 'string'
+          ) {
+            windowTokensRef.current = windowForClaudeModel(msg.event.model);
+          }
           // Track usage from claude's `result` events to power the context meter.
           if (msg.event?.type === 'result' && msg.event?.usage) {
             const u = msg.event.usage as Record<string, number | undefined>;
@@ -403,13 +441,26 @@ export function useChat(opts: {
             const cacheCreate = u.cache_creation_input_tokens ?? 0;
             const output = u.output_tokens ?? 0;
             const total = input + cacheRead + cacheCreate;
+            // Safety net (claude only): if observed usage exceeds the known
+            // window, ratchet up to 1M. Covers the case where init didn't
+            // carry a model id but the session is plainly running on the
+            // large-context variant. Codex has no 1M variant — the meter just
+            // clamps at 100% if usage somehow exceeds its 400K window.
+            if (
+              cli !== 'codex' &&
+              total > windowTokensRef.current &&
+              windowTokensRef.current < LARGE_WINDOW_TOKENS
+            ) {
+              windowTokensRef.current = LARGE_WINDOW_TOKENS;
+            }
+            const windowTokens = windowTokensRef.current;
             setUsage({
               inputTokens: input,
               cacheReadTokens: cacheRead,
               cacheCreateTokens: cacheCreate,
               outputTokens: output,
-              fraction: Math.min(total / DEFAULT_WINDOW_TOKENS, 1),
-              windowTokens: DEFAULT_WINDOW_TOKENS,
+              fraction: Math.min(total / windowTokens, 1),
+              windowTokens,
             });
           }
         }

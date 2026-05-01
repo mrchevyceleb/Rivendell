@@ -20,10 +20,17 @@ let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
 type ToolUseBlock = { index: number; toolUseId: string };
+type CodexUsage = {
+  input_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  output_tokens: number;
+};
 type CodexTurnState = {
   messageId: string;
   nextBlockIndex: number;
   toolUseBlocks: Map<string, ToolUseBlock>;
+  usage: CodexUsage | null;
 };
 
 const CODEX_TURN_PREAMBLE = [
@@ -188,6 +195,7 @@ export class CodexSession {
       messageId: synth('msg'),
       nextBlockIndex: 0,
       toolUseBlocks: new Map(),
+      usage: null,
     };
     const stderrChunks: string[] = [];
 
@@ -233,11 +241,14 @@ export class CodexSession {
       cleanupImages();
       this.closeDanglingToolBlocks(turnState, code, stderrChunks.join('\n').trim());
       // Emit a result event so the front-end flips status back to 'ready'.
+      // Forward codex's per-turn token usage (captured from `turn.completed`)
+      // mapped to claude's field names so the same client-side meter works.
       this.emitClaudeEvent({
         type: 'result',
         subtype: code === 0 ? 'success' : 'error_during_execution',
         is_error: code !== 0,
         session_id: this.threadId ?? undefined,
+        usage: turnState.usage ?? undefined,
       });
       if (this.threadId) {
         await setSessionId('codex', this.cwd, this.threadId);
@@ -382,7 +393,28 @@ export class CodexSession {
       return;
     }
 
-    // Other event types (turn.completed, etc.) — ignore.
+    // Capture per-turn token usage from `turn.completed` so the front-end
+    // context meter has real numbers instead of leftover Claude figures.
+    // Codex reports `input_tokens` (full prompt incl. cache) and
+    // `cached_input_tokens` (cache hits) — map to claude's field names.
+    if (ev.type === 'turn.completed' && ev.usage && typeof ev.usage === 'object') {
+      const u = ev.usage as Record<string, number | undefined>;
+      const input = Number(u.input_tokens ?? 0);
+      const cached = Number(u.cached_input_tokens ?? 0);
+      const output = Number(u.output_tokens ?? 0);
+      state.usage = {
+        // Claude treats input_tokens as the *uncached* portion. Codex reports
+        // input_tokens as the full prompt and cached_input_tokens as the
+        // already-cached subset, so we subtract to match claude's semantics.
+        input_tokens: Math.max(0, input - cached),
+        cache_read_input_tokens: cached,
+        cache_creation_input_tokens: 0,
+        output_tokens: output,
+      };
+      return;
+    }
+
+    // Other event types — ignore.
   }
 
   private closeDanglingToolBlocks(

@@ -6,6 +6,7 @@ import {
   Info,
   PanelRightClose,
   PanelRightOpen,
+  Paperclip,
   Plus,
   RotateCcw,
   Send,
@@ -14,9 +15,10 @@ import {
   TerminalSquare,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ChatBlock, CommandEntry, CompanionId, Repo } from '../chat/data/types';
 import { commandText, getCommandSuggestionMulti } from '../chat/utils/commandAutocomplete';
+import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
@@ -263,6 +265,7 @@ export function Hall() {
             claudeCommands={commands.claude}
             codexCommands={commands.codex}
             agentName={companionLabel[companion]}
+            usage={chat.usage}
           />
         </main>
 
@@ -307,6 +310,8 @@ export function Hall() {
   );
 }
 
+type StagedImage = { id: string; mediaType: string; base64: string; previewUrl: string };
+
 function Composer({
   disabled,
   streaming,
@@ -317,19 +322,23 @@ function Composer({
   claudeCommands,
   codexCommands,
   agentName,
+  usage,
 }: {
   disabled: boolean;
   streaming: boolean;
   commandPrefix: string;
-  onSend: (text: string) => void;
+  onSend: (text: string, images?: Array<{ mediaType: string; base64: string }>) => void;
   onStop: () => void;
   onFreshStart: () => void;
   claudeCommands: CommandEntry[];
   codexCommands: CommandEntry[];
   agentName: string;
+  usage: ContextUsage | null;
 }) {
   const [value, setValue] = useState('');
+  const [images, setImages] = useState<StagedImage[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Both Claude (`/`) and Codex (`$`) skill autocomplete are offered at all
   // times — the active companion only decides which prefix is the "default"
@@ -339,18 +348,69 @@ function Composer({
     { prefix: '$', commands: codexCommands },
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
     textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 190)}px`;
+    const needed = textarea.scrollHeight;
+    textarea.style.height = `${Math.min(needed, 190)}px`;
+    textarea.style.overflowY = needed > 190 ? 'auto' : 'hidden';
   }, [value]);
+
+  // Revoke object URLs when the component unmounts so we don't leak blob refs.
+  useEffect(() => {
+    return () => {
+      for (const img of images) URL.revokeObjectURL(img.previewUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const ingestFiles = async (files: FileList | File[]) => {
+    const next: StagedImage[] = [];
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith('image/')) continue;
+      // Chunked btoa avoids a call-stack blowout on multi-MB screenshots.
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let bin = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < buf.length; i += chunk) {
+        bin += String.fromCharCode(...buf.subarray(i, i + chunk));
+      }
+      const base64 = btoa(bin);
+      const previewUrl = URL.createObjectURL(file);
+      next.push({
+        id: `img_${Math.random().toString(36).slice(2, 10)}`,
+        mediaType: file.type,
+        base64,
+        previewUrl,
+      });
+    }
+    if (next.length) {
+      setImages((prev) => [...prev, ...next]);
+    }
+  };
+
+  const removeImage = (id: string) => {
+    setImages((prev) => {
+      const target = prev.find((i) => i.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((i) => i.id !== id);
+    });
+  };
 
   const submit = () => {
     const text = value.trim();
-    if (!text || disabled) return;
-    onSend(text);
+    if (disabled) return;
+    if (!text && images.length === 0) return;
+    const payload = images.length
+      ? images.map((i) => ({ mediaType: i.mediaType, base64: i.base64 }))
+      : undefined;
+    onSend(text, payload);
     setValue('');
+    setImages((prev) => {
+      for (const img of prev) URL.revokeObjectURL(img.previewUrl);
+      return [];
+    });
   };
 
   const acceptSuggestion = () => {
@@ -366,6 +426,23 @@ function Composer({
 
   return (
     <footer className="chat-composer">
+      {images.length > 0 ? (
+        <div className="composer-image-tray" aria-label="Attached images">
+          {images.map((img) => (
+            <div key={img.id} className="composer-image-thumb">
+              <img src={img.previewUrl} alt="attached" />
+              <button
+                type="button"
+                onClick={() => removeImage(img.id)}
+                aria-label="Remove image"
+                title="Remove"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="composer-input-wrap">
         {suggestion ? (
           <div className="composer-ghost" aria-hidden="true">
@@ -392,13 +469,59 @@ function Composer({
               submit();
             }
           }}
+          onPaste={(event) => {
+            const files: File[] = [];
+            for (const item of Array.from(event.clipboardData.items)) {
+              if (item.kind === 'file' && item.type.startsWith('image/')) {
+                const f = item.getAsFile();
+                if (f) files.push(f);
+              }
+            }
+            if (files.length) {
+              event.preventDefault();
+              void ingestFiles(files);
+            }
+          }}
+          onDragOver={(event) => {
+            if (Array.from(event.dataTransfer.items).some((i) => i.kind === 'file')) {
+              event.preventDefault();
+            }
+          }}
+          onDrop={(event) => {
+            const files = Array.from(event.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+            if (files.length) {
+              event.preventDefault();
+              void ingestFiles(files);
+            }
+          }}
           placeholder={disabled ? 'Finding ASSISTANT-HUB...' : streaming ? 'Steer the current turn...' : `Speak, and ${agentName} shall listen...`}
           rows={1}
         />
         <button
+          className="composer-attach"
+          type="button"
+          disabled={disabled}
+          onClick={() => fileInputRef.current?.click()}
+          title="Attach an image (paste or drop also works)"
+          aria-label="Attach image"
+        >
+          <Paperclip size={15} />
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          style={{ display: 'none' }}
+          onChange={(event) => {
+            if (event.target.files) void ingestFiles(event.target.files);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+          }}
+        />
+        <button
           className="send-button"
           type="button"
-          disabled={disabled || !value.trim()}
+          disabled={disabled || (!value.trim() && images.length === 0)}
           onClick={submit}
           title={streaming ? 'Steer' : 'Send'}
           aria-label={streaming ? 'Steer' : 'Send'}
@@ -434,9 +557,44 @@ function Composer({
             </button>
           ) : null}
         </div>
+        {usage ? <ContextMeter usage={usage} /> : null}
       </div>
     </footer>
   );
+}
+
+function ContextMeter({ usage }: { usage: ContextUsage }) {
+  const used = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens;
+  const pct = Math.round(usage.fraction * 100);
+  const tone =
+    usage.fraction < 0.5 ? 'var(--r-moss, #6f8f5e)'
+    : usage.fraction < 0.8 ? 'var(--r-gold, #d4af63)'
+    : 'var(--r-ember, #c46a3f)';
+  const hint =
+    usage.fraction < 0.5 ? 'plenty of room'
+    : usage.fraction < 0.8 ? 'getting full'
+    : 'consider hitting fresh';
+  return (
+    <div
+      className="composer-context-meter"
+      title={`${used.toLocaleString()} of ${usage.windowTokens.toLocaleString()} tokens used — ${hint}`}
+    >
+      <span className="composer-context-meter-track">
+        <span
+          className="composer-context-meter-fill"
+          style={{ width: `${pct}%`, background: tone }}
+        />
+      </span>
+      <span className="composer-context-meter-label">
+        {formatTokens(used)} / {formatTokens(usage.windowTokens)}
+      </span>
+    </div>
+  );
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
+  return String(n);
 }
 
 function ChatBlockView({ block, companion }: { block: ChatBlock; companion: CompanionId }) {
