@@ -2620,12 +2620,17 @@ button {
   font-size: 11px;
 }
 
-.chat-message p,
-.assistant-text {
+.chat-message p {
   color: var(--r-ink);
   line-height: 1.65;
   font-size: 15px;
   white-space: pre-wrap;
+}
+
+.assistant-text {
+  color: var(--r-ink);
+  line-height: 1.65;
+  font-size: 15px;
 }
 
 .user-message p {

@@ -22,10 +22,10 @@ export function Markdown({ children }: { children: string }) {
             <em style={{ fontStyle: 'italic' }}>{children}</em>
           ),
           ul: ({ children }) => (
-            <ul style={{ margin: '4px 0 8px', paddingLeft: 22 }}>{children}</ul>
+            <ul style={{ margin: '4px 0 8px', paddingLeft: 22, listStyle: 'disc' }}>{children}</ul>
           ),
           ol: ({ children }) => (
-            <ol style={{ margin: '4px 0 8px', paddingLeft: 22 }}>{children}</ol>
+            <ol style={{ margin: '4px 0 8px', paddingLeft: 22, listStyle: 'decimal' }}>{children}</ol>
           ),
           li: ({ children }) => (
             <li style={{ margin: '2px 0', lineHeight: 1.5 }}>{children}</li>
