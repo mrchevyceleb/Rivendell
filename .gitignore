@@ -39,3 +39,6 @@ supabase/.temp
 # Misc
 *.local
 tmp/
+
+# Claude Code runtime
+.claude/

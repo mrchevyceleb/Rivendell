@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { fetchAdminQueueJobs } from '../lib/assistantData.ts';
 import { emitScribe } from '../worker/scribe.ts';
 import { enqueueJob, listJobs, updateJob } from '../worker/store.ts';
 import { asyncHandler } from './helpers.ts';
@@ -7,13 +6,9 @@ import { asyncHandler } from './helpers.ts';
 export const weavingsRouter = Router();
 
 weavingsRouter.get('/queue', asyncHandler(async (_req, res) => {
-  const local = await listJobs();
-  try {
-    const remote = await fetchAdminQueueJobs();
-    res.json([...remote, ...local]);
-  } catch {
-    res.json(local);
-  }
+  // Weavings shows ONLY Rivendell's headless worker queue. Samwise/autofix
+  // queue is a different system and surfacing it here is misleading.
+  res.json(await listJobs());
 }));
 
 weavingsRouter.post('/queue', asyncHandler(async (req, res) => {

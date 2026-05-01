@@ -100,10 +100,10 @@ export const cronJobs: CronJob[] = [
   { id: 'C-4', name: 'Operly support triage', schedule: 'hourly', target: 'triage-feedback-ticket', status: 'paused', lastRun: 'yesterday' },
 ];
 
-export const jobs: RivendellJob[] = [
-  { id: 'J-1', created_at: new Date(Date.now() - 42 * 60_000).toISOString(), status: 'needs_review', skill: 'draft-customer-reply', source: 'email', source_ref: 'kim-funnel-v3', prompt: 'Draft a customer reply. Do not send.', needs_review_reason: 'Draft email requires approval before sending.' },
-  { id: 'J-2', created_at: new Date(Date.now() - 2 * 60 * 60_000).toISOString(), status: 'done', skill: 'pull-dashboard-data', source: 'cron', completed_at: new Date(Date.now() - 90 * 60_000).toISOString() },
-];
+// Empty seed — Weavings should reflect actual queued work, not placeholder
+// jobs. If Supabase is configured, listJobs reads from rivendell_jobs.
+// Otherwise it falls back to the file store, which now starts empty.
+export const jobs: RivendellJob[] = [];
 
 export const events: ScribeEvent[] = [
   { id: 1, ts: new Date(Date.now() - 48 * 60_000).toISOString(), level: 'system', text: 'Rivendell awakened on :8091.' },

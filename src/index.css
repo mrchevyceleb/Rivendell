@@ -1058,7 +1058,7 @@ button {
   border-left: 4px solid var(--priority-color, var(--r-line-strong));
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.026), transparent 42%),
-    #050812;
+    var(--r-bg-card);
   cursor: grab;
   box-shadow: 0 12px 24px rgba(0, 0, 0, 0.24);
   transition: opacity 0.16s ease, transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
@@ -1068,7 +1068,7 @@ button {
   border-color: color-mix(in srgb, var(--priority-color, var(--r-gold)) 58%, var(--r-line));
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--priority-color, var(--r-gold)) 8%, transparent), transparent 54%),
-    #070b16;
+    var(--r-bg-raised);
   box-shadow: 0 16px 30px rgba(0, 0, 0, 0.34);
 }
 
@@ -1653,6 +1653,109 @@ button {
 .finance-layout .metric-grid {
   grid-column: auto;
   grid-template-columns: 1fr;
+}
+
+.period-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.period-card {
+  border: 1px solid var(--r-line);
+  border-radius: 10px;
+  background: var(--r-bg-card);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.period-card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.period-label {
+  font-family: var(--r-display);
+  font-size: 16px;
+  color: var(--r-ink);
+}
+
+.period-range {
+  font-family: var(--r-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--r-ink-mute);
+}
+
+.period-card dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.period-card dl > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.period-card dt {
+  font-size: 11px;
+  color: var(--r-ink-mute);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.period-card dd {
+  margin: 0;
+  font-family: var(--r-display);
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.period-emerald {
+  color: var(--r-emerald);
+}
+
+.period-rose {
+  color: var(--r-rose);
+}
+
+.period-gold {
+  color: var(--r-gold);
+}
+
+.period-card footer {
+  font-family: var(--r-mono);
+  font-size: 11px;
+  color: var(--r-ink-mute);
+  border-top: 1px solid var(--r-line);
+  padding-top: 10px;
+}
+
+.recent-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recent-count {
+  font-family: var(--r-mono);
+  font-size: 11px;
+  color: var(--r-ink-mute);
+}
+
+.recent-empty {
+  padding: 18px 0;
+  color: var(--r-ink-mute);
+  font-size: 13px;
 }
 
 .table-list {
