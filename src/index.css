@@ -3484,6 +3484,16 @@ button {
     position: relative;
   }
 
+  /* Context bar is hidden by default on mobile and overlays absolutely
+     when opened, so chat-main only needs two rows: the scrolling
+     transcript and the composer. Without this, chat-main keeps its
+     3-row desktop template (auto / 1fr / auto), the transcript
+     auto-places into the first auto row, and the composer balloons
+     into the 1fr row. */
+  .chat-main {
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
   /* Compact one-row header on mobile so the conversation isn't pushed off
      the first screen. The verbose status / repo / commands strip is hidden
      by default and revealed via the info toggle as an overlay panel. */
