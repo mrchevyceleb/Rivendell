@@ -96,10 +96,10 @@ export const plEntries: PlEntry[] = [
 ];
 
 export const cronJobs: CronJob[] = [
-  { id: 'C-1', name: 'Kim dashboard prep', schedule: 'Mon/Fri 6:00 AM', target: 'pull-dashboard-data', status: 'active', lastRun: 'today 6:00 AM' },
-  { id: 'C-2', name: 'Threefold dashboard prep', schedule: 'Mon/Thu 6:00 AM', target: 'pull-dashboard-data', status: 'active', lastRun: 'Thu 6:00 AM' },
-  { id: 'C-3', name: 'Morning briefing', schedule: 'daily 7:00 AM', target: 'draft-email', status: 'active', lastRun: 'today 7:00 AM' },
-  { id: 'C-4', name: 'Operly support triage', schedule: 'hourly', target: 'triage-feedback-ticket', status: 'paused', lastRun: 'yesterday' },
+  { id: 'C-1', name: 'Kim dashboard prep', schedule: 'Mon/Fri 6:00 AM', target: 'pull-dashboard-data', status: 'active', runtime: 'railway', lastRun: 'today 6:00 AM' },
+  { id: 'C-2', name: 'Threefold dashboard prep', schedule: 'Mon/Thu 6:00 AM', target: 'pull-dashboard-data', status: 'active', runtime: 'railway', lastRun: 'Thu 6:00 AM' },
+  { id: 'C-3', name: 'Morning briefing', schedule: 'daily 7:00 AM', target: 'draft-email', status: 'active', runtime: 'railway', lastRun: 'today 7:00 AM' },
+  { id: 'C-4', name: 'Operly support triage', schedule: 'hourly', target: 'triage-feedback-ticket', status: 'paused', runtime: 'local', cwd: '/Users/mjohnst/samwise/KG-Apps/operly', permissionMode: 'bypassPermissions', lastRun: 'yesterday' },
 ];
 
 export const jobs: RivendellJob[] = [

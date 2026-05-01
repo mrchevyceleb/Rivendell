@@ -1762,6 +1762,7 @@ button {
 
 .cron-card {
   --cron-accent: var(--r-ink-faint);
+  position: relative;
   border: 1px solid color-mix(in srgb, var(--cron-accent) 32%, var(--r-line));
   border-left: 4px solid var(--cron-accent);
   border-radius: 8px;
@@ -1769,6 +1770,7 @@ button {
     linear-gradient(180deg, color-mix(in srgb, var(--cron-accent) 8%, transparent), transparent 48%),
     var(--r-bg-deep);
   padding: 14px;
+  overflow: hidden;
   cursor: pointer;
   display: grid;
   gap: 12px;
@@ -3416,6 +3418,370 @@ button {
 
   .markdown-content {
     padding: 20px 18px 92px;
+  }
+}
+
+/* ─── Forge: runtime toggle + tip card ────────────────────────────────────── */
+
+.runtime-toggle {
+  display: inline-flex;
+  border: 1px solid var(--r-line);
+  border-radius: 999px;
+  padding: 3px;
+  background: var(--r-bg-deep);
+  gap: 2px;
+}
+
+.runtime-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--r-ink-soft);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: transform 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.runtime-toggle button span {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.1;
+}
+
+.runtime-toggle button strong {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.runtime-toggle button small {
+  font-size: 10px;
+  color: var(--r-ink-mute);
+}
+
+.runtime-toggle button:hover {
+  color: var(--r-ink);
+  transform: translateY(-1px);
+}
+
+.runtime-toggle button.is-active {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--r-gold) 22%, transparent), transparent 70%),
+    var(--r-bg-soft);
+  color: var(--r-gold);
+  box-shadow: 0 0 0 1px var(--r-line-gold), 0 6px 18px -10px color-mix(in srgb, var(--r-gold) 50%, transparent);
+}
+
+.runtime-toggle.runtime-local button.is-active {
+  color: var(--r-elf-glow);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--r-elf-glow) 24%, transparent), transparent 70%),
+    var(--r-bg-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--r-elf-glow) 65%, var(--r-line)),
+    0 8px 22px -10px color-mix(in srgb, var(--r-elf-glow) 60%, transparent);
+}
+
+.runtime-toggle button.is-active small {
+  color: color-mix(in srgb, currentColor 70%, transparent);
+}
+
+.runtime-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 10px 0 6px;
+  padding: 12px 14px;
+  border: 1px dashed var(--r-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--r-bg-deep) 70%, transparent);
+}
+
+.runtime-toggle-row > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.runtime-toggle-row .small {
+  font-size: 11px;
+}
+
+.runtime-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--r-elf-glow) 8%, var(--r-bg-deep));
+  color: var(--r-ink-soft);
+  font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--r-elf-glow) 25%, var(--r-line));
+}
+
+.runtime-hint code {
+  background: color-mix(in srgb, var(--r-bg-soft) 80%, transparent);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10.5px;
+}
+
+.runtime-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--r-line);
+  background: var(--r-bg-deep);
+  color: var(--r-ink-soft);
+  letter-spacing: 0.02em;
+}
+
+.runtime-chip.runtime-railway {
+  border-color: color-mix(in srgb, var(--r-gold) 40%, var(--r-line));
+  color: var(--r-gold);
+}
+
+.runtime-chip.runtime-local {
+  border-color: color-mix(in srgb, var(--r-elf-glow) 50%, var(--r-line));
+  color: var(--r-elf-glow);
+}
+
+.cron-card.runtime-local {
+  --cron-runtime-tint: color-mix(in srgb, var(--r-elf-glow) 28%, transparent);
+}
+
+.cron-card.runtime-railway {
+  --cron-runtime-tint: color-mix(in srgb, var(--r-gold) 24%, transparent);
+}
+
+.cron-card::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  background: var(--cron-runtime-tint, transparent);
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+.runtime-filter {
+  display: inline-flex;
+  border: 1px solid var(--r-line);
+  border-radius: 999px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--r-bg-deep);
+}
+
+.runtime-filter button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--r-ink-soft);
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.runtime-filter button em {
+  font-style: normal;
+  color: var(--r-ink-mute);
+  font-size: 10px;
+  margin-left: 2px;
+}
+
+.runtime-filter button.is-active {
+  background: var(--r-bg-soft);
+  color: var(--r-gold);
+  box-shadow: inset 0 0 0 1px var(--r-line-gold);
+}
+
+.runtime-filter button.is-active em {
+  color: color-mix(in srgb, var(--r-gold) 70%, transparent);
+}
+
+.cron-detail-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cron-local-fields {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--r-elf-glow) 6%, var(--r-bg-deep));
+  border: 1px solid color-mix(in srgb, var(--r-elf-glow) 22%, var(--r-line));
+}
+
+.cron-local-fields label.cron-field {
+  margin-top: 0;
+}
+
+.cron-local-fields small {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  margin-top: 4px;
+  color: var(--r-ink-mute);
+}
+
+.cron-local-fields small.warn {
+  color: #d18b3a;
+}
+
+.form-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: #d18b3a;
+}
+
+.cron-presets button.is-active {
+  border-color: var(--r-line-gold);
+  color: var(--r-gold);
+  background: color-mix(in srgb, var(--r-gold) 14%, var(--r-bg-deep));
+}
+
+.r-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--r-line);
+  color: var(--r-ink-soft);
+  cursor: pointer;
+  transition: transform 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.r-icon-button:hover {
+  color: var(--r-gold);
+  border-color: var(--r-line-gold);
+  transform: translateY(-1px);
+}
+
+/* ─── Forge: runtime guide ────────────────────────────────────────────────── */
+
+.runtime-guide {
+  margin: 14px 0 18px;
+  padding: 18px 20px;
+  position: relative;
+  overflow: hidden;
+}
+
+.runtime-guide::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(220px 120px at 0% 0%, color-mix(in srgb, var(--r-gold) 14%, transparent), transparent 70%),
+    radial-gradient(220px 120px at 100% 100%, color-mix(in srgb, var(--r-elf-glow) 14%, transparent), transparent 70%);
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.runtime-guide > * {
+  position: relative;
+}
+
+.runtime-guide-lede {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.runtime-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.runtime-guide-card {
+  border: 1px solid var(--r-line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--r-bg-deep);
+}
+
+.runtime-guide-card:first-child {
+  border-color: color-mix(in srgb, var(--r-gold) 40%, var(--r-line));
+}
+
+.runtime-guide-card:last-child {
+  border-color: color-mix(in srgb, var(--r-elf-glow) 40%, var(--r-line));
+}
+
+.runtime-guide-card header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--r-ink);
+  margin-bottom: 8px;
+}
+
+.runtime-guide-card:first-child header {
+  color: var(--r-gold);
+}
+
+.runtime-guide-card:last-child header {
+  color: var(--r-elf-glow);
+}
+
+.runtime-guide-card ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  color: var(--r-ink-soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.runtime-guide-rule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--r-gold) 10%, var(--r-bg-deep));
+  border: 1px solid var(--r-line-gold);
+  color: var(--r-ink);
+  font-size: 12px;
+}
+
+.runtime-guide-rule em {
+  font-style: italic;
+  color: var(--r-ink-soft);
+}
+
+.runtime-guide-empty {
+  margin: 0;
+  height: 100%;
+}
+
+@media (max-width: 1080px) {
+  .runtime-guide-grid {
+    grid-template-columns: 1fr;
+  }
+  .cron-local-fields {
+    grid-template-columns: 1fr;
   }
 }
 

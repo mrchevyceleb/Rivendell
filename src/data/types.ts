@@ -130,6 +130,15 @@ export type PlEntry = {
   date: string;
 };
 
+export type CronRuntime = 'railway' | 'local';
+export type CronPermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'auto'
+  | 'bypassPermissions'
+  | 'dontAsk'
+  | 'plan';
+
 export type CronJob = {
   id: string;
   name: string;
@@ -142,6 +151,9 @@ export type CronJob = {
   deliveryChannel?: string;
   maxTokens?: number;
   status: 'active' | 'paused' | 'failed';
+  runtime: CronRuntime;
+  cwd?: string;
+  permissionMode?: CronPermissionMode;
   lastRun: string;
   lastRunAt?: string | null;
   lastRunStatus?: string | null;

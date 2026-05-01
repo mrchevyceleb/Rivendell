@@ -39,6 +39,9 @@ export type CronJob = {
   deliveryChannel?: string;
   maxTokens?: number;
   status: string;
+  runtime?: 'railway' | 'local';
+  cwd?: string;
+  permissionMode?: string;
   lastRun: string;
   lastRunAt?: string | null;
   lastRunStatus?: string | null;

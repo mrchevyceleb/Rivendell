@@ -1,13 +1,18 @@
 import {
   CalendarClock,
   Check,
+  Cloud,
   Clock3,
+  HelpCircle,
+  Laptop,
   Pencil,
   Pause,
   Play,
   Plus,
   RotateCcw,
   Save,
+  ShieldAlert,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
@@ -15,7 +20,7 @@ import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
-import type { CronJob } from '../data/types';
+import type { CronJob, CronPermissionMode, CronRuntime } from '../data/types';
 import { Button, Chip, EmptyState, Metric, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { useCronJobs } from '../hooks/useRoomData';
@@ -31,6 +36,9 @@ type CronDraft = {
   deliveryChannel: string;
   maxTokens: number;
   status: CronJob['status'];
+  runtime: CronRuntime;
+  cwd: string;
+  permissionMode: CronPermissionMode;
 };
 
 const emptyDraft: CronDraft = {
@@ -43,13 +51,25 @@ const emptyDraft: CronDraft = {
   deliveryChannel: 'log_only',
   maxTokens: 1024,
   status: 'paused',
+  runtime: 'railway',
+  cwd: '',
+  permissionMode: 'default',
 };
 
 const schedulePresets = [
+  { label: 'Every 5 min', value: '*/5 * * * *' },
+  { label: 'Every 15 min', value: '*/15 * * * *' },
   { label: 'Hourly', value: '0 * * * *' },
   { label: 'Daily 6 AM', value: '0 6 * * *' },
   { label: 'Weekdays 9 AM', value: '0 9 * * 1-5' },
-  { label: 'Mon/Fri 7 AM', value: '0 7 * * 1,5' },
+  { label: 'M/F 7 AM', value: '0 7 * * 1,5' },
+];
+
+const permissionModes: { value: CronPermissionMode; label: string; hint: string }[] = [
+  { value: 'default', label: 'default', hint: 'Honour your local settings.json' },
+  { value: 'acceptEdits', label: 'acceptEdits', hint: 'Auto-accept edits, prompt on bash' },
+  { value: 'bypassPermissions', label: 'bypassPermissions', hint: 'Unattended — no prompts' },
+  { value: 'plan', label: 'plan', hint: 'Plan only, never execute' },
 ];
 
 export function Forge() {
@@ -59,17 +79,29 @@ export function Forge() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<CronDraft>(emptyDraft);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [showGuide, setShowGuide] = useState(false);
+  const [filterRuntime, setFilterRuntime] = useState<'all' | CronRuntime>('all');
+
+  const filteredJobs = useMemo(
+    () => (filterRuntime === 'all' ? jobs : jobs.filter((job) => (job.runtime || 'railway') === filterRuntime)),
+    [jobs, filterRuntime],
+  );
 
   const selected = useMemo(() => {
-    if (!jobs.length) return null;
-    return jobs.find((job) => job.id === selectedId) ?? jobs[0];
-  }, [jobs, selectedId]);
+    if (!filteredJobs.length) return null;
+    return filteredJobs.find((job) => job.id === selectedId) ?? filteredJobs[0];
+  }, [filteredJobs, selectedId]);
 
   const isCreating = editingId === 'new';
   const editing = isCreating ? null : jobs.find((job) => job.id === editingId) ?? null;
   const activeCount = jobs.filter((job) => job.status === 'active').length;
   const pausedCount = jobs.filter((job) => job.status === 'paused').length;
   const failedCount = jobs.filter((job) => job.status === 'failed').length;
+  const localCount = jobs.filter((job) => job.runtime === 'local').length;
+  const railwayCount = jobs.length - localCount;
+
+  const draftIsLocalAi = draft.runtime === 'local' && draft.actionType === 'ai_prompt';
+  const cwdMissing = draftIsLocalAi && !draft.cwd.trim();
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['cron'] });
@@ -95,6 +127,7 @@ export function Forge() {
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (!draft.name.trim()) return;
+    if (cwdMissing) return;
     const payload = normalizeDraft(draft);
     const saved = await apiJson<CronJob>(isCreating ? '/api/cron' : `/api/cron/${encodeURIComponent(editingId || '')}`, {
       method: isCreating ? 'POST' : 'PATCH',
@@ -146,9 +179,13 @@ export function Forge() {
       <RoomHeader
         eyebrow="The Forge"
         title="Cron jobs"
-        subtitle={`${jobs.length} schedules · ${activeCount} active · ${pausedCount} paused${failedCount ? ` · ${failedCount} failed` : ''}.`}
+        subtitle={`${jobs.length} schedules · ${activeCount} active · ${pausedCount} paused${failedCount ? ` · ${failedCount} failed` : ''} · ${railwayCount} on Railway · ${localCount} on Bag End.`}
         actions={
           <>
+            <Button tone="ghost" onClick={() => setShowGuide((value) => !value)} title="Which runtime should I pick?">
+              <HelpCircle size={15} />
+              {showGuide ? 'Hide tips' : 'Tips'}
+            </Button>
             <Button tone="ghost" onClick={() => refetch()}>
               <RotateCcw size={15} />
               Refresh
@@ -161,10 +198,14 @@ export function Forge() {
         }
       />
 
+      {showGuide ? <RuntimeGuide onClose={() => setShowGuide(false)} /> : null}
+
       <div className="forge-summary">
         <Metric label="Active" value={activeCount} tone="emerald" />
         <Metric label="Paused" value={pausedCount} tone="gold" />
         <Metric label="Failed" value={failedCount} tone="rose" />
+        <Metric label="On Railway" value={railwayCount} tone="elf" />
+        <Metric label="On Bag End" value={localCount} tone="gold" />
       </div>
 
       <div className="forge-studio">
@@ -174,13 +215,43 @@ export function Forge() {
               <p className="r-eyebrow-gold">Schedules</p>
               <h2>Existing jobs</h2>
             </div>
-            <span>{jobs.length}</span>
+            <div className="runtime-filter" role="tablist" aria-label="Filter by runtime">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filterRuntime === 'all'}
+                className={filterRuntime === 'all' ? 'is-active' : ''}
+                onClick={() => setFilterRuntime('all')}
+              >
+                All <em>{jobs.length}</em>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filterRuntime === 'railway'}
+                className={filterRuntime === 'railway' ? 'is-active' : ''}
+                onClick={() => setFilterRuntime('railway')}
+                title="Always-on cloud scheduler"
+              >
+                <Cloud size={12} /> Railway <em>{railwayCount}</em>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filterRuntime === 'local'}
+                className={filterRuntime === 'local' ? 'is-active' : ''}
+                onClick={() => setFilterRuntime('local')}
+                title="Bag End local launchd runner"
+              >
+                <Laptop size={12} /> Bag End <em>{localCount}</em>
+              </button>
+            </div>
           </div>
           <div className="cron-card-list">
-            {jobs.length ? (
-              jobs.map((job) => (
+            {filteredJobs.length ? (
+              filteredJobs.map((job) => (
                 <article
-                  className={`cron-card status-${job.status} ${selected?.id === job.id ? 'is-selected' : ''}`}
+                  className={`cron-card status-${job.status} runtime-${job.runtime || 'railway'} ${selected?.id === job.id ? 'is-selected' : ''}`}
                   key={job.id}
                   onClick={() => setSelectedId(job.id)}
                 >
@@ -195,6 +266,7 @@ export function Forge() {
                     <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>
                       {job.status}
                     </Chip>
+                    <RuntimeChip runtime={job.runtime} />
                     <span>
                       <CalendarClock size={13} />
                       {job.schedule}
@@ -221,7 +293,12 @@ export function Forge() {
                 </article>
               ))
             ) : (
-              <EmptyState title="No cron jobs yet" body="Create a schedule to have Elrond run recurring work." />
+              <EmptyState
+                title={filterRuntime === 'all' ? 'No cron jobs yet' : `No ${filterRuntime === 'local' ? 'Bag End' : 'Railway'} jobs yet`}
+                body={filterRuntime === 'local'
+                  ? 'Create a local schedule for jobs that need a real repo and Claude Code Opus.'
+                  : 'Create a schedule to have Elrond run recurring work.'}
+              />
             )}
           </div>
         </section>
@@ -239,6 +316,36 @@ export function Forge() {
                 </button>
               </div>
 
+              <div className="runtime-toggle-row">
+                <div>
+                  <p className="r-eyebrow-gold">Runtime</p>
+                  <p className="muted small">Where this schedule fires.</p>
+                </div>
+                <RuntimeToggle
+                  value={draft.runtime}
+                  onChange={(runtime) => setDraft({ ...draft, runtime })}
+                />
+                <button
+                  type="button"
+                  className="r-icon-button"
+                  onClick={() => setShowGuide(true)}
+                  title="Which runtime should I pick?"
+                  aria-label="Runtime help"
+                >
+                  <HelpCircle size={14} />
+                </button>
+              </div>
+
+              {draftIsLocalAi ? (
+                <p className="runtime-hint">
+                  <Sparkles size={12} /> Bag End jobs run <code>claude -p</code> in <code>{draft.cwd || '<cwd>'}</code> with full Opus + repo access.
+                </p>
+              ) : draft.runtime === 'railway' ? (
+                <p className="runtime-hint">
+                  <Cloud size={12} /> Railway jobs run in-process on the always-on Railway server. Best for time-critical and stateless work.
+                </p>
+              ) : null}
+
               <div className="cron-form-grid">
                 <label>
                   Name
@@ -250,15 +357,28 @@ export function Forge() {
                 </label>
                 <label>
                   Action type
-                  <input value={draft.actionType} onChange={(event) => setDraft({ ...draft, actionType: event.target.value })} placeholder="ai_prompt" />
+                  <select value={draft.actionType} onChange={(event) => setDraft({ ...draft, actionType: event.target.value })}>
+                    <option value="ai_prompt">ai_prompt — Claude does the work</option>
+                    <option value="tool_call">tool_call — call an MCP tool directly</option>
+                    <option value="webhook">webhook — POST to a URL</option>
+                  </select>
                 </label>
                 <label>
                   Tool name
-                  <input value={draft.toolName} onChange={(event) => setDraft({ ...draft, toolName: event.target.value })} placeholder="Optional MCP tool" />
+                  <input
+                    value={draft.toolName}
+                    onChange={(event) => setDraft({ ...draft, toolName: event.target.value })}
+                    placeholder={draft.actionType === 'tool_call' ? 'gmail_send' : 'Optional MCP tool'}
+                    disabled={draft.actionType === 'webhook'}
+                  />
                 </label>
                 <label>
                   Delivery
-                  <input value={draft.deliveryChannel} onChange={(event) => setDraft({ ...draft, deliveryChannel: event.target.value })} placeholder="log_only" />
+                  <select value={draft.deliveryChannel} onChange={(event) => setDraft({ ...draft, deliveryChannel: event.target.value })}>
+                    <option value="log_only">log_only — silent, just records</option>
+                    <option value="telegram">telegram — DM Matt</option>
+                    <option value="email">email — send to Matt</option>
+                  </select>
                 </label>
                 <label>
                   Max tokens
@@ -268,11 +388,52 @@ export function Forge() {
 
               <div className="cron-presets" aria-label="Schedule presets">
                 {schedulePresets.map((preset) => (
-                  <button type="button" key={preset.value} onClick={() => setDraft({ ...draft, schedule: preset.value })}>
+                  <button
+                    type="button"
+                    key={preset.value}
+                    className={draft.schedule === preset.value ? 'is-active' : ''}
+                    onClick={() => setDraft({ ...draft, schedule: preset.value })}
+                  >
                     {preset.label}
                   </button>
                 ))}
               </div>
+
+              {draftIsLocalAi ? (
+                <div className="cron-local-fields">
+                  <label className="cron-field">
+                    Working directory
+                    <input
+                      value={draft.cwd}
+                      onChange={(event) => setDraft({ ...draft, cwd: event.target.value })}
+                      placeholder="/Users/mjohnst/samwise/KG-Apps/operly"
+                    />
+                    <small className="muted">
+                      Required. Absolute path on Bag End where <code>claude -p</code> will run. Must be a real checkout the job can edit.
+                    </small>
+                  </label>
+                  <label className="cron-field">
+                    Permission mode
+                    <select
+                      value={draft.permissionMode}
+                      onChange={(event) => setDraft({ ...draft, permissionMode: event.target.value as CronPermissionMode })}
+                    >
+                      {permissionModes.map((mode) => (
+                        <option key={mode.value} value={mode.value}>
+                          {mode.label} — {mode.hint}
+                        </option>
+                      ))}
+                    </select>
+                    {draft.permissionMode === 'bypassPermissions' ? (
+                      <small className="warn">
+                        <ShieldAlert size={11} /> Unattended bypass. The CLI will run any tool/command without prompting. Only use for jobs you trust completely.
+                      </small>
+                    ) : (
+                      <small className="muted">Unattended jobs that need to edit + run shell usually want <code>bypassPermissions</code>.</small>
+                    )}
+                  </label>
+                </div>
+              ) : null}
 
               <label className="cron-field">
                 Description
@@ -280,7 +441,14 @@ export function Forge() {
               </label>
               <label className="cron-field">
                 Prompt or payload
-                <textarea value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} placeholder="Describe the recurring work." rows={7} />
+                <textarea
+                  value={draft.prompt}
+                  onChange={(event) => setDraft({ ...draft, prompt: event.target.value })}
+                  placeholder={draft.runtime === 'local'
+                    ? 'Give Claude clear, scoped work it can complete in a single run. Reference files via paths, not /commands.'
+                    : 'Describe the recurring work. Be specific about output format and length.'}
+                  rows={7}
+                />
               </label>
               <label className="cron-toggle">
                 <input
@@ -290,26 +458,29 @@ export function Forge() {
                 />
                 Active immediately
               </label>
+              {cwdMissing ? (
+                <p className="form-error">
+                  <ShieldAlert size={12} /> Bag End ai_prompt jobs need a working directory.
+                </p>
+              ) : null}
               <div className="cron-editor-actions">
                 <Button tone="ghost" type="button" onClick={closeEditor}>Cancel</Button>
-                <Button tone="gold" type="submit">
+                <Button tone="gold" type="submit" disabled={cwdMissing}>
                   <Save size={14} />
                   Save job
                 </Button>
               </div>
             </form>
           ) : selected ? (
-            <CronDetails job={selected} onEdit={() => startEdit(selected)} onRun={() => runNow(selected)} onToggle={() => toggle(selected)} busy={busyId === selected.id} />
+            <CronDetails
+              job={selected}
+              onEdit={() => startEdit(selected)}
+              onRun={() => runNow(selected)}
+              onToggle={() => toggle(selected)}
+              busy={busyId === selected.id}
+            />
           ) : (
-            <Surface className="cron-empty-detail">
-              <p className="r-eyebrow-gold">Launchd</p>
-              <h2>24/7 local service</h2>
-              <p className="muted">
-                Rivendell runs locally on this Mac at <code>:8091</code>. The cron jobs above are the recurring work
-                layer behind the assistant-mcp system.
-              </p>
-              <pre className="code-block">launchctl list | grep rivendell</pre>
-            </Surface>
+            <RuntimeGuide variant="empty" onClose={() => setShowGuide(false)} />
           )}
         </aside>
       </div>
@@ -331,7 +502,10 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
           <p className="r-eyebrow-gold">Selected job</p>
           <h2>{job.name}</h2>
         </div>
-        <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>{job.status}</Chip>
+        <div className="cron-detail-chips">
+          <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>{job.status}</Chip>
+          <RuntimeChip runtime={job.runtime} />
+        </div>
       </div>
       <p className="cron-description">{job.description || 'No description saved.'}</p>
       <dl className="cron-facts">
@@ -351,6 +525,18 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
           <dt>Delivery</dt>
           <dd>{job.deliveryChannel || 'log_only'}</dd>
         </div>
+        {job.runtime === 'local' && job.cwd ? (
+          <div>
+            <dt>Working dir</dt>
+            <dd><code>{job.cwd}</code></dd>
+          </div>
+        ) : null}
+        {job.runtime === 'local' && job.permissionMode ? (
+          <div>
+            <dt>Permissions</dt>
+            <dd><code>{job.permissionMode}</code></dd>
+          </div>
+        ) : null}
         <div>
           <dt>Last run</dt>
           <dd>{job.lastRunAt ? `${timeAgo(job.lastRunAt)} ago` : job.lastRun}</dd>
@@ -390,6 +576,106 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
   );
 }
 
+function RuntimeToggle({ value, onChange }: { value: CronRuntime; onChange: (value: CronRuntime) => void }) {
+  return (
+    <div className={`runtime-toggle runtime-${value}`} role="radiogroup" aria-label="Runtime">
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === 'railway'}
+        className={value === 'railway' ? 'is-active' : ''}
+        onClick={() => onChange('railway')}
+      >
+        <Cloud size={14} />
+        <span>
+          <strong>Railway</strong>
+          <small>always-on cloud</small>
+        </span>
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === 'local'}
+        className={value === 'local' ? 'is-active' : ''}
+        onClick={() => onChange('local')}
+      >
+        <Laptop size={14} />
+        <span>
+          <strong>Bag End</strong>
+          <small>local Mac · Claude CLI</small>
+        </span>
+      </button>
+    </div>
+  );
+}
+
+function RuntimeChip({ runtime }: { runtime?: CronRuntime }) {
+  const value = runtime || 'railway';
+  if (value === 'local') {
+    return (
+      <span className="runtime-chip runtime-local" title="Runs on Bag End via launchd. Uses Claude Code CLI.">
+        <Laptop size={12} /> Bag End
+      </span>
+    );
+  }
+  return (
+    <span className="runtime-chip runtime-railway" title="Runs in-process on the Railway scheduler.">
+      <Cloud size={12} /> Railway
+    </span>
+  );
+}
+
+function RuntimeGuide({ variant, onClose }: { variant?: 'empty' | 'banner'; onClose: () => void }) {
+  return (
+    <Surface className={`runtime-guide ${variant === 'empty' ? 'runtime-guide-empty' : 'runtime-guide-banner'}`}>
+      <div className="section-head">
+        <div>
+          <p className="r-eyebrow-gold">How to choose a runtime</p>
+          <h2>Railway vs Bag End</h2>
+        </div>
+        {variant !== 'empty' ? (
+          <button type="button" className="r-icon-button" onClick={onClose} title="Hide tips">
+            <X size={14} />
+          </button>
+        ) : null}
+      </div>
+      <p className="muted runtime-guide-lede">
+        Default to Railway. Move a job to Bag End only when one of the local-only powers actually changes the outcome.
+      </p>
+      <div className="runtime-guide-grid">
+        <div className="runtime-guide-card">
+          <header>
+            <Cloud size={14} />
+            <strong>Pick Railway when…</strong>
+          </header>
+          <ul>
+            <li>Job is time-critical (every X min, can't miss a fire).</li>
+            <li>It's a pure tool call or webhook — no reasoning.</li>
+            <li>It handles inbound user data (SMS, webhooks, polls).</li>
+            <li>A 4-hour Mac outage would break something.</li>
+          </ul>
+        </div>
+        <div className="runtime-guide-card">
+          <header>
+            <Laptop size={14} />
+            <strong>Pick Bag End when…</strong>
+          </header>
+          <ul>
+            <li>Job needs a real checkout — git, gh, npm test, edit files.</li>
+            <li>Heavy reasoning that benefits from local Opus.</li>
+            <li>Needs MCP servers only configured locally (Codex, etc.).</li>
+            <li>Misses are tolerable if the Mac sleeps.</li>
+          </ul>
+        </div>
+      </div>
+      <p className="runtime-guide-rule">
+        <Sparkles size={12} /> Gut check: <em>"Could a 4-hour Mac outage break this?"</em> → Railway.&nbsp;
+        <em>"Does this need a real repo or smart reasoning?"</em> → Bag End.
+      </p>
+    </Surface>
+  );
+}
+
 function draftFromJob(job: CronJob): CronDraft {
   return {
     name: job.name,
@@ -401,10 +687,14 @@ function draftFromJob(job: CronJob): CronDraft {
     deliveryChannel: job.deliveryChannel || 'log_only',
     maxTokens: job.maxTokens || 1024,
     status: job.status === 'failed' ? 'paused' : job.status,
+    runtime: job.runtime || 'railway',
+    cwd: job.cwd || '',
+    permissionMode: job.permissionMode || 'default',
   };
 }
 
 function normalizeDraft(draft: CronDraft): Partial<CronJob> {
+  const isLocalAi = draft.runtime === 'local' && draft.actionType === 'ai_prompt';
   return {
     name: draft.name.trim(),
     description: draft.description.trim(),
@@ -416,5 +706,8 @@ function normalizeDraft(draft: CronDraft): Partial<CronJob> {
     deliveryChannel: draft.deliveryChannel.trim() || 'log_only',
     maxTokens: Number(draft.maxTokens) || 1024,
     status: draft.status,
+    runtime: draft.runtime,
+    cwd: isLocalAi ? draft.cwd.trim() : undefined,
+    permissionMode: isLocalAi ? draft.permissionMode : undefined,
   };
 }

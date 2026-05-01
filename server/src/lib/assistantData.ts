@@ -36,6 +36,9 @@ export type RivendellFamilyItem = {
   updatedAt?: string;
 };
 
+export type CronRuntime = 'railway' | 'local';
+export type CronPermissionMode = 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk' | 'plan';
+
 export type RivendellCronJob = {
   id: string;
   name: string;
@@ -48,6 +51,9 @@ export type RivendellCronJob = {
   deliveryChannel?: string;
   maxTokens?: number;
   status: 'active' | 'paused' | 'failed';
+  runtime: CronRuntime;
+  cwd?: string;
+  permissionMode?: CronPermissionMode;
   lastRun: string;
   lastRunAt?: string | null;
   lastRunStatus?: string | null;
@@ -104,6 +110,7 @@ type AdminCron = {
   action_type?: string | null;
   action_config?: Record<string, unknown> | null;
   enabled?: boolean | null;
+  runtime?: string | null;
   last_run_at?: string | null;
   last_run_status?: string | null;
   last_run_error?: string | null;
@@ -303,6 +310,7 @@ export async function updateAdminCronJob(id: string, updates: Partial<RivendellC
   if (updates.actionType !== undefined) payload.action_type = updates.actionType;
   if (updates.deliveryChannel !== undefined) payload.delivery_channel = updates.deliveryChannel;
   if (updates.status !== undefined) payload.enabled = updates.status === 'active';
+  if (updates.runtime !== undefined) payload.runtime = updates.runtime;
   const actionConfig = actionConfigFromCron(updates);
   if (actionConfig) payload.action_config = actionConfig;
 
@@ -324,6 +332,7 @@ export async function createAdminCronJob(input: Partial<RivendellCronJob>): Prom
       action_config: actionConfigFromCron(input) || { prompt: 'Rivendell scheduled task', max_tokens: 1024 },
       delivery_channel: input.deliveryChannel || 'log_only',
       enabled: input.status !== 'paused',
+      runtime: input.runtime || 'railway',
     }),
   });
   return mapCron(data.job);
@@ -420,6 +429,11 @@ function mapCron(job: AdminCron): RivendellCronJob {
   const prompt = typeof job.action_config?.prompt === 'string' ? job.action_config.prompt : undefined;
   const toolName = typeof job.action_config?.tool_name === 'string' ? job.action_config.tool_name : undefined;
   const maxTokens = typeof job.action_config?.max_tokens === 'number' ? job.action_config.max_tokens : undefined;
+  const cwd = typeof job.action_config?.cwd === 'string' ? job.action_config.cwd : undefined;
+  const permissionMode = typeof job.action_config?.permission_mode === 'string'
+    ? (job.action_config.permission_mode as CronPermissionMode)
+    : undefined;
+  const runtime: CronRuntime = job.runtime === 'local' ? 'local' : 'railway';
   const toolTarget =
     toolName || (actionType === 'ai_prompt' && prompt ? 'AI prompt' : actionType || 'scheduled job');
   return {
@@ -434,6 +448,9 @@ function mapCron(job: AdminCron): RivendellCronJob {
     deliveryChannel: job.delivery_channel || undefined,
     maxTokens,
     status: job.last_run_status === 'failed' ? 'failed' : job.enabled === false ? 'paused' : 'active',
+    runtime,
+    cwd,
+    permissionMode,
     lastRun: job.last_run_at ? timeAgo(job.last_run_at) : 'never',
     lastRunAt: job.last_run_at || null,
     lastRunStatus: job.last_run_status || null,
@@ -448,6 +465,11 @@ function actionConfigFromCron(input: Partial<RivendellCronJob>): Record<string, 
   if (input.prompt !== undefined) config.prompt = input.prompt;
   if (input.toolName !== undefined) config.tool_name = input.toolName;
   if (input.maxTokens !== undefined) config.max_tokens = Number(input.maxTokens) || 1024;
+  // Local-runtime ai_prompt jobs need cwd (where claude -p runs) and an
+  // optional permission_mode. Stored inside action_config because that's
+  // where the cron engine reads them.
+  if (input.cwd !== undefined) config.cwd = input.cwd;
+  if (input.permissionMode !== undefined) config.permission_mode = input.permissionMode;
   return Object.keys(config).length ? config : null;
 }
 
