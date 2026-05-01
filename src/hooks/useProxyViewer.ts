@@ -1,0 +1,24 @@
+import { createContext, useContext } from 'react';
+
+export type ProxyViewerRequest =
+  | { source: 'doc'; path: string; title?: string }
+  | { source: 'artifact'; id: string; title?: string }
+  | {
+      source: 'inline';
+      title: string;
+      kind: 'html' | 'markdown' | 'text';
+      content: string;
+    };
+
+export type ProxyViewerContextValue = {
+  open: (request: ProxyViewerRequest) => void;
+  close: () => void;
+};
+
+export const ProxyViewerContext = createContext<ProxyViewerContextValue | null>(null);
+
+export function useProxyViewer(): ProxyViewerContextValue {
+  const value = useContext(ProxyViewerContext);
+  if (!value) throw new Error('useProxyViewer must be called inside <ProxyViewerProvider>');
+  return value;
+}

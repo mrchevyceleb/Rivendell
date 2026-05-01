@@ -23,6 +23,9 @@ import { useLive } from '../chat/hooks/useLive';
 import { useRepos } from '../chat/hooks/useRepos';
 import { useStickyScroll } from '../chat/hooks/useStickyScroll';
 import { Markdown } from '../chat/components/primitives/Markdown';
+import { ArtifactCard } from '../chat/components/blocks/ArtifactCard';
+import { DocLinkCard } from '../chat/components/blocks/DocLinkCard';
+import { FolderLinkCard } from '../chat/components/blocks/FolderLinkCard';
 import { Button, Chip } from '../components/Primitives';
 import { useScribeEvents } from '../hooks/useRoomData';
 import { useScribeSocket } from '../hooks/useScribeSocket';
@@ -34,7 +37,6 @@ type ActiveChat = { cli: CompanionId; repoPath: string };
 
 const ACTIVE_KEY = 'rivendell:hall-chat-active';
 const SCRIBE_COLLAPSED_KEY = 'rivendell:hall-scribe-collapsed';
-const ELROND_WORKSPACE_PATH = '/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB';
 
 const companionLabel: Record<CompanionId, string> = {
   assistant: 'Elrond',
@@ -85,21 +87,20 @@ export function Hall() {
 
   useEffect(() => {
     if (!repos.length || repo) return;
-    const elrondWorkspace = repos.find((item) => item.path === ELROND_WORKSPACE_PATH);
-    const restored = restoreRef.current === ELROND_WORKSPACE_PATH
+    const assistantHub = repos.find((item) => item.isAssistantHub);
+    const restored = restoreRef.current
       ? repos.find((item) => item.path === restoreRef.current)
       : undefined;
-    const assistantHub = repos.find((item) => item.isAssistantHub);
-    const nextRepo = elrondWorkspace ?? restored ?? assistantHub ?? repos[0];
+    const nextRepo = assistantHub ?? restored ?? repos[0];
     setRepo(nextRepo);
     restoreRef.current = null;
   }, [repos, repo]);
 
   useEffect(() => {
     if (!repos.length) return;
-    const elrondWorkspace = repos.find((item) => item.path === ELROND_WORKSPACE_PATH) ?? repos.find((item) => item.isAssistantHub);
-    if (elrondWorkspace && repo?.path !== elrondWorkspace.path) {
-      setRepo(elrondWorkspace);
+    const assistantHub = repos.find((item) => item.isAssistantHub);
+    if (assistantHub && repo?.path !== assistantHub.path) {
+      setRepo(assistantHub);
     }
   }, [repos, repo?.path]);
 
@@ -470,6 +471,27 @@ function ChatBlockView({ block, companion }: { block: ChatBlock; companion: Comp
             </div>
             {block.args ? <pre>{block.args}</pre> : null}
             {block.result ? <p>{block.result}</p> : null}
+          </div>
+        </div>
+      </article>
+    );
+  }
+
+  if (block.kind === 'doc-link' || block.kind === 'folder-link' || block.kind === 'artifact') {
+    return (
+      <article className="chat-message assistant-message">
+        <AgentAvatar companion={companion} />
+        <div>
+          <header>
+            <strong>{companionLabel[companion]}</strong>
+            <span>{formatTime(block.ts)}</span>
+          </header>
+          <div className="assistant-text">
+            {block.kind === 'doc-link' ? <DocLinkCard path={block.path} title={block.title} /> : null}
+            {block.kind === 'folder-link' ? <FolderLinkCard path={block.path} title={block.title} /> : null}
+            {block.kind === 'artifact' ? (
+              <ArtifactCard artifactId={block.artifactId} artifactKind={block.artifactKind} title={block.title} />
+            ) : null}
           </div>
         </div>
       </article>

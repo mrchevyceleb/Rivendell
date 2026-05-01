@@ -1,8 +1,9 @@
-import { Play, Plus, RotateCcw, XCircle } from 'lucide-react';
+import { Eye, Play, Plus, RotateCcw, XCircle } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { apiJson } from '../data/api';
 import type { RivendellJob, RivendellJobStatus } from '../data/types';
 import { useWeavings } from '../hooks/useRoomData';
+import { useProxyViewer } from '../hooks/useProxyViewer';
 import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { timeAgo } from '../utils/format';
@@ -20,6 +21,7 @@ const skills = [
 
 export function Weavings() {
   const { data: jobs = [], refetch } = useWeavings();
+  const proxy = useProxyViewer();
   const [skill, setSkill] = useState(skills[0]);
   const [prompt, setPrompt] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -89,32 +91,89 @@ export function Weavings() {
               <code>{grouped[status]?.length ?? 0}</code>
             </header>
             <div className="stack-list">
-              {(grouped[status] ?? []).map((job) => (
-                <article className="job-card" key={job.id}>
-                  <div className="job-card-head">
-                    <Chip tone={status === 'failed' ? 'rose' : status === 'done' ? 'emerald' : status === 'running' ? 'elf' : 'gold'}>
-                      {job.skill}
-                    </Chip>
-                    <code>{timeAgo(job.created_at)}</code>
-                  </div>
-                  <p>{job.prompt || job.source_ref || job.source || 'No prompt stored.'}</p>
-                  {job.needs_review_reason ? <small>{job.needs_review_reason}</small> : null}
-                  <div className="task-actions">
-                    <button type="button" onClick={() => void retry(job.id)} disabled={job.id.startsWith('sam:')}>
-                      <Play size={13} />
-                      Retry
-                    </button>
-                    <button type="button" onClick={() => void cancel(job.id)} disabled={job.id.startsWith('sam:')}>
-                      <XCircle size={13} />
-                      Cancel
-                    </button>
-                  </div>
-                </article>
-              ))}
+              {(grouped[status] ?? []).map((job) => {
+                const artifactId = jobArtifactId(job);
+                const resultPreview = jobResultPreview(job);
+                const onView = () => {
+                  if (artifactId) {
+                    proxy.open({ source: 'artifact', id: artifactId, title: jobTitle(job) });
+                    return;
+                  }
+                  if (!resultPreview) return;
+                  proxy.open({
+                    source: 'inline',
+                    title: jobTitle(job),
+                    kind: resultPreview.kind,
+                    content: resultPreview.content,
+                  });
+                };
+                const canView = Boolean(artifactId || resultPreview);
+                return (
+                  <article className="job-card" key={job.id}>
+                    <div className="job-card-head">
+                      <Chip tone={status === 'failed' ? 'rose' : status === 'done' ? 'emerald' : status === 'running' ? 'elf' : 'gold'}>
+                        {job.skill}
+                      </Chip>
+                      <code>{timeAgo(job.created_at)}</code>
+                    </div>
+                    <p>{job.prompt || job.source_ref || job.source || 'No prompt stored.'}</p>
+                    {job.needs_review_reason ? <small>{job.needs_review_reason}</small> : null}
+                    <div className="task-actions">
+                      {canView ? (
+                        <button type="button" onClick={onView} title="View the result in the in-app viewer">
+                          <Eye size={13} />
+                          View result
+                        </button>
+                      ) : null}
+                      <button type="button" onClick={() => void retry(job.id)} disabled={job.id.startsWith('sam:')}>
+                        <Play size={13} />
+                        Retry
+                      </button>
+                      <button type="button" onClick={() => void cancel(job.id)} disabled={job.id.startsWith('sam:')}>
+                        <XCircle size={13} />
+                        Cancel
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           </section>
         ))}
       </div>
     </div>
   );
+}
+
+function jobArtifactId(job: RivendellJob): string | null {
+  if (!job.result || typeof job.result !== 'object') return null;
+  const id = (job.result as Record<string, unknown>).artifactId;
+  return typeof id === 'string' && id ? id : null;
+}
+
+function jobTitle(job: RivendellJob): string {
+  const stem = (job.prompt || job.source_ref || job.skill || 'Job result').slice(0, 80);
+  return `${job.skill} · ${stem}`;
+}
+
+function jobResultPreview(job: RivendellJob): { kind: 'html' | 'markdown' | 'text'; content: string } | null {
+  if (job.result == null) return null;
+  if (typeof job.result === 'string') {
+    if (job.result.trim() === '') return null;
+    const looksHtml = /<\/?\w+[\s>]/.test(job.result);
+    return { kind: looksHtml ? 'html' : 'text', content: job.result };
+  }
+  if (typeof job.result === 'object') {
+    const r = job.result as Record<string, unknown>;
+    const output = typeof r.output === 'string' ? r.output : null;
+    const summary = typeof r.summary === 'string' ? r.summary : null;
+    const html = typeof r.html === 'string' ? r.html : null;
+    const markdown = typeof r.markdown === 'string' ? r.markdown : null;
+    if (html) return { kind: 'html', content: html };
+    if (markdown) return { kind: 'markdown', content: markdown };
+    if (output) return { kind: 'text', content: output };
+    if (summary) return { kind: 'text', content: summary };
+    return { kind: 'text', content: JSON.stringify(job.result, null, 2) };
+  }
+  return null;
 }

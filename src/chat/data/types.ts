@@ -66,4 +66,32 @@ export type ChatBlock =
       turnId?: string;
       cbIndex?: number;
       open?: boolean;
+    }
+  | {
+      kind: 'doc-link';
+      id: string;
+      ts: number;
+      path: string;
+      title?: string;
+      turnId?: string;
+      cbIndex?: number;
+    }
+  | {
+      kind: 'folder-link';
+      id: string;
+      ts: number;
+      path: string;
+      title?: string;
+      turnId?: string;
+      cbIndex?: number;
+    }
+  | {
+      kind: 'artifact';
+      id: string;
+      ts: number;
+      artifactId: string;
+      artifactKind: 'html' | 'markdown' | 'text';
+      title: string;
+      turnId?: string;
+      cbIndex?: number;
     };

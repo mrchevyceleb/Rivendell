@@ -42,6 +42,7 @@ export type EmailItem = {
   unread: boolean;
   status: 'needs_reply' | 'drafted' | 'filed' | 'watching';
   draftBody?: string;
+  artifactId?: string;
   updatedAt?: string;
 };
 
@@ -100,6 +101,7 @@ export type FileTreeNode = {
 
 export type WorkspaceTreeResponse = {
   root: string;
+  displayPath: string;
   tree: FileTreeNode;
   fileCount: number;
   dirCount: number;

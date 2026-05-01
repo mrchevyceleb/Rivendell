@@ -13,6 +13,7 @@ import { Scribe } from './rooms/Scribe';
 import { Tidings } from './rooms/Tidings';
 import { Weavings } from './rooms/Weavings';
 import { Layout } from './shell/Layout';
+import { ProxyViewerProvider } from './components/ProxyViewer';
 import { rooms } from './data/mock';
 import type { RoomKey } from './data/types';
 
@@ -86,16 +87,18 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <Layout
-        active={active}
-        onNavigate={navigate}
-        theme={theme}
-        onThemeChange={setTheme}
-        collapsed={collapsed}
-        onCollapsedChange={setCollapsed}
-      >
-        <RoomSwitch active={active} />
-      </Layout>
+      <ProxyViewerProvider>
+        <Layout
+          active={active}
+          onNavigate={navigate}
+          theme={theme}
+          onThemeChange={setTheme}
+          collapsed={collapsed}
+          onCollapsedChange={setCollapsed}
+        >
+          <RoomSwitch active={active} />
+        </Layout>
+      </ProxyViewerProvider>
     </QueryClientProvider>
   );
 }

@@ -6,6 +6,9 @@ import {
   ChatInput,
 } from '../primitives/chat';
 import { Markdown } from '../primitives/Markdown';
+import { ArtifactCard } from '../blocks/ArtifactCard';
+import { DocLinkCard } from '../blocks/DocLinkCard';
+import { FolderLinkCard } from '../blocks/FolderLinkCard';
 import { useStickyScroll } from '../../hooks/useStickyScroll';
 import type { ChatBlock, CommandEntry } from '../../data/types';
 import type { CommandSet } from '../../utils/commandAutocomplete';
@@ -289,7 +292,27 @@ function renderBlocks(blocks: ChatBlock[]) {
         </SamMessage>
       );
     }
-    // tool
+    if (b.kind === 'doc-link') {
+      return (
+        <SamMessage key={b.id} time={timeLabel(b.ts)}>
+          <DocLinkCard path={b.path} title={b.title} />
+        </SamMessage>
+      );
+    }
+    if (b.kind === 'folder-link') {
+      return (
+        <SamMessage key={b.id} time={timeLabel(b.ts)}>
+          <FolderLinkCard path={b.path} title={b.title} />
+        </SamMessage>
+      );
+    }
+    if (b.kind === 'artifact') {
+      return (
+        <SamMessage key={b.id} time={timeLabel(b.ts)}>
+          <ArtifactCard artifactId={b.artifactId} artifactKind={b.artifactKind} title={b.title} />
+        </SamMessage>
+      );
+    }
     return (
       <SamMessage key={b.id} time={timeLabel(b.ts)}>
         <ToolCall

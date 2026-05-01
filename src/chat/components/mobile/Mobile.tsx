@@ -6,6 +6,9 @@ import {
   ToolCall,
 } from '../primitives/chat';
 import { Markdown } from '../primitives/Markdown';
+import { ArtifactCard } from '../blocks/ArtifactCard';
+import { DocLinkCard } from '../blocks/DocLinkCard';
+import { FolderLinkCard } from '../blocks/FolderLinkCard';
 import { useStickyScroll } from '../../hooks/useStickyScroll';
 import { commandText, getCommandSuggestion, getCommandSuggestionMulti, type CommandSet } from '../../utils/commandAutocomplete';
 
@@ -875,6 +878,27 @@ export function MobileConversation({
             return (
               <SamMessage key={b.id} time={timeLabel(b.ts)}>
                 <Markdown>{b.text}</Markdown>
+              </SamMessage>
+            );
+          }
+          if (b.kind === 'doc-link') {
+            return (
+              <SamMessage key={b.id} time={timeLabel(b.ts)}>
+                <DocLinkCard path={b.path} title={b.title} />
+              </SamMessage>
+            );
+          }
+          if (b.kind === 'folder-link') {
+            return (
+              <SamMessage key={b.id} time={timeLabel(b.ts)}>
+                <FolderLinkCard path={b.path} title={b.title} />
+              </SamMessage>
+            );
+          }
+          if (b.kind === 'artifact') {
+            return (
+              <SamMessage key={b.id} time={timeLabel(b.ts)}>
+                <ArtifactCard artifactId={b.artifactId} artifactKind={b.artifactKind} title={b.title} />
               </SamMessage>
             );
           }

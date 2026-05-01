@@ -30,7 +30,15 @@ emailRouter.post('/draft', asyncHandler(async (req, res) => {
   // canonical source remains gmail upstream.
   const id = typeof req.body.id === 'string' ? req.body.id : '';
   const body = String(req.body.body || req.body.draftBody || '').trim();
-  if (id) await emailStore.update(id, { status: 'drafted', unread: false, draftBody: body } as any);
+  const artifactId = typeof req.body.artifactId === 'string' ? req.body.artifactId : undefined;
+  if (id) {
+    await emailStore.update(id, {
+      status: 'drafted',
+      unread: false,
+      draftBody: body,
+      ...(artifactId ? { artifactId } : {}),
+    } as any);
+  }
   try {
     res.json(await callMcp('gmail', { action: 'draft', ...req.body }));
   } catch (err: any) {

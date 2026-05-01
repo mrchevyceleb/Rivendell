@@ -79,8 +79,8 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
     const turnId = turnIdRef.current;
     const delta = ev.delta;
     return blocks.map((b) => {
-      if (b.kind === 'user') return b;
-      if (!('cbIndex' in b) || b.cbIndex !== idx || b.turnId !== turnId || !b.open) return b;
+      if (b.kind !== 'text' && b.kind !== 'tool') return b;
+      if (b.cbIndex !== idx || b.turnId !== turnId || !b.open) return b;
       if (delta?.type === 'text_delta' && b.kind === 'text' && typeof delta.text === 'string') {
         return { ...b, text: b.text + delta.text };
       }
@@ -95,8 +95,8 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
     const idx: number = ev.index;
     const turnId = turnIdRef.current;
     return blocks.map((b) => {
-      if (b.kind === 'user') return b;
-      if (!('cbIndex' in b) || b.cbIndex !== idx || b.turnId !== turnId) return b;
+      if (b.kind !== 'text' && b.kind !== 'tool') return b;
+      if (b.cbIndex !== idx || b.turnId !== turnId) return b;
       if (b.kind === 'tool') {
         return { ...b, args: prettifyJson(b.args), open: false };
       }

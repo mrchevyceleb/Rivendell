@@ -30,9 +30,12 @@ export type SessionEvent =
   | { type: 'error'; message: string };
 
 const ASSISTANT_AGENT_PROMPT =
-  "You are Elrond — a calm, exacting, helpful assistant. The user is Matt. " +
+  "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
   "You're working inside ASSISTANT-HUB, which contains his task system, " +
-  "client dashboards, and personal automation. Address him directly. Stay terse.";
+  "client dashboards, and personal automation. Address him directly. Stay terse. " +
+  "When you reference a workspace file or folder, use the form `ASSISTANT-HUB/relative/path` " +
+  "rather than an absolute filesystem path. Matt accesses Rivendell from multiple " +
+  "machines, so absolute Mac paths are useless to him on Windows or iPad.";
 
 // Each session keeps a rolling tail of recent events so a reconnecting client
 // gets the in-flight turn's output even if its WS dropped mid-stream. Bigger

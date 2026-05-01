@@ -1,11 +1,13 @@
-import { MailPlus, RefreshCcw, Search } from 'lucide-react';
+import { Eye, MailPlus, RefreshCcw, Search } from 'lucide-react';
 import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { useEmails } from '../hooks/useRoomData';
+import { useProxyViewer } from '../hooks/useProxyViewer';
 
 export function Tidings() {
   const { data: emails = [], refetch, isFetching } = useEmails();
   const accounts = Array.from(new Set(emails.map((email) => email.account)));
+  const proxy = useProxyViewer();
 
   return (
     <div className="split-room">
@@ -47,20 +49,43 @@ export function Tidings() {
           }
         />
         <div className="message-list">
-          {emails.map((email) => (
-            <article className={email.unread ? 'unread' : ''} key={email.id}>
-              <span className="read-dot" />
-              <div className="sender">{email.from}</div>
-              <div className="subject">
-                <strong>{email.subject}</strong>
-                <small>{email.account}</small>
-              </div>
-              <Chip tone={email.status === 'needs_reply' ? 'rose' : email.status === 'drafted' ? 'gold' : 'neutral'}>
-                {email.status.replaceAll('_', ' ')}
-              </Chip>
-              <code>{email.age}</code>
-            </article>
-          ))}
+          {emails.map((email) => {
+            const canPreview = email.status === 'drafted' && Boolean(email.artifactId || email.draftBody);
+            const onPreview = () => {
+              if (email.artifactId) {
+                proxy.open({ source: 'artifact', id: email.artifactId, title: email.subject });
+                return;
+              }
+              if (!email.draftBody) return;
+              const looksHtml = /<\/?\w+[\s>]/.test(email.draftBody);
+              proxy.open({
+                source: 'inline',
+                title: email.subject,
+                kind: looksHtml ? 'html' : 'text',
+                content: email.draftBody,
+              });
+            };
+            return (
+              <article className={email.unread ? 'unread' : ''} key={email.id}>
+                <span className="read-dot" />
+                <div className="sender">{email.from}</div>
+                <div className="subject">
+                  <strong>{email.subject}</strong>
+                  <small>{email.account}</small>
+                </div>
+                <Chip tone={email.status === 'needs_reply' ? 'rose' : email.status === 'drafted' ? 'gold' : 'neutral'}>
+                  {email.status.replaceAll('_', ' ')}
+                </Chip>
+                {canPreview ? (
+                  <Button tone="ghost" onClick={onPreview} title="Preview the draft in the in-app viewer">
+                    <Eye size={14} />
+                    Preview
+                  </Button>
+                ) : null}
+                <code>{email.age}</code>
+              </article>
+            );
+          })}
         </div>
       </section>
     </div>

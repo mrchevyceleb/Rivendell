@@ -12,10 +12,11 @@ export function Library() {
   const { data, refetch, isFetching } = useWorkspaceTree();
   const [tree, setTree] = useState<FileTreeNode | null>(null);
   const [query, setQuery] = useState('');
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']));
+  const [expanded, setExpanded] = useState<Set<string>>(() => initialExpanded(readPathParam()));
   const [selected, setSelected] = useState<WorkspaceFileResponse | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
   const [loadingPath, setLoadingPath] = useState<string | null>(null);
+  const [deepLinkTarget, setDeepLinkTarget] = useState<string | null>(() => readPathParam());
 
   useEffect(() => {
     if (data?.tree) setTree(data.tree);
@@ -36,12 +37,14 @@ export function Library() {
     }
   };
 
-  const loadChildren = async (node: FileTreeNode) => {
-    if (node.type !== 'directory' || node.children) return;
+  const loadChildren = async (node: FileTreeNode): Promise<FileTreeNode[]> => {
+    if (node.type !== 'directory') return [];
+    if (node.children) return node.children;
     setLoadingPath(node.path);
     try {
       const result = await apiJson<WorkspaceChildrenResponse>(`/api/docs/children?path=${encodeURIComponent(node.path)}`);
       setTree((prev) => (prev ? attachChildren(prev, node.path, result.children) : prev));
+      return result.children;
     } finally {
       setLoadingPath(null);
     }
@@ -58,12 +61,67 @@ export function Library() {
     });
   };
 
+  useEffect(() => {
+    if (!deepLinkTarget || !tree) return;
+    let cancelled = false;
+
+    void (async () => {
+      const parts = deepLinkTarget.split('/').filter(Boolean);
+      let current = tree;
+      let walked = '';
+      for (const segment of parts) {
+        walked = walked ? `${walked}/${segment}` : segment;
+        const children = current.children ?? (await loadChildren(current));
+        if (cancelled) return;
+        const next = children.find((child) => child.path === walked);
+        if (!next) break;
+        setExpanded((prev) => {
+          if (prev.has(next.path)) return prev;
+          const updated = new Set(prev);
+          updated.add(next.path);
+          return updated;
+        });
+        if (next.type === 'file') {
+          await openFile(next);
+          break;
+        }
+        current = next;
+      }
+
+      if (cancelled) return;
+      const params = new URLSearchParams(window.location.search);
+      params.delete('path');
+      const search = params.toString();
+      window.history.replaceState({}, '', `${window.location.pathname}${search ? `?${search}` : ''}${window.location.hash}`);
+      setDeepLinkTarget(null);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tree, deepLinkTarget]);
+
+  useEffect(() => {
+    const onNav = () => {
+      const next = readPathParam();
+      if (!next) return;
+      setDeepLinkTarget(next);
+      setExpanded((prev) => {
+        const merged = new Set(prev);
+        for (const path of initialExpanded(next)) merged.add(path);
+        return merged;
+      });
+    };
+    window.addEventListener('popstate', onNav);
+    return () => window.removeEventListener('popstate', onNav);
+  }, []);
+
   return (
     <div className="library-room">
       <RoomHeader
         eyebrow="The Library"
         title="Elrond's workspace"
-        subtitle={data?.root ?? '/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB'}
+        subtitle={data?.displayPath ?? '~/Documents/ASSISTANT-HUB'}
         actions={
           <>
             <Chip tone="gold">{data?.fileCount ?? 0} loaded files</Chip>
@@ -235,4 +293,23 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function readPathParam(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const value = params.get('path');
+  return value ? value.replace(/^\//, '') : null;
+}
+
+function initialExpanded(target: string | null): Set<string> {
+  const set = new Set<string>(['']);
+  if (!target) return set;
+  const parts = target.split('/').filter(Boolean);
+  let walked = '';
+  for (const part of parts) {
+    walked = walked ? `${walked}/${part}` : part;
+    set.add(walked);
+  }
+  return set;
 }

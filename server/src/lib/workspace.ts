@@ -66,10 +66,16 @@ export function workspaceRoot(): string {
   return resolve(ELROND_WORKSPACE_PATH);
 }
 
-export async function readWorkspaceTree(): Promise<{ root: string; tree: FileTreeNode; fileCount: number; dirCount: number }> {
-  const root = workspaceRoot();
-  if (!existsSync(root)) {
-    throw new Error(`Elrond workspace does not exist: ${root}`);
+// Display-only label sent to the client. Never an absolute Mac path; OneDrive
+// syncs ASSISTANT-HUB to every device, so a friendly relative-style label is
+// what we want the UI to show regardless of which machine Matt is on.
+export const WORKSPACE_DISPLAY_LABEL = 'ASSISTANT-HUB';
+export const WORKSPACE_DISPLAY_PATH = '~/Documents/ASSISTANT-HUB';
+
+export async function readWorkspaceTree(): Promise<{ root: string; displayPath: string; tree: FileTreeNode; fileCount: number; dirCount: number }> {
+  const absRoot = workspaceRoot();
+  if (!existsSync(absRoot)) {
+    throw new Error(`Elrond workspace does not exist: ${absRoot}`);
   }
   let fileCount = 0;
   let dirCount = 0;
@@ -77,7 +83,7 @@ export async function readWorkspaceTree(): Promise<{ root: string; tree: FileTre
   const walk = async (absPath: string, relPath: string, mode: 'recursive' | 'shallow'): Promise<FileTreeNode> => {
     const s = await stat(absPath);
     const node: FileTreeNode = {
-      name: relPath ? basename(absPath) : basename(root),
+      name: relPath ? basename(absPath) : WORKSPACE_DISPLAY_LABEL,
       path: relPath,
       type: s.isDirectory() ? 'directory' : 'file',
       size: s.isFile() ? s.size : undefined,
@@ -98,12 +104,11 @@ export async function readWorkspaceTree(): Promise<{ root: string; tree: FileTre
     return node;
   };
 
-  const tree = await walk(root, '', 'recursive');
-  return { root, tree, fileCount, dirCount };
+  const tree = await walk(absRoot, '', 'recursive');
+  return { root: WORKSPACE_DISPLAY_LABEL, displayPath: WORKSPACE_DISPLAY_PATH, tree, fileCount, dirCount };
 }
 
 export async function readWorkspaceChildren(relPath: string): Promise<{ root: string; path: string; children: FileTreeNode[] }> {
-  const root = workspaceRoot();
   const { absPath, inside } = resolveWorkspacePath(relPath, true);
   const s = await stat(absPath);
   if (!s.isDirectory()) throw new Error('Requested path is not a directory');
@@ -121,7 +126,7 @@ export async function readWorkspaceChildren(relPath: string): Promise<{ root: st
     return node;
   });
 
-  return { root, path: inside, children };
+  return { root: WORKSPACE_DISPLAY_LABEL, path: inside, children };
 }
 
 export async function readWorkspaceFile(relPath: string): Promise<{
