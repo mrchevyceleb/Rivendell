@@ -21,6 +21,7 @@ import { useChat } from '../chat/hooks/useChat';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
 import { useRepos } from '../chat/hooks/useRepos';
+import { useStickyScroll } from '../chat/hooks/useStickyScroll';
 import { Button, Chip } from '../components/Primitives';
 import { useScribeEvents } from '../hooks/useRoomData';
 import { useScribeSocket } from '../hooks/useScribeSocket';
@@ -38,6 +39,12 @@ const companionLabel: Record<CompanionId, string> = {
   assistant: 'Elrond',
   claude: 'Claude Code',
   codex: 'Codex',
+};
+
+const companionTitle: Record<CompanionId, string> = {
+  assistant: 'Lord of Imladris',
+  claude: 'Anthropic emissary',
+  codex: 'OpenAI emissary',
 };
 
 const companionSub: Record<CompanionId, string> = {
@@ -138,6 +145,8 @@ export function Hall() {
     setTitle('a fresh errand');
   };
 
+  const { scrollRef, bottomRef, contentRef, onScroll } = useStickyScroll();
+
   return (
     <div className={`hall-chat ${scribeCollapsed ? 'is-scribe-collapsed' : ''} ${mobileInfoOpen ? 'is-mobile-info-open' : ''}`}>
       <header className="hall-chat-topbar">
@@ -147,8 +156,8 @@ export function Hall() {
           </Signet>
           <div className="hall-presence-text">
             <div className="agent-title">
-              <strong>Elrond</strong>
-              <span className="agent-subtitle">Lord of Imladris</span>
+              <strong>{companionLabel[companion]}</strong>
+              <span className="agent-subtitle">{companionTitle[companion]}</span>
               <span className="agent-status-inline" aria-hidden="true">
                 <span className={`live-orb ${chat.status === 'ready' || chat.status === 'streaming' ? 'is-live' : ''}`} />
                 {statusCopy[chat.status]}
@@ -196,7 +205,10 @@ export function Hall() {
         <main className="chat-main">
           <div className={`chat-context-bar ${mobileInfoOpen ? 'is-mobile-open' : ''}`}>
             <div className="repo-picker">
-              <button className="repo-current locked" title="Elrond always works in ASSISTANT-HUB">
+              <button
+                className="repo-current locked"
+                title={`${companionLabel[companion]} always works in ASSISTANT-HUB`}
+              >
                 <GitBranch size={15} />
                 <span>{repo ? repo.name : reposState.status === 'loading' ? 'Scanning workspace...' : 'ASSISTANT-HUB'}</span>
                 <code>locked</code>
@@ -210,30 +222,33 @@ export function Hall() {
             </div>
           </div>
 
-          <section className="chat-transcript r-scroll">
-            <div className="chat-date-rule">
-              <span />
-              <strong>{dateLabel} · {title}</strong>
-              <span />
+          <section ref={scrollRef} onScroll={onScroll} className="chat-transcript r-scroll">
+            <div ref={contentRef}>
+              <div className="chat-date-rule">
+                <span />
+                <strong>{dateLabel} · {title}</strong>
+                <span />
+              </div>
+
+              {chat.blocks.length === 0 ? (
+                <EmptyChat companion={companion} repo={repo} onPrompt={(prompt) => setPendingPrompt(prompt)} />
+              ) : (
+                chat.blocks.map((block) => <ChatBlockView key={block.id} block={block} companion={companion} />)
+              )}
+
+              {chat.status === 'streaming' ? (
+                <div className="thinking-row">
+                  <span className="r-pulse-dot gold" />
+                  <span>{companionLabel[companion]} is thinking</span>
+                </div>
+              ) : null}
+              {chat.error ? (
+                <div className="chat-error" role="status">
+                  {chat.error}
+                </div>
+              ) : null}
+              <div ref={bottomRef} aria-hidden style={{ height: 1 }} />
             </div>
-
-            {chat.blocks.length === 0 ? (
-              <EmptyChat companion={companion} repo={repo} onPrompt={(prompt) => setPendingPrompt(prompt)} />
-            ) : (
-              chat.blocks.map((block) => <ChatBlockView key={block.id} block={block} companion={companion} />)
-            )}
-
-            {chat.status === 'streaming' ? (
-              <div className="thinking-row">
-                <span className="r-pulse-dot gold" />
-                <span>{companionLabel[companion]} is thinking</span>
-              </div>
-            ) : null}
-            {chat.error ? (
-              <div className="chat-error" role="status">
-                {chat.error}
-              </div>
-            ) : null}
           </section>
 
           <Composer
@@ -245,6 +260,7 @@ export function Hall() {
             commandPrefix={companion === 'codex' ? '$' : '/'}
             claudeCommands={commands.claude}
             codexCommands={commands.codex}
+            agentName={companionLabel[companion]}
           />
         </main>
 
