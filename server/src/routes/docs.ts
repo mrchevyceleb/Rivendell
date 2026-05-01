@@ -1,13 +1,23 @@
 import { Router } from 'express';
-import { docs } from '../data/mock.ts';
-import { readTable } from '../lib/supabase.ts';
+import { fetchAdminDocs } from '../lib/assistantData.ts';
+import { hasSupabase, readTable } from '../lib/supabase.ts';
 import { readWorkspaceChildren, readWorkspaceFile, readWorkspaceTree, workspaceRoot } from '../lib/workspace.ts';
 import { asyncHandler } from './helpers.ts';
 
 export const docsRouter = Router();
 
 docsRouter.get('/', asyncHandler(async (_req, res) => {
-  res.json(await readTable('mobile_docs', docs));
+  // Prefer direct Supabase if configured locally, otherwise the assistant-mcp
+  // admin endpoint. No mock fallback — real data or 502.
+  try {
+    if (hasSupabase()) {
+      res.json(await readTable('mobile_docs', []));
+      return;
+    }
+    res.json(await fetchAdminDocs());
+  } catch (err: any) {
+    res.status(502).json({ error: `docs upstream failed: ${err?.message || 'unknown error'}` });
+  }
 }));
 
 docsRouter.get('/workspace', asyncHandler(async (_req, res) => {
@@ -32,8 +42,8 @@ docsRouter.get('/file', asyncHandler(async (req, res) => {
   res.json(await readWorkspaceFile(path));
 }));
 
-docsRouter.post('/', asyncHandler(async (req, res) => {
-  const doc = { id: crypto.randomUUID(), kind: 'note', updated: 'now', tags: [], ...req.body };
-  docs.unshift(doc);
-  res.status(201).json(doc);
+docsRouter.post('/', asyncHandler(async (_req, res) => {
+  // Local-only doc creation removed: docs are managed in the
+  // assistant-mcp/Supabase mobile_docs table. Use that route to add docs.
+  res.status(501).json({ error: 'doc creation must go through the assistant-mcp admin API' });
 }));

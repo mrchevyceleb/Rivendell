@@ -1,6 +1,9 @@
 import { Router } from 'express';
-import { createAdminFamilyTodo, fetchAdminFamily, updateAdminFamilyItem } from '../lib/assistantData.ts';
-import { familyStore } from '../lib/roomStores.ts';
+import {
+  createAdminFamilyTodo,
+  fetchAdminFamily,
+  updateAdminFamilyItem,
+} from '../lib/assistantData.ts';
 import { asyncHandler } from './helpers.ts';
 
 export const familyRouter = Router();
@@ -8,8 +11,8 @@ export const familyRouter = Router();
 familyRouter.get('/', asyncHandler(async (_req, res) => {
   try {
     res.json(await fetchAdminFamily());
-  } catch {
-    res.json(await familyStore.list());
+  } catch (err: any) {
+    res.status(502).json({ error: `family upstream failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
@@ -23,37 +26,26 @@ familyRouter.post('/', asyncHandler(async (req, res) => {
       notes: req.body.notes,
     });
     res.status(201).json(item);
-  } catch {
-    const item = await familyStore.create({
-      area: 'todo',
-      owner: 'Matt',
-      due: 'today',
-      completed: false,
-      ...req.body,
-    });
-    res.status(201).json(item);
+  } catch (err: any) {
+    res.status(502).json({ error: `family create failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
 familyRouter.patch('/:id', asyncHandler(async (req, res) => {
-  let item: unknown;
   try {
-    item = await updateAdminFamilyItem(String(req.params.id), req.body);
-  } catch {
-    item = await familyStore.update(String(req.params.id), req.body);
+    const item = await updateAdminFamilyItem(String(req.params.id), req.body);
+    if (!item) {
+      res.status(404).json({ error: 'family item not found' });
+      return;
+    }
+    res.json(item);
+  } catch (err: any) {
+    res.status(502).json({ error: `family update failed: ${err?.message || 'unknown error'}` });
   }
-  if (!item) {
-    res.status(404).json({ error: 'family item not found' });
-    return;
-  }
-  res.json(item);
 }));
 
-familyRouter.delete('/:id', asyncHandler(async (req, res) => {
-  const deleted = await familyStore.delete(String(req.params.id));
-  if (!deleted) {
-    res.status(404).json({ error: 'family item not found' });
-    return;
-  }
-  res.status(204).end();
+familyRouter.delete('/:id', asyncHandler(async (_req, res) => {
+  // Hearth deletes must round-trip through the assistant-mcp admin API so the
+  // canonical Supabase tables stay authoritative. Local-only delete removed.
+  res.status(501).json({ error: 'family delete not yet wired through assistant-mcp admin API' });
 }));

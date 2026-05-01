@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { SamPortrait } from './atoms';
 import type { CommandEntry } from '../../data/types';
-import { commandText, getCommandSuggestion } from '../../utils/commandAutocomplete';
+import { commandText, getCommandSuggestion, getCommandSuggestionMulti, type CommandSet } from '../../utils/commandAutocomplete';
 
 // ─────────────────────────────────────────────
 // Sam's message bubble — vellum, left-aligned, with avatar
@@ -380,6 +380,7 @@ export function ChatInput({
   onBack,
   commands = [],
   commandPrefix = '/',
+  commandSets,
   busy = false,
   placeholder = 'Speak, master.',
   agent = 'Claude Code',
@@ -391,8 +392,12 @@ export function ChatInput({
   onSend?: (v: string, images?: Array<{ mediaType: string; base64: string }>) => void;
   onSteer?: (v: string, images?: Array<{ mediaType: string; base64: string }>) => void;
   onBack?: () => void;
+  // Legacy single-prefix props (kept for compatibility).
   commands?: CommandEntry[];
   commandPrefix?: string;
+  // Multi-prefix autocomplete: e.g. [{prefix:'/',commands:claude},{prefix:'$',commands:codex}].
+  // When provided, takes precedence over commands/commandPrefix.
+  commandSets?: CommandSet[];
   busy?: boolean;
   placeholder?: string;
   agent?: string;
@@ -405,7 +410,9 @@ export function ChatInput({
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [images, setImages] = useState<ChatImage[]>([]);
-  const suggestion = getCommandSuggestion(v, commandPrefix, commands);
+  const suggestion = commandSets && commandSets.length
+    ? getCommandSuggestionMulti(v, commandSets)
+    : getCommandSuggestion(v, commandPrefix, commands);
 
   // Auto-grow with content. The browser sets scrollHeight to whatever the
   // content needs; reset to auto first so it can shrink too. Capped via
@@ -700,7 +707,7 @@ export function ChatInput({
             color: 'var(--ink-soft)',
           }}
         >
-          {commandText(commandPrefix, suggestion.command.name)}
+          {commandText(suggestion.prefix, suggestion.command.name)}
         </button>
       )}
       <input

@@ -1,19 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
-import {
-  chronicle,
-  cronJobs,
-  docs,
-  emails,
-  family,
-  hallSummary,
-  jobs,
-  messages,
-  pins,
-  plEntries,
-  scribeEvents,
-  tasks,
-} from '../data/mock';
+import { hallSummary } from '../data/mock';
 import type {
   ChronicleEntry,
   CronJob,
@@ -32,42 +19,49 @@ import type {
 
 const staleTime = 20_000;
 
-function roomQuery<T>(key: string[], path: string, fallback: T) {
-  return useQuery({
+/**
+ * Standard room data hook. Returns whatever the API returns. On error the
+ * hook surfaces React Query's `error` to the caller — we deliberately do NOT
+ * fall back to mock data, so a room is only ever real-or-empty-or-error.
+ *
+ * `empty` is the default value returned while the query is loading or has
+ * errored, so consumers using `data ?? empty` get a clean shape without any
+ * fake content.
+ */
+function roomQuery<T>(key: string[], path: string, empty: T) {
+  const result = useQuery({
     queryKey: key,
-    queryFn: async () => {
-      try {
-        return await apiJson<T>(path);
-      } catch {
-        return fallback;
-      }
-    },
+    queryFn: () => apiJson<T>(path),
     staleTime,
   });
+  return { ...result, data: result.data ?? empty };
 }
 
 export function useHallSummary() {
-  return roomQuery<HallSummary>(['hall-summary'], '/api/summary', hallSummary);
+  // Hall summary is a shape, not a list; provide a zero-counter shell so the
+  // UI never shows fake counts. Real data overrides on success.
+  const empty: HallSummary = { ...hallSummary, tasksDue: 0, unreadEmail: 0, pendingMessages: 0, queuedJobs: 0, runningJobs: 0, needsReview: 0 };
+  return roomQuery<HallSummary>(['hall-summary'], '/api/summary', empty);
 }
 
 export function useTasks() {
-  return roomQuery<Task[]>(['tasks'], '/api/tasks', tasks);
+  return roomQuery<Task[]>(['tasks'], '/api/tasks', []);
 }
 
 export function useEmails() {
-  return roomQuery<EmailItem[]>(['email'], '/api/email', emails);
+  return roomQuery<EmailItem[]>(['email'], '/api/email', []);
 }
 
 export function useMessages() {
-  return roomQuery<MessageItem[]>(['messages'], '/api/messages', messages);
+  return roomQuery<MessageItem[]>(['messages'], '/api/messages', []);
 }
 
 export function useFamily() {
-  return roomQuery<FamilyItem[]>(['family'], '/api/family', family);
+  return roomQuery<FamilyItem[]>(['family'], '/api/family', []);
 }
 
 export function useDocs() {
-  return roomQuery<LibraryDoc[]>(['docs'], '/api/docs', docs);
+  return roomQuery<LibraryDoc[]>(['docs'], '/api/docs', []);
 }
 
 export function useWorkspaceTree() {
@@ -75,25 +69,25 @@ export function useWorkspaceTree() {
 }
 
 export function usePins() {
-  return roomQuery<PinItem[]>(['pins'], '/api/pins', pins);
+  return roomQuery<PinItem[]>(['pins'], '/api/pins', []);
 }
 
 export function usePlEntries() {
-  return roomQuery<PlEntry[]>(['pl'], '/api/pl', plEntries);
+  return roomQuery<PlEntry[]>(['pl'], '/api/pl', []);
 }
 
 export function useCronJobs() {
-  return roomQuery<CronJob[]>(['cron'], '/api/cron', cronJobs);
+  return roomQuery<CronJob[]>(['cron'], '/api/cron', []);
 }
 
 export function useWeavings() {
-  return roomQuery<RivendellJob[]>(['weavings'], '/api/weavings/queue', jobs);
+  return roomQuery<RivendellJob[]>(['weavings'], '/api/weavings/queue', []);
 }
 
 export function useAnnals() {
-  return roomQuery<ChronicleEntry[]>(['annals'], '/api/chronicle', chronicle);
+  return roomQuery<ChronicleEntry[]>(['annals'], '/api/chronicle', []);
 }
 
 export function useScribeEvents() {
-  return roomQuery<ScribeEvent[]>(['scribe-events'], '/api/scribe/events', scribeEvents);
+  return roomQuery<ScribeEvent[]>(['scribe-events'], '/api/scribe/events', []);
 }

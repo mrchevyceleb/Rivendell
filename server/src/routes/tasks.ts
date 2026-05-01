@@ -6,7 +6,7 @@ import {
   updateAdminTask,
   type RivendellTask,
 } from '../lib/assistantData.ts';
-import { createTask, deleteTask, listTasks, moveTask, updateTask, type TaskPriority, type TaskStatus } from '../lib/taskStore.ts';
+import { type TaskPriority, type TaskStatus } from '../lib/taskStore.ts';
 import { asyncHandler } from './helpers.ts';
 
 export const tasksRouter = Router();
@@ -14,8 +14,8 @@ export const tasksRouter = Router();
 tasksRouter.get('/', asyncHandler(async (_req, res) => {
   try {
     res.json(await fetchAdminTasks());
-  } catch {
-    res.json(await listTasks());
+  } catch (err: any) {
+    res.status(502).json({ error: `tasks upstream failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
@@ -29,15 +29,8 @@ tasksRouter.post('/', asyncHandler(async (req, res) => {
       status: asStatus(req.body.status),
     });
     res.status(201).json(task);
-  } catch {
-    const task = await createTask({
-      title: req.body.title,
-      project: req.body.project,
-      due: req.body.due,
-      priority: asPriority(req.body.priority) ?? 'medium',
-      status: asStatus(req.body.status) ?? 'in_hand',
-    });
-    res.status(201).json(task);
+  } catch (err: any) {
+    res.status(502).json({ error: `tasks create failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
@@ -50,8 +43,8 @@ tasksRouter.post('/move', asyncHandler(async (req, res) => {
   try {
     await updateAdminTask(String(req.body.id), { status });
     res.json(await fetchAdminTasks());
-  } catch {
-    res.json(await moveTask(String(req.body.id), status, Number(req.body.index) || 0));
+  } catch (err: any) {
+    res.status(502).json({ error: `tasks move failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
@@ -63,30 +56,25 @@ tasksRouter.patch('/:id', asyncHandler(async (req, res) => {
     priority: asPriority(req.body.priority),
     status: asStatus(req.body.status),
   } satisfies Partial<RivendellTask>;
-  let task: unknown;
   try {
-    task = await updateAdminTask(String(req.params.id), updates);
-  } catch {
-    task = await updateTask(String(req.params.id), updates);
+    const task = await updateAdminTask(String(req.params.id), updates);
+    if (!task) {
+      res.status(404).json({ error: 'task not found' });
+      return;
+    }
+    res.json(task);
+  } catch (err: any) {
+    res.status(502).json({ error: `tasks update failed: ${err?.message || 'unknown error'}` });
   }
-  if (!task) {
-    res.status(404).json({ error: 'task not found' });
-    return;
-  }
-  res.json(task);
 }));
 
 tasksRouter.delete('/:id', asyncHandler(async (req, res) => {
   try {
     await deleteAdminTask(String(req.params.id));
-  } catch {
-    const deleted = await deleteTask(String(req.params.id));
-    if (!deleted) {
-      res.status(404).json({ error: 'task not found' });
-      return;
-    }
+    res.status(204).end();
+  } catch (err: any) {
+    res.status(502).json({ error: `tasks delete failed: ${err?.message || 'unknown error'}` });
   }
-  res.status(204).end();
 }));
 
 function asStatus(value: unknown): TaskStatus | undefined {

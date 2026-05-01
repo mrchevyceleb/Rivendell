@@ -346,6 +346,15 @@ export async function runAdminCronJob(id: string): Promise<unknown> {
   return assistantAdminJson(`/admin/api/cron/jobs/${encodeURIComponent(id)}/run`, { method: 'POST' });
 }
 
+export async function fetchAdminCalendarEvents(): Promise<unknown> {
+  return assistantAdminJson('/admin/api/calendar/events');
+}
+
+export async function fetchAdminDocs(): Promise<unknown[]> {
+  const data = await assistantAdminJson<{ docs?: unknown[] }>('/admin/api/docs');
+  return data.docs ?? [];
+}
+
 export async function fetchAdminQueueJobs(): Promise<RivendellQueueJob[]> {
   const data = await assistantAdminJson<{
     ready_to_merge?: SamQueueTask[];

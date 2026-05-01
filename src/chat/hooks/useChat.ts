@@ -243,10 +243,32 @@ export function useChat(opts: {
     if (initialMessage) {
       initialMessageRef.current = initialMessage;
       initialSendInFlightRef.current = false;
+
+      // The send-on-`ready` path inside ws.onmessage only fires once per
+      // connection. When the user clicks an EmptyChat suggestion AFTER the
+      // WS already said `ready`, that handler never re-runs, so we'd sit
+      // forever with a pending message and no send. Fire it here instead.
+      const ws = wsRef.current;
+      if (
+        ws &&
+        ws.readyState === WebSocket.OPEN &&
+        (status === 'ready' || status === 'idle')
+      ) {
+        initialSendInFlightRef.current = true;
+        setBlocks((prev) => {
+          const lastUser = [...prev].reverse().find((b) => b.kind === 'user');
+          if (lastUser && lastUser.kind === 'user' && lastUser.text === initialMessage) return prev;
+          return [
+            ...prev,
+            { kind: 'user', id: id(), text: initialMessage, ts: Date.now() },
+          ];
+        });
+        ws.send(JSON.stringify({ type: 'send', text: initialMessage }));
+      }
     } else if (!initialSendInFlightRef.current) {
       initialMessageRef.current = null;
     }
-  }, [initialMessage]);
+  }, [initialMessage, status]);
 
   // Save to localStorage whenever blocks change, so a refresh restores them.
   // CRITICAL: skip until the read-and-restore effect below has run for the

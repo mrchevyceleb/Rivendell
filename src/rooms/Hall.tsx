@@ -13,7 +13,8 @@ import {
   TerminalSquare,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { ChatBlock, CompanionId, Repo } from '../chat/data/types';
+import type { ChatBlock, CommandEntry, CompanionId, Repo } from '../chat/data/types';
+import { commandText, getCommandSuggestionMulti } from '../chat/utils/commandAutocomplete';
 import { useChat } from '../chat/hooks/useChat';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
@@ -223,6 +224,8 @@ export function Hall() {
             onStop={chat.stop}
             onFreshStart={beginFresh}
             commandPrefix={companion === 'codex' ? '$' : '/'}
+            claudeCommands={commands.claude}
+            codexCommands={commands.codex}
           />
         </main>
 
@@ -274,6 +277,8 @@ function Composer({
   onSend,
   onStop,
   onFreshStart,
+  claudeCommands,
+  codexCommands,
 }: {
   disabled: boolean;
   streaming: boolean;
@@ -281,9 +286,19 @@ function Composer({
   onSend: (text: string) => void;
   onStop: () => void;
   onFreshStart: () => void;
+  claudeCommands: CommandEntry[];
+  codexCommands: CommandEntry[];
 }) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Both Claude (`/`) and Codex (`$`) skill autocomplete are offered at all
+  // times — the active companion only decides which prefix is the "default"
+  // one shown in the footer. The first matching prefix wins.
+  const suggestion = getCommandSuggestionMulti(value, [
+    { prefix: '/', commands: claudeCommands },
+    { prefix: '$', commands: codexCommands },
+  ]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -299,31 +314,69 @@ function Composer({
     setValue('');
   };
 
+  const acceptSuggestion = () => {
+    if (!suggestion) return;
+    setValue(suggestion.fullText);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(suggestion.fullText.length, suggestion.fullText.length);
+    });
+  };
+
   return (
     <footer className="chat-composer">
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            submit();
-          }
-        }}
-        placeholder={disabled ? 'Finding ASSISTANT-HUB...' : streaming ? 'Steer the current turn...' : 'Speak, and Elrond shall listen...'}
-        rows={1}
-      />
+      <div className="composer-input-wrap">
+        {suggestion ? (
+          <div className="composer-ghost" aria-hidden="true">
+            <span className="composer-ghost-typed">{value}</span>
+            <span className="composer-ghost-tail">{suggestion.tail}</span>
+          </div>
+        ) : null}
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={(event) => {
+            if (suggestion && (event.key === 'Tab' || event.key === 'ArrowRight')) {
+              const ta = textareaRef.current;
+              const atEnd = ta ? ta.selectionStart === value.length && ta.selectionEnd === value.length : true;
+              if (atEnd) {
+                event.preventDefault();
+                acceptSuggestion();
+                return;
+              }
+            }
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+          placeholder={disabled ? 'Finding ASSISTANT-HUB...' : streaming ? 'Steer the current turn...' : 'Speak, and Elrond shall listen...'}
+          rows={1}
+        />
+      </div>
       <div className="composer-footer">
         <div>
           <button type="button" onClick={onFreshStart} title="Start a fresh thread">
             <SquarePen size={14} />
             fresh
           </button>
-          <button type="button" title="Tool command prefix">
+          <button type="button" title="Tool command prefix — type / for Claude, $ for Codex">
             <TerminalSquare size={14} />
             {commandPrefix} commands
           </button>
+          {suggestion ? (
+            <button
+              type="button"
+              className="composer-accept-hint"
+              onClick={acceptSuggestion}
+              title={`Tab to accept ${commandText(suggestion.prefix, suggestion.command.name)}`}
+            >
+              ↹ {commandText(suggestion.prefix, suggestion.command.name)}
+            </button>
+          ) : null}
           {streaming ? (
             <button type="button" onClick={onStop} title="Stop the current turn">
               <CircleStop size={14} />

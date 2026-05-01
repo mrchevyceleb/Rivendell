@@ -7,26 +7,34 @@ import { asyncHandler } from './helpers.ts';
 export const emailRouter = Router();
 
 emailRouter.get('/', asyncHandler(async (_req, res) => {
+  // Real upstream only. Admin endpoint first; fall through to MCP gmail tool
+  // if admin path 404s, then surface the error. emailStore is no longer a
+  // fallback — it stayed mock-polluted on disk.
   try {
     res.json(await fetchAdminEmails());
-  } catch {
+    return;
+  } catch (adminErr: any) {
     try {
-      const data = await callMcp('gmail', { action: 'list_unified' });
-      res.json(data);
-    } catch {
-      res.json(await emailStore.list());
+      res.json(await callMcp('gmail', { action: 'list_unified' }));
+      return;
+    } catch (mcpErr: any) {
+      res.status(502).json({
+        error: `email upstream failed (admin: ${adminErr?.message || 'n/a'} | mcp: ${mcpErr?.message || 'n/a'})`,
+      });
     }
   }
 }));
 
 emailRouter.post('/draft', asyncHandler(async (req, res) => {
+  // Local emailStore mirror is kept for write-back/draft state only — the
+  // canonical source remains gmail upstream.
   const id = typeof req.body.id === 'string' ? req.body.id : '';
   const body = String(req.body.body || req.body.draftBody || '').trim();
   if (id) await emailStore.update(id, { status: 'drafted', unread: false, draftBody: body } as any);
   try {
     res.json(await callMcp('gmail', { action: 'draft', ...req.body }));
-  } catch {
-    res.status(202).json({ draft: true, body: req.body, note: 'MCP not configured; draft captured locally.' });
+  } catch (err: any) {
+    res.status(502).json({ error: `email draft failed: ${err?.message || 'unknown error'}` });
   }
 }));
 

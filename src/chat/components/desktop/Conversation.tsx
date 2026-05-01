@@ -8,6 +8,7 @@ import {
 } from '../primitives/chat';
 import { Markdown } from '../primitives/Markdown';
 import type { ChatBlock, CommandEntry } from '../../data/types';
+import type { CommandSet } from '../../utils/commandAutocomplete';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 
@@ -21,6 +22,7 @@ type ConversationProps = {
   usage?: { inputTokens: number; cacheReadTokens: number; cacheCreateTokens: number; fraction: number; windowTokens: number } | null;
   commands?: CommandEntry[];
   commandPrefix?: string;
+  commandSets?: CommandSet[];
   onSend?: (message: string, images?: Array<{ mediaType: string; base64: string }>) => void;
   onSteer?: (message: string, images?: Array<{ mediaType: string; base64: string }>) => void;
   onBack?: () => void;
@@ -57,6 +59,7 @@ export function Conversation({
   usage,
   commands = [],
   commandPrefix = '/',
+  commandSets,
   onSend,
   onSteer,
   onBack,
@@ -285,6 +288,7 @@ export function Conversation({
             onBack={onBack}
             commands={commands}
             commandPrefix={commandPrefix}
+            commandSets={commandSets}
             busy={status === 'streaming'}
             acceptImages={acceptImages}
           />

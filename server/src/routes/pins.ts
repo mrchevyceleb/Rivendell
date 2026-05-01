@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { assistantAdminJson } from '../lib/assistantAdmin.ts';
-import { createPin, deletePin, listPins, updatePin, type StoredPin } from '../lib/pinStore.ts';
+import { type StoredPin } from '../lib/pinStore.ts';
 import { asyncHandler } from './helpers.ts';
 
 type AdminPin = {
@@ -24,8 +24,8 @@ pinsRouter.get('/', asyncHandler(async (req, res) => {
   const category = stringQuery(req.query.category);
   try {
     res.json(await fetchAdminPins(search, category));
-  } catch {
-    res.json(await listPins(search, category));
+  } catch (err: any) {
+    res.status(502).json({ error: `pins upstream failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
@@ -34,9 +34,8 @@ pinsRouter.post('/', asyncHandler(async (req, res) => {
   try {
     const created = await createAdminPin(input);
     res.status(201).json(created);
-  } catch {
-    const created = await createPin(input);
-    res.status(201).json(created);
+  } catch (err: any) {
+    res.status(502).json({ error: `pins create failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
@@ -45,13 +44,8 @@ pinsRouter.patch('/:id', asyncHandler(async (req, res) => {
   const input = readPinInput(req.body, true);
   try {
     res.json(await updateAdminPin(id, input));
-  } catch {
-    const updated = await updatePin(id, input);
-    if (!updated) {
-      res.status(404).json({ error: 'pin not found' });
-      return;
-    }
-    res.json(updated);
+  } catch (err: any) {
+    res.status(502).json({ error: `pins update failed: ${err?.message || 'unknown error'}` });
   }
 }));
 
@@ -59,14 +53,10 @@ pinsRouter.delete('/:id', asyncHandler(async (req, res) => {
   const id = String(req.params.id);
   try {
     await assistantAdminJson(`/admin/api/pins/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  } catch {
-    const deleted = await deletePin(id);
-    if (!deleted) {
-      res.status(404).json({ error: 'pin not found' });
-      return;
-    }
+    res.status(204).end();
+  } catch (err: any) {
+    res.status(502).json({ error: `pins delete failed: ${err?.message || 'unknown error'}` });
   }
-  res.status(204).end();
 }));
 
 async function fetchAdminPins(search = '', category = ''): Promise<StoredPin[]> {

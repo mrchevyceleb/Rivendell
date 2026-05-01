@@ -6,7 +6,7 @@ import {
   ToolCall,
 } from '../primitives/chat';
 import { Markdown } from '../primitives/Markdown';
-import { commandText, getCommandSuggestion } from '../../utils/commandAutocomplete';
+import { commandText, getCommandSuggestion, getCommandSuggestionMulti, type CommandSet } from '../../utils/commandAutocomplete';
 
 function timeLabel(ts: number): string {
   const d = new Date(ts);
@@ -19,15 +19,19 @@ function MobileGrowingInput({
   onSubmit,
   commandPrefix,
   commands,
+  commandSets,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
   commandPrefix: string;
   commands: CommandEntry[];
+  commandSets?: CommandSet[];
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
-  const suggestion = getCommandSuggestion(value, commandPrefix, commands);
+  const suggestion = commandSets && commandSets.length
+    ? getCommandSuggestionMulti(value, commandSets)
+    : getCommandSuggestion(value, commandPrefix, commands);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -119,7 +123,7 @@ function MobileGrowingInput({
             padding: 0,
           }}
         >
-          {commandText(commandPrefix, suggestion.command.name)}
+          {commandText(suggestion.prefix, suggestion.command.name)}
         </button>
       )}
     </div>
@@ -591,6 +595,7 @@ export function MobileConversation({
   usage,
   commands = [],
   commandPrefix = '/',
+  commandSets,
   onBack,
   onOpenChronicle,
   onSend,
@@ -608,6 +613,7 @@ export function MobileConversation({
   usage?: { fraction: number; inputTokens: number; cacheReadTokens: number; cacheCreateTokens: number; windowTokens: number } | null;
   commands?: CommandEntry[];
   commandPrefix?: string;
+  commandSets?: CommandSet[];
   onBack: () => void;
   onOpenChronicle: () => void;
   onSend?: (message: string, images?: Array<{ mediaType: string; base64: string }>) => void;
@@ -1046,6 +1052,7 @@ export function MobileConversation({
             onSubmit={submit}
             commandPrefix={commandPrefix}
             commands={commands}
+            commandSets={commandSets}
           />
           {(() => {
             const hasText = draft.trim().length > 0 || pendingImages.length > 0;

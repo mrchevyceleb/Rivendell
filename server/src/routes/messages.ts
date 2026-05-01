@@ -6,10 +6,16 @@ import { asyncHandler } from './helpers.ts';
 export const messagesRouter = Router();
 
 messagesRouter.get('/', asyncHandler(async (_req, res) => {
+  // Ravens unified-inbox tool isn't built in assistant-mcp yet. Return 502
+  // with a clear error rather than mock messages — the room should be
+  // honestly empty/errored until the upstream tool exists.
   try {
     res.json(await callMcp('messages', { action: 'list_unified' }));
-  } catch {
-    res.json(await messageStore.list());
+  } catch (err: any) {
+    res.status(502).json({
+      error: `messages upstream failed: ${err?.message || 'unknown error'}`,
+      hint: 'A unified messages tool (slack + telegram + twilio) is not yet exposed by assistant-mcp.',
+    });
   }
 }));
 
@@ -19,8 +25,8 @@ messagesRouter.post('/draft', asyncHandler(async (req, res) => {
   if (id) await messageStore.update(id, { status: 'drafted', draftText: text } as any);
   try {
     res.json(await callMcp('messages', { action: 'draft', ...req.body }));
-  } catch {
-    res.status(202).json({ draft: true, body: req.body, note: 'MCP not configured; draft captured locally.' });
+  } catch (err: any) {
+    res.status(502).json({ error: `messages draft failed: ${err?.message || 'unknown error'}` });
   }
 }));
 

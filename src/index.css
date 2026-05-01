@@ -2738,11 +2738,52 @@ button {
   color: var(--r-ink);
   font-size: 15px;
   line-height: 1.55;
+  position: relative;
+  z-index: 1;
 }
 
 .chat-composer textarea::placeholder {
   color: var(--r-ink-faint);
   font-style: italic;
+}
+
+/* Ghost-text autocomplete: a mirror layer behind the textarea that renders
+   the typed value (transparent, just for spacing) followed by the muted
+   suggestion tail. Press Tab or → at end of input to accept. */
+.composer-input-wrap {
+  position: relative;
+}
+
+.composer-ghost {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  z-index: 0;
+  /* match the textarea's intrinsic typography exactly */
+  font-family: inherit;
+  letter-spacing: inherit;
+  padding: 0;
+  margin: 0;
+}
+
+.composer-ghost-typed {
+  color: transparent;
+}
+
+.composer-ghost-tail {
+  color: var(--r-ink-faint);
+  font-style: italic;
+}
+
+.composer-accept-hint {
+  border-color: color-mix(in srgb, var(--r-elf-glow) 45%, var(--r-line)) !important;
+  color: var(--r-elf-glow) !important;
+  font-size: 11.5px;
 }
 
 .composer-footer {
