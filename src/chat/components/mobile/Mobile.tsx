@@ -949,28 +949,21 @@ export function MobileConversation({
       <div
         ref={composerRef}
         style={{
-          padding: '12px 14px 10px',
+          padding: '8px 12px 8px',
           borderTop: '1px solid var(--rule-soft)',
           background: 'var(--parchment-2)',
+          flexShrink: 0,
         }}
       >
         {pendingImages.length > 0 && (
-          <div
-            className="sw-folio"
-            style={{ fontSize: 11, fontStyle: 'italic', margin: '0 4px 6px' }}
-          >
-            {pendingImages.length} image{pendingImages.length === 1 ? '' : 's'} attached
-          </div>
-        )}
-        {pendingImages.length > 0 && (
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
             {pendingImages.map((img) => (
               <div
                 key={img.id}
                 style={{
                   position: 'relative',
-                  width: 56,
-                  height: 56,
+                  width: 44,
+                  height: 44,
                   borderRadius: 4,
                   overflow: 'hidden',
                   border: '1px solid var(--rule-soft)',
@@ -989,13 +982,13 @@ export function MobileConversation({
                     position: 'absolute',
                     top: 2,
                     right: 2,
-                    width: 18,
-                    height: 18,
+                    width: 16,
+                    height: 16,
                     borderRadius: '50%',
                     border: 0,
                     background: 'rgba(0,0,0,0.6)',
                     color: '#fff',
-                    fontSize: 11,
+                    fontSize: 10,
                     lineHeight: 1,
                     cursor: 'pointer',
                     padding: 0,
@@ -1012,11 +1005,11 @@ export function MobileConversation({
             background: 'var(--vellum)',
             borderRadius: 22,
             border: '1px solid var(--rule-soft)',
-            padding: '10px 14px',
+            padding: '6px 6px 6px 10px',
             display: 'flex',
             alignItems: 'flex-end',
-            gap: 10,
-            minHeight: 52,
+            gap: 6,
+            minHeight: 44,
           }}
           onPaste={(e) => {
             if (!acceptImages) return;
@@ -1033,25 +1026,27 @@ export function MobileConversation({
             }
           }}
         >
-          <button
-            onClick={onBack}
-            aria-label="go to errands"
-            style={{
-              height: 48,
-              padding: '0 12px',
-              borderRadius: 8,
-              border: '1px solid var(--rule-soft)',
-              background: 'var(--parchment-2)',
-              color: 'var(--ember)',
-              fontFamily: 'var(--serif-display)',
-              fontStyle: 'italic',
-              fontSize: 14,
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            errands
-          </button>
+          {acceptImages && (
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="attach image"
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: '50%',
+                border: 0,
+                background: 'transparent',
+                color: 'var(--ink-soft)',
+                fontSize: 18,
+                cursor: 'pointer',
+                flexShrink: 0,
+                padding: 0,
+                marginBottom: 2,
+              }}
+            >
+              📎
+            </button>
+          )}
           <MobileGrowingInput
             value={draft}
             onChange={setDraft}
@@ -1072,9 +1067,9 @@ export function MobileConversation({
                   onClick={onStop}
                   aria-label="stop"
                   style={{
-                    width: 48, height: 48, borderRadius: '50%', border: 0,
+                    width: 38, height: 38, borderRadius: '50%', border: 0,
                     background: 'var(--ember)', color: 'var(--vellum)',
-                    fontFamily: 'var(--serif-display)', fontSize: 18,
+                    fontFamily: 'var(--serif-display)', fontSize: 16,
                     cursor: 'pointer', flexShrink: 0,
                   }}
                 >
@@ -1088,11 +1083,11 @@ export function MobileConversation({
                 aria-label={streaming ? 'steer' : 'send'}
                 title={streaming ? 'stop + send this as a new prompt' : undefined}
                 style={{
-                  width: 48, height: 48, borderRadius: '50%', border: 0,
+                  width: 38, height: 38, borderRadius: '50%', border: 0,
                   background: streaming ? 'var(--ember)' : 'var(--ink)',
                   color: 'var(--vellum)',
                   fontFamily: 'var(--serif-display)',
-                  fontSize: 24, fontStyle: 'italic',
+                  fontSize: 20, fontStyle: 'italic',
                   cursor: 'pointer', flexShrink: 0,
                 }}
               >
@@ -1104,40 +1099,23 @@ export function MobileConversation({
         <div
           style={{
             display: 'flex',
-            gap: 8,
-            marginTop: 8,
+            alignItems: 'center',
+            gap: 6,
+            marginTop: 4,
             padding: '0 4px',
-            flexWrap: 'wrap',
           }}
         >
-          {acceptImages && (
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="attach image"
-              style={{
-                border: '1px solid var(--rule-soft)',
-                background: 'var(--vellum)',
-                color: 'var(--ink-soft)',
-                borderRadius: 8,
-                padding: '7px 11px',
-                fontFamily: 'var(--serif-display)',
-                fontStyle: 'italic',
-                fontSize: 13,
-              }}
-            >
-              📎 image
-            </button>
-          )}
           <button
             onClick={() => sendCommand('match')}
             style={{
               border: '1px solid var(--rule-soft)',
               background: 'var(--vellum)',
               color: 'var(--ink-soft)',
-              borderRadius: 8,
-              padding: '7px 11px',
+              borderRadius: 6,
+              padding: '3px 8px',
               fontFamily: 'var(--mono)',
-              fontSize: 12,
+              fontSize: 11,
+              cursor: 'pointer',
             }}
           >
             {commandText(commandPrefix, 'match')}
@@ -1148,14 +1126,40 @@ export function MobileConversation({
               border: '1px solid var(--rule-soft)',
               background: 'var(--vellum)',
               color: 'var(--ink-soft)',
-              borderRadius: 8,
-              padding: '7px 11px',
+              borderRadius: 6,
+              padding: '3px 8px',
               fontFamily: 'var(--mono)',
-              fontSize: 12,
+              fontSize: 11,
+              cursor: 'pointer',
             }}
           >
             {commandText(commandPrefix, 'push')}
           </button>
+          {onFreshStart && (
+            <button
+              onClick={onFreshStart}
+              aria-label="start a fresh thread"
+              title="fresh thread"
+              style={{
+                marginLeft: 'auto',
+                border: '1px solid var(--rule-soft)',
+                background: 'var(--vellum)',
+                color: 'var(--ink-soft)',
+                borderRadius: 6,
+                padding: '3px 10px',
+                fontFamily: 'var(--serif-display)',
+                fontStyle: 'italic',
+                fontSize: 12,
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+            >
+              <span style={{ fontSize: 13, lineHeight: 1 }}>↻</span>
+              fresh
+            </button>
+          )}
         </div>
         <input
           type="file"
