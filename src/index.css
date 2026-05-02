@@ -3891,8 +3891,43 @@ button {
     margin: 0 12px 12px;
   }
 
+  /* Mobile composer footer: keep the chip row on a single line and drop
+     the context meter onto its own row below so nothing stacks vertically.
+     The "/ commands" pill is just a hint — hide it to reclaim width. */
   .composer-footer {
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .composer-footer > div {
+    flex-wrap: nowrap;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .composer-footer button {
+    min-height: 26px;
+    padding: 3px 8px;
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  .composer-commands-hint {
+    display: none !important;
+  }
+
+  .composer-context-meter {
+    width: 100%;
+    justify-content: flex-end;
+    font-size: 11px;
+  }
+
+  .composer-context-meter-track {
+    flex: 1;
+    width: auto;
+    max-width: 220px;
   }
 
   /* Icon-only send button on the right of the input on mobile. */

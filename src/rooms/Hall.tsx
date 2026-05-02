@@ -536,7 +536,11 @@ function Composer({
             <SquarePen size={14} />
             fresh
           </button>
-          <button type="button" title="Tool command prefix — type / for Claude, $ for Codex">
+          <button
+            type="button"
+            className="composer-commands-hint"
+            title="Tool command prefix — type / for Claude, $ for Codex"
+          >
             <TerminalSquare size={14} />
             {commandPrefix} commands
           </button>
