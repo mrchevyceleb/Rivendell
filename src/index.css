@@ -1130,6 +1130,10 @@ button {
   border-top: 1px solid rgba(196, 213, 247, 0.08);
 }
 
+.task-status-select {
+  display: none;
+}
+
 .task-actions button,
 .cron-row button {
   border: 1px solid var(--r-line);
@@ -2295,6 +2299,10 @@ button {
 }
 
 .mobile-theme-toggle {
+  display: none;
+}
+
+.mobile-room-sheet {
   display: none;
 }
 
@@ -3566,6 +3574,12 @@ button {
     margin-top: 16px;
   }
 
+  .room-actions .r-btn {
+    min-height: 42px;
+    flex: 1 1 132px;
+    justify-content: center;
+  }
+
   .hall-grid,
   .message-list,
   .message-board,
@@ -3590,6 +3604,83 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .kanban-grid,
+  .weavings-board {
+    grid-template-columns: 1fr;
+    min-width: 0;
+    gap: 14px;
+  }
+
+  .kanban-column {
+    min-height: auto;
+  }
+
+  .kanban-stack {
+    min-height: auto;
+  }
+
+  .task-card {
+    cursor: default;
+  }
+
+  .task-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .task-status-select {
+    display: grid;
+    gap: 6px;
+    color: var(--r-ink-mute);
+    font-size: 11px;
+    text-transform: uppercase;
+  }
+
+  .task-status-select select {
+    width: 100%;
+    min-height: 42px;
+    border: 1px solid var(--r-line);
+    border-radius: 7px;
+    background: var(--r-bg-deep);
+    color: var(--r-ink);
+    padding: 8px 10px;
+  }
+
+  .task-actions button,
+  .cron-card-actions button,
+  .pin-card-actions button {
+    min-height: 40px;
+  }
+
+  .cron-card-actions button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .task-actions button {
+    justify-content: center;
+  }
+
+  .enqueue-panel {
+    margin: 18px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .enqueue-panel select,
+  .enqueue-panel input {
+    flex: 0 0 auto;
+    width: 100%;
+    min-height: 42px;
+  }
+
+  .enqueue-panel .r-btn {
+    width: 100%;
+    min-height: 42px;
+    justify-content: center;
+  }
+
   .pin-form-grid {
     grid-template-columns: 1fr;
   }
@@ -3612,8 +3703,27 @@ button {
     order: 3;
   }
 
+  .pin-card-actions button {
+    width: 38px;
+    height: 38px;
+  }
+
   .pin-card header {
     padding-right: 0;
+  }
+
+  .pin-form-actions {
+    justify-content: stretch;
+  }
+
+  .pin-form-actions .r-btn {
+    flex: 1;
+    min-height: 42px;
+    justify-content: center;
+  }
+
+  .pins-grid {
+    grid-template-columns: 1fr;
   }
 
   .form-actions {
@@ -3635,6 +3745,45 @@ button {
 
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .family-row input {
+    width: 28px;
+    height: 28px;
+  }
+
+  .table-list > div {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .section-head {
+    flex-wrap: wrap;
+  }
+
+  .runtime-filter {
+    width: 100%;
+    justify-content: center;
+    flex-wrap: wrap;
+    border-radius: 8px;
+  }
+
+  .runtime-filter button {
+    min-height: 34px;
+  }
+
+  .runtime-toggle-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .runtime-toggle {
+    width: 100%;
+  }
+
+  .runtime-toggle button {
+    flex: 1;
+    justify-content: center;
   }
 
   .brief-grid {
@@ -3710,10 +3859,115 @@ button {
     justify-content: center;
     gap: 4px;
     font-size: 10px;
+    min-height: 64px;
+    cursor: pointer;
   }
 
   .mobile-tabs button.active {
     color: var(--r-gold);
+  }
+
+  .mobile-room-sheet {
+    display: block;
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    bottom: calc(82px + env(safe-area-inset-bottom, 0px));
+    max-height: min(62dvh, 560px);
+    overflow: hidden;
+    border: 1px solid var(--r-line-gold);
+    border-radius: 8px;
+    background:
+      radial-gradient(420px 180px at 10% 0%, rgba(212, 175, 99, 0.1), transparent 72%),
+      color-mix(in srgb, var(--r-bg) 96%, transparent);
+    backdrop-filter: blur(18px);
+    box-shadow: 0 22px 70px rgba(0, 0, 0, 0.42);
+    z-index: 14;
+  }
+
+  .mobile-room-sheet-head {
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--r-line);
+  }
+
+  .mobile-room-sheet-head strong {
+    font-family: var(--r-display);
+    color: var(--r-star);
+    font-size: 20px;
+    font-weight: 500;
+  }
+
+  .mobile-room-sheet-head button {
+    width: 38px;
+    height: 38px;
+    border: 1px solid var(--r-line);
+    border-radius: 7px;
+    background: var(--r-bg-deep);
+    color: var(--r-ink-soft);
+    display: grid;
+    place-items: center;
+  }
+
+  .mobile-room-grid {
+    max-height: calc(min(62dvh, 560px) - 48px);
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .mobile-room-grid button {
+    min-width: 0;
+    min-height: 68px;
+    border: 1px solid var(--r-line);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--r-bg-raised) 68%, transparent);
+    color: var(--r-ink-soft);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    text-align: left;
+  }
+
+  .mobile-room-grid button.active {
+    border-color: var(--r-line-gold);
+    color: var(--r-gold);
+    background: rgba(212, 175, 99, 0.1);
+  }
+
+  .mobile-room-grid button span {
+    min-width: 0;
+  }
+
+  .mobile-room-grid button strong,
+  .mobile-room-grid button small {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-room-grid button strong {
+    color: var(--r-ink);
+    font-size: 13px;
+  }
+
+  .mobile-room-grid button.active strong {
+    color: var(--r-gold);
+  }
+
+  .mobile-room-grid button small {
+    margin-top: 2px;
+    color: var(--r-ink-mute);
+    font-size: 10px;
   }
 
   .hall-chat {
@@ -3806,6 +4060,7 @@ button {
   .companion-toggle button {
     flex: 0 0 auto;
     justify-content: center;
+    min-height: 34px;
     padding: 5px 9px;
     font-size: 11px;
     gap: 5px;
@@ -3813,12 +4068,16 @@ button {
 
   /* Compact 32x32 squares for the icon buttons so the row stays tight. */
   .hall-chat-topbar .rail-icon-button {
-    width: 32px;
-    height: 32px;
+    width: 38px;
+    height: 38px;
   }
 
   .rail-icon-button.hall-info-toggle {
     display: inline-grid;
+  }
+
+  .hall-rail-toggle {
+    display: none;
   }
 
   .rail-icon-button.hall-info-toggle.is-active {
@@ -3909,7 +4168,7 @@ button {
   }
 
   .composer-footer button {
-    min-height: 26px;
+    min-height: 34px;
     padding: 3px 8px;
     font-size: 12px;
     gap: 4px;
@@ -3951,6 +4210,10 @@ button {
     min-height: 42vh;
     border-right: 0;
     border-bottom: 1px solid var(--r-line);
+  }
+
+  .tree-node button {
+    min-height: 38px;
   }
 
   .file-preview {

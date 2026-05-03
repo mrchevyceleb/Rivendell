@@ -108,6 +108,12 @@ export function Council() {
     void move(task.id, 'in_hand', inHandIndex);
   };
 
+  const moveToStatus = (task: Task, status: Task['status']) => {
+    if (status === task.status) return;
+    const targetIndex = boardTasks.filter((item) => item.status === status).length;
+    void move(task.id, status, targetIndex);
+  };
+
   const handleDrop = (status: Task['status'], index: number, event: DragEvent) => {
     event.preventDefault();
     event.stopPropagation();
@@ -274,6 +280,14 @@ export function Council() {
                         <span>{task.due}</span>
                       </div>
                       <div className="task-actions">
+                        <label className="task-status-select">
+                          <span>Move to</span>
+                          <select value={task.status} onChange={(event) => moveToStatus(task, event.target.value as Task['status'])}>
+                            {columns.map((target) => (
+                              <option key={target.key} value={target.key}>{target.title}</option>
+                            ))}
+                          </select>
+                        </label>
                         {task.status === 'done' ? (
                           <button type="button" onClick={() => reopenTask(task)}>
                             <RotateCcw size={13} />

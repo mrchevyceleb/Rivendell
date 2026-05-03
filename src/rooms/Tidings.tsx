@@ -76,13 +76,15 @@ export function Tidings() {
                 <Chip tone={email.status === 'needs_reply' ? 'rose' : email.status === 'drafted' ? 'gold' : 'neutral'}>
                   {email.status.replaceAll('_', ' ')}
                 </Chip>
-                {canPreview ? (
-                  <Button tone="ghost" onClick={onPreview} title="Preview the draft in the in-app viewer">
-                    <Eye size={14} />
-                    Preview
-                  </Button>
-                ) : null}
-                <code>{email.age}</code>
+                <div className="message-row-tail">
+                  {canPreview ? (
+                    <Button tone="ghost" onClick={onPreview} title="Preview the draft in the in-app viewer">
+                      <Eye size={14} />
+                      Preview
+                    </Button>
+                  ) : null}
+                  <code>{email.age}</code>
+                </div>
               </article>
             );
           })}

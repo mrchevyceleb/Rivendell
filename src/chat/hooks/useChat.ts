@@ -227,6 +227,31 @@ function writeStoredSeq(cli: CompanionId, repoPath: string, seq: number): void {
   } catch {}
 }
 
+function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
+  let maxSeen = 0;
+  for (const block of blocks) {
+    const blockMatch = /^b(\d+)$/.exec(block.id);
+    if (blockMatch) maxSeen = Math.max(maxSeen, Number(blockMatch[1]));
+    if ('turnId' in block && block.turnId) {
+      const turnMatch = /^t(\d+)$/.exec(block.turnId);
+      if (turnMatch) maxSeen = Math.max(maxSeen, Number(turnMatch[1]));
+    }
+  }
+  if (maxSeen >= nextId) nextId = maxSeen + 1;
+
+  const seen = new Set<string>();
+  return blocks.map((block) => {
+    if (!seen.has(block.id)) {
+      seen.add(block.id);
+      return block;
+    }
+    let nextBlockId = id();
+    while (seen.has(nextBlockId)) nextBlockId = id();
+    seen.add(nextBlockId);
+    return { ...block, id: nextBlockId };
+  });
+}
+
 export function useChat(opts: {
   repo: Repo | undefined;
   cli: CompanionId;
@@ -324,7 +349,7 @@ export function useChat(opts: {
     setUsage(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
-    const stored = readStoredBlocks(cli, repo.path);
+    const stored = restoreBlocksWithUniqueIds(readStoredBlocks(cli, repo.path));
     setBlocks(stored);
     turnIdRef.current = '';
     reconnectAttemptRef.current = 0;

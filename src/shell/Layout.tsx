@@ -1,4 +1,5 @@
-import { ChevronLeft, ChevronRight, Moon, Sun } from 'lucide-react';
+import { useState } from 'react';
+import { ChevronLeft, ChevronRight, Grid3X3, Moon, Sun, X } from 'lucide-react';
 import { rooms } from '../data/mock';
 import type { RoomKey } from '../data/types';
 import { Evenstar, StarField } from '../theme/Ornaments';
@@ -14,9 +15,16 @@ type LayoutProps = {
   children: React.ReactNode;
 };
 
-const visibleMobile = ['/', '/dashboard', '/council', '/pins', '/scribe'] as RoomKey[];
+const primaryMobile = ['/', '/dashboard', '/council', '/pins'] as RoomKey[];
 
 export function Layout({ active, onNavigate, theme, onThemeChange, collapsed, onCollapsedChange, children }: LayoutProps) {
+  const [mobileRoomsOpen, setMobileRoomsOpen] = useState(false);
+  const navigate = (room: RoomKey) => {
+    setMobileRoomsOpen(false);
+    onNavigate(room);
+  };
+  const roomsTabActive = mobileRoomsOpen || !primaryMobile.includes(active);
+
   return (
     <div className="app-shell">
       <StarField />
@@ -46,7 +54,7 @@ export function Layout({ active, onNavigate, theme, onThemeChange, collapsed, on
               <button
                 key={room.key}
                 className={isActive ? 'active' : ''}
-                onClick={() => onNavigate(room.key)}
+                onClick={() => navigate(room.key)}
                 title={collapsed ? room.name : undefined}
               >
                 <RoomGlyph icon={room.icon} />
@@ -86,17 +94,42 @@ export function Layout({ active, onNavigate, theme, onThemeChange, collapsed, on
       >
         {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
       </button>
+      {mobileRoomsOpen ? (
+        <div className="mobile-room-sheet" role="dialog" aria-label="All rooms">
+          <div className="mobile-room-sheet-head">
+            <strong>Rooms</strong>
+            <button type="button" onClick={() => setMobileRoomsOpen(false)} title="Close rooms" aria-label="Close rooms">
+              <X size={16} />
+            </button>
+          </div>
+          <div className="mobile-room-grid">
+            {rooms.map((room) => (
+              <button key={room.key} className={active === room.key ? 'active' : ''} onClick={() => navigate(room.key)}>
+                <RoomGlyph icon={room.icon} size={20} />
+                <span>
+                  <strong>{room.name.replace('The ', '')}</strong>
+                  <small>{room.role}</small>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <nav className="mobile-tabs" aria-label="Primary rooms">
-        {visibleMobile.map((key) => {
+        {primaryMobile.map((key) => {
           const room = rooms.find((entry) => entry.key === key);
           if (!room) return null;
           return (
-            <button key={key} className={active === key ? 'active' : ''} onClick={() => onNavigate(key)}>
+            <button key={key} className={active === key ? 'active' : ''} onClick={() => navigate(key)}>
               <RoomGlyph icon={room.icon} size={20} />
               <span>{room.name.replace('The ', '')}</span>
             </button>
           );
         })}
+        <button className={roomsTabActive ? 'active' : ''} onClick={() => setMobileRoomsOpen((value) => !value)}>
+          <Grid3X3 size={20} />
+          <span>Rooms</span>
+        </button>
       </nav>
     </div>
   );

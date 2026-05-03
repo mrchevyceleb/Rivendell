@@ -18,6 +18,26 @@ import type {
 } from '../data/types';
 
 const staleTime = 20_000;
+const emptyHallSummary: HallSummary = {
+  ...hallSummary,
+  tasksDue: 0,
+  unreadEmail: 0,
+  pendingMessages: 0,
+  queuedJobs: 0,
+  runningJobs: 0,
+  needsReview: 0,
+};
+const emptyTasks: Task[] = [];
+const emptyEmails: EmailItem[] = [];
+const emptyMessages: MessageItem[] = [];
+const emptyFamily: FamilyItem[] = [];
+const emptyDocs: LibraryDoc[] = [];
+const emptyPins: PinItem[] = [];
+const emptyPlEntries: PlEntry[] = [];
+const emptyCronJobs: CronJob[] = [];
+const emptyWeavings: RivendellJob[] = [];
+const emptyAnnals: ChronicleEntry[] = [];
+const emptyScribeEvents: ScribeEvent[] = [];
 
 /**
  * Standard room data hook. Returns whatever the API returns. On error the
@@ -40,28 +60,27 @@ function roomQuery<T>(key: string[], path: string, empty: T) {
 export function useHallSummary() {
   // Hall summary is a shape, not a list; provide a zero-counter shell so the
   // UI never shows fake counts. Real data overrides on success.
-  const empty: HallSummary = { ...hallSummary, tasksDue: 0, unreadEmail: 0, pendingMessages: 0, queuedJobs: 0, runningJobs: 0, needsReview: 0 };
-  return roomQuery<HallSummary>(['hall-summary'], '/api/summary', empty);
+  return roomQuery<HallSummary>(['hall-summary'], '/api/summary', emptyHallSummary);
 }
 
 export function useTasks() {
-  return roomQuery<Task[]>(['tasks'], '/api/tasks', []);
+  return roomQuery<Task[]>(['tasks'], '/api/tasks', emptyTasks);
 }
 
 export function useEmails() {
-  return roomQuery<EmailItem[]>(['email'], '/api/email', []);
+  return roomQuery<EmailItem[]>(['email'], '/api/email', emptyEmails);
 }
 
 export function useMessages() {
-  return roomQuery<MessageItem[]>(['messages'], '/api/messages', []);
+  return roomQuery<MessageItem[]>(['messages'], '/api/messages', emptyMessages);
 }
 
 export function useFamily() {
-  return roomQuery<FamilyItem[]>(['family'], '/api/family', []);
+  return roomQuery<FamilyItem[]>(['family'], '/api/family', emptyFamily);
 }
 
 export function useDocs() {
-  return roomQuery<LibraryDoc[]>(['docs'], '/api/docs', []);
+  return roomQuery<LibraryDoc[]>(['docs'], '/api/docs', emptyDocs);
 }
 
 export function useWorkspaceTree() {
@@ -69,25 +88,25 @@ export function useWorkspaceTree() {
 }
 
 export function usePins() {
-  return roomQuery<PinItem[]>(['pins'], '/api/pins', []);
+  return roomQuery<PinItem[]>(['pins'], '/api/pins', emptyPins);
 }
 
 export function usePlEntries() {
-  return roomQuery<PlEntry[]>(['pl'], '/api/pl', []);
+  return roomQuery<PlEntry[]>(['pl'], '/api/pl', emptyPlEntries);
 }
 
 export function useCronJobs() {
-  return roomQuery<CronJob[]>(['cron'], '/api/cron', []);
+  return roomQuery<CronJob[]>(['cron'], '/api/cron', emptyCronJobs);
 }
 
 export function useWeavings() {
-  return roomQuery<RivendellJob[]>(['weavings'], '/api/weavings/queue', []);
+  return roomQuery<RivendellJob[]>(['weavings'], '/api/weavings/queue', emptyWeavings);
 }
 
 export function useAnnals() {
-  return roomQuery<ChronicleEntry[]>(['annals'], '/api/chronicle', []);
+  return roomQuery<ChronicleEntry[]>(['annals'], '/api/chronicle', emptyAnnals);
 }
 
 export function useScribeEvents() {
-  return roomQuery<ScribeEvent[]>(['scribe-events'], '/api/scribe/events', []);
+  return roomQuery<ScribeEvent[]>(['scribe-events'], '/api/scribe/events', emptyScribeEvents);
 }

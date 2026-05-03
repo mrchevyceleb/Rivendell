@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { SamPortrait } from './atoms';
 import type { CommandEntry } from '../../data/types';
@@ -414,14 +414,19 @@ export function ChatInput({
     ? getCommandSuggestionMulti(v, commandSets)
     : getCommandSuggestion(v, commandPrefix, commands);
 
-  // Auto-grow with content. The browser sets scrollHeight to whatever the
-  // content needs; reset to auto first so it can shrink too. Capped via
-  // max-height in the style block below.
-  useEffect(() => {
+  // Auto-grow with content. Reset to auto so scrollHeight reflects natural
+  // content size, then size to that, capped by computed max-height. Toggle
+  // overflow-y so the scrollbar only appears once we actually hit the cap —
+  // otherwise subpixel rounding leaves a faint scrollbar on wrapped content.
+  // useLayoutEffect (not useEffect) so the resize lands before paint.
+  useLayoutEffect(() => {
     const el = taRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
+    const needed = el.scrollHeight;
+    const max = parseFloat(getComputedStyle(el).maxHeight) || Infinity;
+    el.style.height = `${Math.min(needed, max)}px`;
+    el.style.overflowY = needed > max ? 'auto' : 'hidden';
   }, [v]);
 
   const setV = (next: string) => {
@@ -689,7 +694,7 @@ export function ChatInput({
             fontStyle: v ? 'normal' : 'italic',
             minHeight: 64,
             maxHeight: '40dvh',
-            overflowY: 'auto',
+            overflowY: 'hidden',
           }}
         />
       </div>

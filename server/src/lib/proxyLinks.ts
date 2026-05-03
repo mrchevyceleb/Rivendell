@@ -17,11 +17,21 @@ export type ProxyRewrite = {
 // the same text with paths rewritten to workspace-relative form, plus a list
 // of proxy link descriptors for each unique path. Used at boundaries where
 // the assistant or a worker emits content that will be rendered cross-device.
+//
+// Workspace paths frequently contain spaces ("Client Dashboards/Q1 Plan.md"),
+// so the matcher has to accept them. To avoid swallowing trailing prose, the
+// run is bounded by newlines, sentence-ending punctuation, period-then-space
+// (e.g. ".md "), or a space followed by a common English connective.
+const STOP_WORDS = '(?:and|or|but|the|a|an|is|are|was|were|to|of|in|on|at|by|for|that|which|because|since|so|then|with|from|as|when|where|while|after|before|will|would|should|can|could|may|might|like|this|these|those|it|its|i|we|you|he|she|they)';
+
 export function rewriteAbsolutePaths(input: string): ProxyRewrite {
   if (!input) return { text: input, links: [] };
   const root = workspaceRoot();
   const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`${escaped}(?:/[^\\s)\\]"'\`<>]*)?`, 'g');
+  const pattern = new RegExp(
+    `${escaped}(?:/[^\\n\\r]+?)?(?=$|[,;:!?]|[\\n\\r]|\\.(?:\\s|$)|\\s+${STOP_WORDS}\\b|[)\\]"'\`<>])`,
+    'g',
+  );
 
   const seen = new Set<string>();
   const links: ProxyLink[] = [];

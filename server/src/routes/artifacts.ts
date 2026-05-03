@@ -59,6 +59,15 @@ artifactsRouter.get('/:id/content', asyncHandler(async (req, res) => {
   }
   res.setHeader('Content-Type', CONTENT_TYPES[result.record.kind]);
   res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Artifacts are agent-generated HTML served same-origin from Rivendell's
+  // localhost API. Without sandboxing, raw-open ("View source" tab) would
+  // execute any embedded <script> with full access to /api/*. The CSP
+  // `sandbox` directive forces a unique opaque origin so scripts can't run
+  // and storage/network is isolated from Rivendell's real origin.
+  if (result.record.kind === 'html') {
+    res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:");
+  }
   res.send(result.content);
 }));
 
