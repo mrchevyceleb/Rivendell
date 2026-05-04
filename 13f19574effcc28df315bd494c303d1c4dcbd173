@@ -1,0 +1,1 @@
+Codex-Fix reviewed image thumbnail chat previews. Finding fixed: thumbnail data is no longer persisted in saved chat blocks, and block/seq persistence is atomic to avoid replay gaps.
