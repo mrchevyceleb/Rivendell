@@ -133,6 +133,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
 
+    const detachCurrentSession = () => {
+      sessionPromise = null;
+      busy = false;
+      unsubscribe?.();
+      unsubscribe = null;
+    };
+
     const dispatch = (se: { seq: number; ev: any }) => {
       const sev = se.ev;
       if (sev.type === 'event') {
@@ -236,6 +243,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'freshStart') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          detachCurrentSession();
           const session = await bindSession(freshStart({ cli: msg.cli, repoPath: msg.repo, chatId }));
           cliKind = msg.cli;
           repoPath = msg.repo;
@@ -247,11 +255,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'stop') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          detachCurrentSession();
           await interruptSession({ cli: msg.cli, repoPath: msg.repo, chatId });
-          sessionPromise = null;
-          unsubscribe?.();
-          unsubscribe = null;
-          busy = false;
           safeSend({ type: 'turnEnd' });
           return;
         }
@@ -259,6 +264,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'steer') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          detachCurrentSession();
           await interruptSession({ cli: msg.cli, repoPath: msg.repo, chatId });
           const session = await bindSession(getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId }));
           cliKind = msg.cli;

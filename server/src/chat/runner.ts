@@ -380,9 +380,19 @@ export async function getOrCreateSession(opts: {
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
 
-  const existing = sessions.get(key);
-  if (existing && existing.isAlive()) return existing;
-  if (existing) sessions.delete(key);
+  while (true) {
+    const existing = sessions.get(key);
+    if (!existing) break;
+    if (!existing.isAlive()) {
+      if (sessions.get(key) === existing) sessions.delete(key);
+      continue;
+    }
+
+    const ok = await existing.ready;
+    if (sessions.get(key) !== existing) continue;
+    if (ok && existing.isAlive()) return existing;
+    sessions.delete(key);
+  }
 
   const resumeId = (await getSessionId(opts.cli, cwd, chatId)) ?? null;
   const session = await spawnSession(opts.cli, cwd, chatId, resumeId, key);
