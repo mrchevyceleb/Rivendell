@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ChatBlock, CompanionId, Repo } from '../data/types';
+import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
+type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 
 export type ContextUsage = {
   inputTokens: number;
@@ -57,7 +58,8 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
       return blocks;
     }
     const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
-    return [...blocks, { kind: 'user', id: id(), text: ev.text, ts }];
+    const imageCount = typeof ev.imageCount === 'number' && ev.imageCount > 0 ? ev.imageCount : undefined;
+    return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, ts }];
   }
 
   if (ev.type === 'message_start') {
@@ -206,13 +208,26 @@ function readStoredBlocks(cli: CompanionId, repoPath: string, chatId = 'main'): 
   return [];
 }
 
-function writeStoredBlocks(cli: CompanionId, repoPath: string, chatId: string, blocks: ChatBlock[]): void {
+function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
+  return blocks.slice(-200).map((block) => {
+    if (block.kind !== 'user' || !block.images?.length) return block;
+    const { images: _images, ...rest } = block;
+    return { ...rest, imageCount: block.imageCount ?? block.images.length };
+  });
+}
+
+function writeStoredState(cli: CompanionId, repoPath: string, chatId: string, blocks: ChatBlock[], seq: number): void {
   if (typeof window === 'undefined') return;
+  const key = blocksStorageKey(cli, repoPath, chatId);
   try {
-    // Cap stored blocks so localStorage doesn't grow unbounded.
-    const tail = blocks.slice(-200);
-    localStorage.setItem(blocksStorageKey(cli, repoPath, chatId), JSON.stringify(tail));
-  } catch {}
+    localStorage.setItem(key, JSON.stringify(blocksForStorage(blocks)));
+    localStorage.setItem(`${key}:seq`, String(seq));
+  } catch {
+    try {
+      localStorage.removeItem(key);
+      localStorage.removeItem(`${key}:seq`);
+    } catch {}
+  }
 }
 
 function readStoredSeq(cli: CompanionId, repoPath: string, chatId = 'main'): number {
@@ -225,13 +240,6 @@ function readStoredSeq(cli: CompanionId, repoPath: string, chatId = 'main'): num
     }
   } catch {}
   return 0;
-}
-
-function writeStoredSeq(cli: CompanionId, repoPath: string, chatId: string, seq: number): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(blocksStorageKey(cli, repoPath, chatId) + ':seq', String(seq));
-  } catch {}
 }
 
 function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
@@ -257,6 +265,19 @@ function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
     seen.add(nextBlockId);
     return { ...block, id: nextBlockId };
   });
+}
+
+function imagePreviews(images: ChatSendImage[] | undefined): ChatImagePreview[] | undefined {
+  if (!images?.length) return undefined;
+  const previews = images
+    .map((image) => image.previewDataUrl ? { mediaType: image.mediaType, dataUrl: image.previewDataUrl } : null)
+    .filter((image): image is ChatImagePreview => Boolean(image));
+  return previews.length ? previews : undefined;
+}
+
+function payloadImages(images: ChatSendImage[] | undefined): Array<{ mediaType: string; base64: string }> | undefined {
+  if (!images?.length) return undefined;
+  return images.map((image) => ({ mediaType: image.mediaType, base64: image.base64 }));
 }
 
 export function useChat(opts: {
@@ -343,8 +364,7 @@ export function useChat(opts: {
     if (!repo) return;
     const key = conversationKey(cli, repo.path, chatId);
     if (restoredKeyRef.current !== key) return;
-    writeStoredBlocks(cli, repo.path, chatId, blocks);
-    writeStoredSeq(cli, repo.path, chatId, lastSeqRef.current);
+    writeStoredState(cli, repo.path, chatId, blocks, lastSeqRef.current);
   }, [blocks, repo?.path, cli, chatId]);
 
   useEffect(() => {
@@ -451,8 +471,7 @@ export function useChat(opts: {
           turnIdRef.current = '';
           lastSeqRef.current = 0;
           if (repo) {
-            writeStoredBlocks(cli, repo.path, chatId, []);
-            writeStoredSeq(cli, repo.path, chatId, 0);
+            writeStoredState(cli, repo.path, chatId, [], 0);
           }
         }
         else if (msg.type === 'sessionClosed') {
@@ -554,12 +573,12 @@ export function useChat(opts: {
 
   const send = (
     text: string,
-    images?: Array<{ mediaType: string; base64: string }>,
+    images?: ChatSendImage[],
   ) => {
     const ws = wsRef.current;
     setBlocks((prev) => [
       ...prev,
-      { kind: 'user', id: id(), text, ts: Date.now() },
+      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, ts: Date.now() },
     ]);
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       setError('Sam is not on the line. Please wait a moment.');
@@ -567,7 +586,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'send', chatId, text, images }));
+    ws.send(JSON.stringify({ type: 'send', chatId, text, images: payloadImages(images) }));
   };
 
   const freshStart = () => {
@@ -592,13 +611,13 @@ export function useChat(opts: {
    *  conversation continues but Sam stops doing whatever he was doing. */
   const steer = (
     text: string,
-    images?: Array<{ mediaType: string; base64: string }>,
+    images?: ChatSendImage[],
   ) => {
     if (!repo) return;
     const ws = wsRef.current;
     setBlocks((prev) => [
       ...prev,
-      { kind: 'user', id: id(), text, ts: Date.now() },
+      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, ts: Date.now() },
     ]);
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       setError('Sam is not on the line. Please wait a moment.');
@@ -606,7 +625,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images) }));
   };
 
   return { blocks, status, error, send, steer, freshStart, stop, usage };

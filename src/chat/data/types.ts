@@ -38,13 +38,18 @@ export type CommandCatalog = {
   codex: CommandEntry[];
 };
 
+export type ChatImagePreview = {
+  mediaType: string;
+  dataUrl: string;
+};
+
 // Re-export for places that use it — kept here since it's a UI-facing type.
 
 // Conversation block — the renderable unit in the chat thread.
 // `turnId` + `cbIndex` correlate a block back to claude's content_block_*
 // stream events so the reducer stays pure (no out-of-band Maps).
 export type ChatBlock =
-  | { kind: 'user'; id: string; text: string; ts: number }
+  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number }
   | {
       kind: 'text';
       id: string;

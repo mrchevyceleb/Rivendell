@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ChatBlock, CommandEntry, CompanionId, LiveSession, Repo } from '../chat/data/types';
+import type { ChatBlock, ChatImagePreview, CommandEntry, CompanionId, LiveSession, Repo } from '../chat/data/types';
 import { commandText, getCommandSuggestionMulti } from '../chat/utils/commandAutocomplete';
 import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
@@ -424,7 +424,32 @@ export function Hall() {
   );
 }
 
-type StagedImage = { id: string; mediaType: string; base64: string; previewUrl: string };
+type StagedImage = { id: string; mediaType: string; base64: string; previewUrl: string; previewDataUrl?: string };
+type SendImage = { mediaType: string; base64: string; previewDataUrl?: string };
+
+function createImageThumbnail(sourceUrl: string, mediaType: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      const maxSide = 260;
+      const scale = Math.min(1, maxSide / Math.max(image.naturalWidth || maxSide, image.naturalHeight || maxSide));
+      const width = Math.max(1, Math.round((image.naturalWidth || maxSide) * scale));
+      const height = Math.max(1, Math.round((image.naturalHeight || maxSide) * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(undefined);
+        return;
+      }
+      ctx.drawImage(image, 0, 0, width, height);
+      resolve(canvas.toDataURL(mediaType === 'image/png' ? 'image/png' : 'image/jpeg', 0.82));
+    };
+    image.onerror = () => resolve(undefined);
+    image.src = sourceUrl;
+  });
+}
 
 function Composer({
   disabled,
@@ -441,7 +466,7 @@ function Composer({
   disabled: boolean;
   streaming: boolean;
   commandPrefix: string;
-  onSend: (text: string, images?: Array<{ mediaType: string; base64: string }>) => void;
+  onSend: (text: string, images?: SendImage[]) => void;
   onStop: () => void;
   onFreshStart: () => void;
   claudeCommands: CommandEntry[];
@@ -492,11 +517,13 @@ function Composer({
       }
       const base64 = btoa(bin);
       const previewUrl = URL.createObjectURL(file);
+      const previewDataUrl = await createImageThumbnail(previewUrl, file.type);
       next.push({
         id: `img_${Math.random().toString(36).slice(2, 10)}`,
         mediaType: file.type,
         base64,
         previewUrl,
+        previewDataUrl,
       });
     }
     if (next.length) {
@@ -517,7 +544,7 @@ function Composer({
     if (disabled) return;
     if (!text && images.length === 0) return;
     const payload = images.length
-      ? images.map((i) => ({ mediaType: i.mediaType, base64: i.base64 }))
+      ? images.map((i) => ({ mediaType: i.mediaType, base64: i.base64, previewDataUrl: i.previewDataUrl }))
       : undefined;
     onSend(text, payload);
     setValue('');
@@ -715,6 +742,30 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+function UserImageStrip({ images, imageCount }: { images?: ChatImagePreview[]; imageCount?: number }) {
+  if (images?.length) {
+    return (
+      <div className="user-image-strip" aria-label={`${images.length} attached image${images.length === 1 ? '' : 's'}`}>
+        {images.map((image, index) => (
+          <figure key={`${image.dataUrl.slice(0, 48)}-${index}`} className="user-image-thumb">
+            <img src={image.dataUrl} alt={`Sent image ${index + 1}`} />
+          </figure>
+        ))}
+      </div>
+    );
+  }
+
+  if (imageCount) {
+    return (
+      <div className="user-image-strip user-image-strip-placeholder" aria-label={`${imageCount} attached image${imageCount === 1 ? '' : 's'}`}>
+        <span>{imageCount} image{imageCount === 1 ? '' : 's'}</span>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function ChatBlockView({ block, companion }: { block: ChatBlock; companion: CompanionId }) {
   if (block.kind === 'user') {
     return (
@@ -725,7 +776,8 @@ function ChatBlockView({ block, companion }: { block: ChatBlock; companion: Comp
             <strong>Matt</strong>
             <span>{formatTime(block.ts)}</span>
           </header>
-          <p>{block.text}</p>
+          <UserImageStrip images={block.images} imageCount={block.imageCount} />
+          {block.text ? <p>{block.text}</p> : null}
         </div>
       </article>
     );

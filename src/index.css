@@ -2846,6 +2846,43 @@ button {
   color: var(--r-ink);
 }
 
+.user-image-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 9px;
+}
+
+.user-image-thumb {
+  width: min(180px, 34vw);
+  height: 112px;
+  margin: 0;
+  border: 1px solid var(--r-line-gold);
+  border-radius: 8px;
+  background: var(--r-bg-deep);
+  overflow: hidden;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.18);
+}
+
+.user-image-thumb img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.user-image-strip-placeholder span {
+  min-height: 34px;
+  border: 1px solid var(--r-line);
+  border-radius: 8px;
+  background: var(--r-bg-deep);
+  color: var(--r-ink-mute);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .tool-ledger {
   border: 1px solid var(--r-line);
   border-radius: 8px;
@@ -4290,6 +4327,11 @@ button {
 
   .chat-message {
     grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .user-image-thumb {
+    width: min(150px, 58vw);
+    height: 98px;
   }
 
   .chat-composer {
