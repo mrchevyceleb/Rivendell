@@ -1,0 +1,1 @@
+Codex-Fix reviewed Claude steer interruption fix. Finding fixed: session readiness waits now re-check map identity so stale waiters cannot delete newer sessions.
