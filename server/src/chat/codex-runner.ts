@@ -53,6 +53,7 @@ export class CodexSession {
   readonly key: string;
   readonly cli: CliKind = 'codex';
   readonly cwd: string;
+  readonly chatId: string;
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   private threadId: string | null = null;
@@ -65,9 +66,10 @@ export class CodexSession {
   /** Codex doesn't need a warmup turn — ready immediately. */
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
-  constructor(cwd: string, threadId: string | null) {
+  constructor(cwd: string, chatId: string, threadId: string | null) {
     this.cwd = cwd;
-    this.key = `codex|${cwd}`;
+    this.chatId = chatId;
+    this.key = keyOf(cwd, chatId);
     this.threadId = threadId;
   }
 
@@ -251,7 +253,7 @@ export class CodexSession {
         usage: turnState.usage ?? undefined,
       });
       if (this.threadId) {
-        await setSessionId('codex', this.cwd, this.threadId);
+        await setSessionId('codex', this.cwd, this.threadId, this.chatId);
       }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
@@ -452,12 +454,18 @@ export class CodexSession {
   }
 }
 
-/** Manager keyed by cwd — same semantics as the claude session map. */
+function keyOf(cwd: string, chatId = 'main'): string {
+  const normalized = chatId || 'main';
+  return normalized === 'main' ? `codex|${cwd}` : `codex|${cwd}|${normalized}`;
+}
+
+/** Manager keyed by cwd + chat id, matching the claude session map. */
 const codexSessions = new Map<string, CodexSession>();
 
 export function activeCodexSessions(): {
   cli: CliKind;
   cwd: string;
+  chatId: string;
   busy: boolean;
   sessionId: string | null;
   lastActivityAt: number;
@@ -465,6 +473,7 @@ export function activeCodexSessions(): {
   return Array.from(codexSessions.values()).map((s) => ({
     cli: 'codex',
     cwd: s.cwd,
+    chatId: s.chatId,
     busy: s.isBusy(),
     sessionId: s.sessionId(),
     lastActivityAt: s.lastActivityAt(),
@@ -484,14 +493,15 @@ export function pruneIdleCodexSessions(ttlMs: number, now = Date.now()): number 
   return pruned;
 }
 
-export async function getOrCreateCodexSession(opts: { repoPath: string }): Promise<CodexSession> {
+export async function getOrCreateCodexSession(opts: { repoPath: string; chatId?: string }): Promise<CodexSession> {
   const cwd = opts.repoPath;
-  const key = `codex|${cwd}`;
+  const chatId = opts.chatId || 'main';
+  const key = keyOf(cwd, chatId);
   const existing = codexSessions.get(key);
   if (existing && existing.isAlive()) return existing;
 
-  const threadId = (await getSessionId('codex', cwd)) ?? null;
-  const session = new CodexSession(cwd, threadId);
+  const threadId = (await getSessionId('codex', cwd, chatId)) ?? null;
+  const session = new CodexSession(cwd, chatId, threadId);
   codexSessions.set(key, session);
   return session;
 }
@@ -502,9 +512,9 @@ export function shutdownAllCodexSessions(): void {
 }
 
 /** Kill the in-flight codex child but keep the thread id saved for resume. */
-export function interruptCodex(opts: { repoPath: string }): void {
+export function interruptCodex(opts: { repoPath: string; chatId?: string }): void {
   const cwd = opts.repoPath;
-  const key = `codex|${cwd}`;
+  const key = keyOf(cwd, opts.chatId || 'main');
   const s = codexSessions.get(key);
   if (s) {
     s.shutdown();
@@ -513,16 +523,17 @@ export function interruptCodex(opts: { repoPath: string }): void {
 }
 
 /** Drop the stored thread id so the next codex spawn starts a fresh thread. */
-export async function freshStartCodex(opts: { repoPath: string }): Promise<CodexSession> {
+export async function freshStartCodex(opts: { repoPath: string; chatId?: string }): Promise<CodexSession> {
   const cwd = opts.repoPath;
-  const key = `codex|${cwd}`;
+  const chatId = opts.chatId || 'main';
+  const key = keyOf(cwd, chatId);
   const existing = codexSessions.get(key);
   if (existing) {
     existing.shutdown();
     codexSessions.delete(key);
   }
-  await setSessionId('codex', cwd, '');
-  const session = new CodexSession(cwd, null);
+  await setSessionId('codex', cwd, '', chatId);
+  const session = new CodexSession(cwd, chatId, null);
   codexSessions.set(key, session);
   return session;
 }

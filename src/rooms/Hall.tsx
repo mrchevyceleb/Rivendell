@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { ChatBlock, CommandEntry, CompanionId, Repo } from '../chat/data/types';
+import type { ChatBlock, CommandEntry, CompanionId, LiveSession, Repo } from '../chat/data/types';
 import { commandText, getCommandSuggestionMulti } from '../chat/utils/commandAutocomplete';
 import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
@@ -36,8 +36,13 @@ import { timeAgo } from '../utils/format';
 
 type ChatStatus = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 type ActiveChat = { cli: CompanionId; repoPath: string };
+type ChatTab = { id: string; cli: CompanionId; title: string; createdAt: number };
 
 const ACTIVE_KEY = 'rivendell:hall-chat-active';
+const CHAT_TABS_KEY = 'rivendell:hall-chat-tabs';
+const ACTIVE_TAB_KEY = 'rivendell:hall-chat-active-tab';
+const MAIN_CHAT_ID = 'main';
+const FRESH_TITLE = 'a fresh errand';
 const SCRIBE_COLLAPSED_KEY = 'rivendell:hall-scribe-collapsed';
 
 const companionLabel: Record<CompanionId, string> = {
@@ -72,16 +77,20 @@ export function Hall() {
   const repos = reposState.repos;
   const commands = useCommands();
   const liveSessions = useLive();
-  const [companion, setCompanion] = useState<CompanionId>(() => normalizeCompanion(readActive()?.cli));
+  const [tabs, setTabs] = useState<ChatTab[]>(() => readTabs(normalizeCompanion(readActive()?.cli)));
+  const [activeTabId, setActiveTabId] = useState<string>(() => readActiveTabId(tabs));
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
+  const companion = activeTab?.cli ?? 'assistant';
   const [repo, setRepo] = useState<Repo | undefined>();
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(() => readPromptParam());
-  const [title, setTitle] = useState('a fresh errand');
+  const [tabCloseError, setTabCloseError] = useState<string | null>(null);
   const [scribeCollapsed, setScribeCollapsed] = useState(() => localStorage.getItem(SCRIBE_COLLAPSED_KEY) === 'true');
   // Mobile-only: collapses the verbose status / repo / command-count strip into
   // a tap-to-expand panel so messages aren't pushed off the first screen.
   const [mobileInfoOpen, setMobileInfoOpen] = useState(false);
   const restoreRef = useRef(readActive()?.repoPath ?? null);
   const dateLabel = new Intl.DateTimeFormat([], { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
+  const title = activeTab?.title || FRESH_TITLE;
 
   const { data: initialEvents = [] } = useScribeEvents();
   const { events: scribeEvents, state: scribeState } = useScribeSocket(initialEvents);
@@ -112,12 +121,25 @@ export function Hall() {
   }, [companion, repo?.path]);
 
   useEffect(() => {
+    writeTabs(tabs);
+  }, [tabs]);
+
+  useEffect(() => {
+    if (!tabs.some((tab) => tab.id === activeTabId) && tabs[0]) {
+      setActiveTabId(tabs[0].id);
+      return;
+    }
+    localStorage.setItem(ACTIVE_TAB_KEY, activeTabId);
+  }, [activeTabId, tabs]);
+
+  useEffect(() => {
     localStorage.setItem(SCRIBE_COLLAPSED_KEY, String(scribeCollapsed));
   }, [scribeCollapsed]);
 
   const chat = useChat({
     repo,
     cli: companion,
+    chatId: activeTab?.id ?? MAIN_CHAT_ID,
     enabled: Boolean(repo),
     initialMessage: pendingPrompt,
     onInitialMessageSent: () => setPendingPrompt(null),
@@ -125,19 +147,27 @@ export function Hall() {
 
   useEffect(() => {
     const firstUser = chat.blocks.find((block) => block.kind === 'user');
-    if (firstUser?.kind === 'user') {
-      const next = firstUser.text.trim().split('\n')[0]?.slice(0, 64);
-      if (next) setTitle(next);
-    } else {
-      setTitle('a fresh errand');
-    }
-  }, [chat.blocks]);
+    const next = firstUser?.kind === 'user'
+      ? firstUser.text.trim().split('\n')[0]?.slice(0, 64) || FRESH_TITLE
+      : FRESH_TITLE;
+    const currentTabId = activeTab?.id;
+    if (!currentTabId) return;
+    setTabs((prev) => prev.map((tab) => (
+      tab.id === currentTabId && tab.title !== next ? { ...tab, title: next } : tab
+    )));
+  }, [activeTab?.id, chat.blocks]);
 
   const activeCommands = companion === 'codex' ? commands.codex : commands.claude;
-  const activeLive = liveSessions.find((session) => session.cwd === repo?.path && session.cli === companion);
+  const activeLive = liveSessions.find((session) => (
+    session.cwd === repo?.path &&
+    session.cli === companion &&
+    (session.chatId || MAIN_CHAT_ID) === (activeTab?.id ?? MAIN_CHAT_ID)
+  ));
 
   const switchCompanion = (next: CompanionId) => {
-    setCompanion(next);
+    setTabs((prev) => prev.map((tab) => (
+      tab.id === activeTabId ? { ...tab, cli: next } : tab
+    )));
     if (next === 'assistant') {
       const assistantHub = repos.find((item) => item.isAssistantHub);
       if (assistantHub) setRepo(assistantHub);
@@ -146,7 +176,45 @@ export function Hall() {
 
   const beginFresh = () => {
     chat.freshStart();
-    setTitle('a fresh errand');
+    setTabs((prev) => prev.map((tab) => (
+      tab.id === activeTabId ? { ...tab, title: FRESH_TITLE } : tab
+    )));
+  };
+
+  const createChatTab = () => {
+    const tab = createTab(companion);
+    setTabs((prev) => [...prev, tab]);
+    setActiveTabId(tab.id);
+    setPendingPrompt(null);
+  };
+
+  const closeChatTab = async (tabId: string) => {
+    if (tabs.length <= 1) return;
+    setTabCloseError(null);
+    const index = tabs.findIndex((tab) => tab.id === tabId);
+    const closingTab = tabs[index];
+    if (!closingTab) return;
+    const busySessions = repo
+      ? liveSessions.filter((session) => (
+          session.cwd === repo.path &&
+          (session.chatId || MAIN_CHAT_ID) === tabId &&
+          session.busy
+        ))
+      : [];
+    if (busySessions.length > 0 && repo) {
+      const results = await Promise.allSettled(busySessions.map((session) => interruptLiveSession(session, repo.path, tabId)));
+      if (results.some((result) => result.status === 'rejected')) {
+        setTabCloseError('That tab is still running. I could not stop it, so I left it open.');
+        return;
+      }
+    }
+    const nextTabs = tabs.filter((tab) => tab.id !== tabId);
+    setTabs(nextTabs);
+    clearStoredTab(closingTab, repo);
+    if (activeTabId === tabId) {
+      const nextActive = nextTabs[Math.max(0, index - 1)] ?? nextTabs[0];
+      if (nextActive) setActiveTabId(nextActive.id);
+    }
   };
 
   const { scrollRef, bottomRef, contentRef, onScroll } = useStickyScroll();
@@ -207,6 +275,47 @@ export function Hall() {
 
       <div className="hall-chat-body">
         <main className="chat-main">
+          <div className="chat-tab-strip" role="tablist" aria-label="Chat tabs">
+            {tabs.map((tab) => (
+              <div key={tab.id} className={`chat-tab ${tab.id === activeTab?.id ? 'active' : ''}`}>
+                <button
+                  className="chat-tab-main"
+                  type="button"
+                  role="tab"
+                  aria-selected={tab.id === activeTab?.id}
+                  onClick={() => setActiveTabId(tab.id)}
+                  title={tab.title}
+                >
+                  <span className={`status-pin status-${tab.cli === 'assistant' ? 'done' : 'running'}`} />
+                  <span>
+                    <strong>{tab.title}</strong>
+                    <small>{companionLabel[tab.cli]}</small>
+                  </span>
+                </button>
+                {tabs.length > 1 ? (
+                  <button
+                    className="chat-tab-close"
+                    type="button"
+                    onClick={() => void closeChatTab(tab.id)}
+                    title="Close chat tab"
+                    aria-label={`Close ${tab.title}`}
+                  >
+                    <X size={13} />
+                  </button>
+                ) : null}
+              </div>
+            ))}
+            <button
+              className="chat-tab-add"
+              type="button"
+              onClick={createChatTab}
+              title="New chat tab"
+              aria-label="New chat tab"
+            >
+              <Plus size={15} />
+            </button>
+          </div>
+
           <div className={`chat-context-bar ${mobileInfoOpen ? 'is-mobile-open' : ''}`}>
             <div className="repo-picker">
               <button
@@ -249,6 +358,11 @@ export function Hall() {
               {chat.error ? (
                 <div className="chat-error" role="status">
                   {chat.error}
+                </div>
+              ) : null}
+              {tabCloseError ? (
+                <div className="chat-error" role="status">
+                  {tabCloseError}
                 </div>
               ) : null}
               <div ref={bottomRef} aria-hidden style={{ height: 1 }} />
@@ -708,6 +822,84 @@ function EmptyChat({ companion, repo, onPrompt }: { companion: CompanionId; repo
 
 function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function createTab(cli: CompanionId): ChatTab {
+  return {
+    id: `chat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    cli: normalizeCompanion(cli),
+    title: FRESH_TITLE,
+    createdAt: Date.now(),
+  };
+}
+
+function defaultTab(cli: CompanionId): ChatTab {
+  return {
+    id: MAIN_CHAT_ID,
+    cli: normalizeCompanion(cli),
+    title: FRESH_TITLE,
+    createdAt: Date.now(),
+  };
+}
+
+function readTabs(initialCli: CompanionId): ChatTab[] {
+  try {
+    const raw = localStorage.getItem(CHAT_TABS_KEY);
+    if (!raw) return [defaultTab(initialCli)];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [defaultTab(initialCli)];
+    const tabs = parsed
+      .map((item): ChatTab | null => {
+        if (!item || typeof item !== 'object') return null;
+        const record = item as Record<string, unknown>;
+        if (typeof record.id !== 'string' || !record.id.trim()) return null;
+        return {
+          id: record.id,
+          cli: normalizeCompanion(record.cli as CompanionId | undefined),
+          title: typeof record.title === 'string' && record.title.trim() ? record.title : FRESH_TITLE,
+          createdAt: typeof record.createdAt === 'number' ? record.createdAt : Date.now(),
+        };
+      })
+      .filter((item): item is ChatTab => Boolean(item));
+    return tabs.length ? tabs : [defaultTab(initialCli)];
+  } catch {
+    return [defaultTab(initialCli)];
+  }
+}
+
+function readActiveTabId(tabs: ChatTab[]): string {
+  try {
+    const raw = localStorage.getItem(ACTIVE_TAB_KEY);
+    if (raw && tabs.some((tab) => tab.id === raw)) return raw;
+  } catch {
+    // fall through
+  }
+  return tabs[0]?.id ?? MAIN_CHAT_ID;
+}
+
+function writeTabs(tabs: ChatTab[]) {
+  localStorage.setItem(CHAT_TABS_KEY, JSON.stringify(tabs));
+}
+
+async function interruptLiveSession(session: LiveSession, repoPath: string, chatId: string): Promise<void> {
+  const response = await fetch('/api/chat/interrupt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cli: session.cli, repo: repoPath, chatId }),
+  });
+  if (!response.ok) {
+    throw new Error(`interrupt failed: ${response.status}`);
+  }
+}
+
+function clearStoredTab(tab: ChatTab, repo: Repo | undefined): void {
+  if (!repo) return;
+  const suffix = tab.id === MAIN_CHAT_ID ? '' : `|${tab.id}`;
+  for (const cli of ['assistant', 'codex', 'claude'] as CompanionId[]) {
+    const key = `rivendell:chat-blocks:${cli}|${repo.path}${suffix}`;
+    localStorage.removeItem(key);
+    localStorage.removeItem(`${key}:seq`);
+  }
 }
 
 function readActive(): ActiveChat | null {

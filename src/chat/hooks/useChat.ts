@@ -184,14 +184,21 @@ function summarize(s: string): string {
   return `${firstLine.slice(0, 80)}…`;
 }
 
-function blocksStorageKey(cli: CompanionId, repoPath: string): string {
-  return `rivendell:chat-blocks:${cli}|${repoPath}`;
+function conversationKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
+  const normalized = chatId || 'main';
+  return normalized === 'main'
+    ? `${cli}|${repoPath}`
+    : `${cli}|${repoPath}|${normalized}`;
 }
 
-function readStoredBlocks(cli: CompanionId, repoPath: string): ChatBlock[] {
+function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
+  return `rivendell:chat-blocks:${conversationKey(cli, repoPath, chatId)}`;
+}
+
+function readStoredBlocks(cli: CompanionId, repoPath: string, chatId = 'main'): ChatBlock[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = localStorage.getItem(blocksStorageKey(cli, repoPath));
+    const raw = localStorage.getItem(blocksStorageKey(cli, repoPath, chatId));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) return parsed as ChatBlock[];
@@ -199,19 +206,19 @@ function readStoredBlocks(cli: CompanionId, repoPath: string): ChatBlock[] {
   return [];
 }
 
-function writeStoredBlocks(cli: CompanionId, repoPath: string, blocks: ChatBlock[]): void {
+function writeStoredBlocks(cli: CompanionId, repoPath: string, chatId: string, blocks: ChatBlock[]): void {
   if (typeof window === 'undefined') return;
   try {
     // Cap stored blocks so localStorage doesn't grow unbounded.
     const tail = blocks.slice(-200);
-    localStorage.setItem(blocksStorageKey(cli, repoPath), JSON.stringify(tail));
+    localStorage.setItem(blocksStorageKey(cli, repoPath, chatId), JSON.stringify(tail));
   } catch {}
 }
 
-function readStoredSeq(cli: CompanionId, repoPath: string): number {
+function readStoredSeq(cli: CompanionId, repoPath: string, chatId = 'main'): number {
   if (typeof window === 'undefined') return 0;
   try {
-    const raw = localStorage.getItem(blocksStorageKey(cli, repoPath) + ':seq');
+    const raw = localStorage.getItem(blocksStorageKey(cli, repoPath, chatId) + ':seq');
     if (raw) {
       const n = Number(raw);
       if (Number.isFinite(n)) return n;
@@ -220,10 +227,10 @@ function readStoredSeq(cli: CompanionId, repoPath: string): number {
   return 0;
 }
 
-function writeStoredSeq(cli: CompanionId, repoPath: string, seq: number): void {
+function writeStoredSeq(cli: CompanionId, repoPath: string, chatId: string, seq: number): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(blocksStorageKey(cli, repoPath) + ':seq', String(seq));
+    localStorage.setItem(blocksStorageKey(cli, repoPath, chatId) + ':seq', String(seq));
   } catch {}
 }
 
@@ -255,11 +262,12 @@ function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
 export function useChat(opts: {
   repo: Repo | undefined;
   cli: CompanionId;
+  chatId?: string;
   enabled: boolean;
   initialMessage?: string | null;
   onInitialMessageSent?: () => void;
 }) {
-  const { repo, cli, enabled, initialMessage, onInitialMessageSent } = opts;
+  const { repo, cli, chatId = 'main', enabled, initialMessage, onInitialMessageSent } = opts;
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [status, setStatus] = useState<Status>('idle');
   // Mirror status into a ref so WS handlers can read the latest value
@@ -281,6 +289,7 @@ export function useChat(opts: {
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const teardownRef = useRef(false);
+  const connectionIdRef = useRef(0);
   const turnIdRef = useRef('');
   // Mirror the initial message into a ref so the WS onmessage handler can
   // read the latest value without re-subscribing every render.
@@ -290,7 +299,7 @@ export function useChat(opts: {
   onInitialMessageSentRef.current = onInitialMessageSent;
   /** Latest event seq received from server. Sent on reconnect for replay. */
   const lastSeqRef = useRef(-1);
-  /** Key (`${cli}|${repoPath}`) of the conversation we've already restored from
+  /** Key (`${cli}|${repoPath}|${chatId}`) of the conversation we've already restored from
    *  storage. Writes are gated on this so we don't wipe a saved chat with the
    *  empty initial state on the first render after repos load. */
   const restoredKeyRef = useRef<string | null>(null);
@@ -319,12 +328,12 @@ export function useChat(opts: {
             { kind: 'user', id: id(), text: initialMessage, ts: Date.now() },
           ];
         });
-        ws.send(JSON.stringify({ type: 'send', text: initialMessage }));
+        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage }));
       }
     } else if (!initialSendInFlightRef.current) {
       initialMessageRef.current = null;
     }
-  }, [initialMessage, status]);
+  }, [chatId, initialMessage, status]);
 
   // Save to localStorage whenever blocks change, so a refresh restores them.
   // CRITICAL: skip until the read-and-restore effect below has run for the
@@ -332,16 +341,18 @@ export function useChat(opts: {
   // writes blocks=[] over saved history before we get a chance to load it.
   useEffect(() => {
     if (!repo) return;
-    const key = `${cli}|${repo.path}`;
+    const key = conversationKey(cli, repo.path, chatId);
     if (restoredKeyRef.current !== key) return;
-    writeStoredBlocks(cli, repo.path, blocks);
-    writeStoredSeq(cli, repo.path, lastSeqRef.current);
-  }, [blocks, repo?.path, cli]);
+    writeStoredBlocks(cli, repo.path, chatId, blocks);
+    writeStoredSeq(cli, repo.path, chatId, lastSeqRef.current);
+  }, [blocks, repo?.path, cli, chatId]);
 
   useEffect(() => {
     if (!enabled || !repo) return;
 
     teardownRef.current = false;
+    const connectionId = ++connectionIdRef.current;
+    const isCurrentConnection = () => connectionIdRef.current === connectionId && !teardownRef.current;
     // Reset the assumed context window to the per-CLI default each time we
     // (re)connect. The system/init event will refine it for claude; codex
     // sticks at 400K unless usage forces a ratchet.
@@ -349,18 +360,18 @@ export function useChat(opts: {
     setUsage(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
-    const stored = restoreBlocksWithUniqueIds(readStoredBlocks(cli, repo.path));
+    const stored = restoreBlocksWithUniqueIds(readStoredBlocks(cli, repo.path, chatId));
     setBlocks(stored);
     turnIdRef.current = '';
     reconnectAttemptRef.current = 0;
     // Sequence we've already seen (persisted) — replay only what's newer.
-    lastSeqRef.current = readStoredSeq(cli, repo.path);
+    lastSeqRef.current = readStoredSeq(cli, repo.path, chatId);
     // Mark this conversation as restored so the persistence-write effect can
     // safely begin saving updates back to storage.
-    restoredKeyRef.current = `${cli}|${repo.path}`;
+    restoredKeyRef.current = conversationKey(cli, repo.path, chatId);
 
     const connect = () => {
-      if (teardownRef.current) return;
+      if (!isCurrentConnection()) return;
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${window.location.host}/api/ws`);
       wsRef.current = ws;
@@ -368,15 +379,18 @@ export function useChat(opts: {
       setError(null);
 
       ws.onopen = () => {
+        if (!isCurrentConnection()) return;
         reconnectAttemptRef.current = 0;
         ws.send(JSON.stringify({
           type: 'hello',
           cli,
           repo: repo.path,
+          chatId,
           sinceSeq: lastSeqRef.current,
         }));
       };
       ws.onmessage = (e) => {
+        if (!isCurrentConnection()) return;
         let msg: any;
         try { msg = JSON.parse(String(e.data)); }
         catch { return; }
@@ -408,7 +422,7 @@ export function useChat(opts: {
                 { kind: 'user', id: id(), text: pending, ts: Date.now() },
               ];
             });
-            ws.send(JSON.stringify({ type: 'send', text: pending }));
+            ws.send(JSON.stringify({ type: 'send', chatId, text: pending }));
           }
         }
         else if (msg.type === 'sessionRebound') {
@@ -437,8 +451,8 @@ export function useChat(opts: {
           turnIdRef.current = '';
           lastSeqRef.current = 0;
           if (repo) {
-            writeStoredBlocks(cli, repo.path, []);
-            writeStoredSeq(cli, repo.path, 0);
+            writeStoredBlocks(cli, repo.path, chatId, []);
+            writeStoredSeq(cli, repo.path, chatId, 0);
           }
         }
         else if (msg.type === 'sessionClosed') {
@@ -508,7 +522,7 @@ export function useChat(opts: {
         }
       };
       ws.onclose = () => {
-        if (teardownRef.current) return;
+        if (!isCurrentConnection()) return;
         if (initialSendInFlightRef.current) initialSendInFlightRef.current = false;
         pendingSendRef.current = false;
         setStatus('closed');
@@ -518,6 +532,7 @@ export function useChat(opts: {
         reconnectTimerRef.current = window.setTimeout(connect, delay);
       };
       ws.onerror = () => {
+        if (!isCurrentConnection()) return;
         setError('the line went quiet, reconnecting…');
       };
     };
@@ -535,7 +550,7 @@ export function useChat(opts: {
         wsRef.current = null;
       }
     };
-  }, [enabled, repo?.path, cli]);
+  }, [enabled, repo?.path, cli, chatId]);
 
   const send = (
     text: string,
@@ -552,7 +567,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'send', text, images }));
+    ws.send(JSON.stringify({ type: 'send', chatId, text, images }));
   };
 
   const freshStart = () => {
@@ -562,14 +577,14 @@ export function useChat(opts: {
       setError('Sam is not on the line. Please wait a moment.');
       return;
     }
-    ws.send(JSON.stringify({ type: 'freshStart', cli, repo: repo.path }));
+    ws.send(JSON.stringify({ type: 'freshStart', cli, repo: repo.path, chatId }));
   };
 
   const stop = () => {
     if (!repo) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'stop', cli, repo: repo.path }));
+    ws.send(JSON.stringify({ type: 'stop', cli, repo: repo.path, chatId }));
   };
 
   /** Stop the current turn and immediately fire a new prompt. The model sees
@@ -591,7 +606,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, text, images }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images }));
   };
 
   return { blocks, status, error, send, steer, freshStart, stop, usage };

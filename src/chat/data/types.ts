@@ -7,6 +7,7 @@ export type CompanionId = 'claude' | 'codex' | 'assistant';
 export type LiveSession = {
   cli: CompanionId;
   cwd: string;
+  chatId: string;
   repoName: string;
   busy: boolean;
   sessionId: string | null;

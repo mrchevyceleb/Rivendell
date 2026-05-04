@@ -6,14 +6,17 @@ import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 // Persists across server restarts so re-opening a chat resumes the right thread.
 
 type Cli = 'claude' | 'codex' | 'assistant';
-type Key = string; // `${cli}|${repoPath}`
+type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type Stored = Record<Key, { sessionId: string; updatedAt: number }>;
 
 let cache: Stored | null = null;
 let writeQueue: Promise<void> = Promise.resolve();
 
-const key = (cli: Cli, repoPath: string): Key => `${cli}|${repoPath}`;
+const key = (cli: Cli, repoPath: string, chatId = 'main'): Key => {
+  const normalized = chatId || 'main';
+  return normalized === 'main' ? `${cli}|${repoPath}` : `${cli}|${repoPath}|${normalized}`;
+};
 
 async function load(): Promise<Stored> {
   if (cache) return cache;
@@ -32,15 +35,16 @@ async function flush() {
   await writeFile(SESSIONS_FILE, JSON.stringify(cache, null, 2));
 }
 
-export async function getSessionId(cli: Cli, repoPath: string): Promise<string | undefined> {
+export async function getSessionId(cli: Cli, repoPath: string, chatId = 'main'): Promise<string | undefined> {
   const all = await load();
-  return all[key(cli, repoPath)]?.sessionId;
+  return all[key(cli, repoPath, chatId)]?.sessionId;
 }
 
-export async function setSessionId(cli: Cli, repoPath: string, sessionId: string): Promise<void> {
+export async function setSessionId(cli: Cli, repoPath: string, sessionId: string, chatId = 'main'): Promise<void> {
   const all = await load();
-  if (sessionId) all[key(cli, repoPath)] = { sessionId, updatedAt: Date.now() };
-  else delete all[key(cli, repoPath)];
+  const storageKey = key(cli, repoPath, chatId);
+  if (sessionId) all[storageKey] = { sessionId, updatedAt: Date.now() };
+  else delete all[storageKey];
   // Coalesce concurrent writes.
   writeQueue = writeQueue.then(flush, flush);
   await writeQueue;

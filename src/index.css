@@ -2451,7 +2451,7 @@ button {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   border-right: 1px solid var(--r-line);
 }
 
@@ -2461,6 +2461,127 @@ button {
 
 .chat-main > * {
   min-width: 0;
+}
+
+.chat-tab-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 30px;
+  border-bottom: 1px solid var(--r-line);
+  background: color-mix(in srgb, var(--r-bg-deep) 72%, transparent);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  position: relative;
+  z-index: 3;
+}
+
+.chat-tab {
+  flex: 0 0 auto;
+  min-width: 180px;
+  max-width: 260px;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--r-line);
+  border-radius: 8px;
+  background: var(--r-bg-deep);
+  overflow: hidden;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.chat-tab:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--r-line-gold) 58%, var(--r-line));
+}
+
+.chat-tab.active {
+  border-color: var(--r-line-gold);
+  background:
+    radial-gradient(180px 70px at 16% 0%, rgba(212, 175, 99, 0.12), transparent 72%),
+    var(--r-bg-raised);
+  box-shadow: inset 0 -2px 0 rgba(212, 175, 99, 0.32);
+}
+
+.chat-tab-main {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  background: transparent;
+  color: var(--r-ink-soft);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-tab-main > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.chat-tab-main strong,
+.chat-tab-main small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-tab-main strong {
+  color: var(--r-ink);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.1;
+}
+
+.chat-tab-main small {
+  color: var(--r-ink-faint);
+  font-size: 10px;
+}
+
+.chat-tab-close,
+.chat-tab-add {
+  border: 0;
+  background: transparent;
+  color: var(--r-ink-mute);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.chat-tab-close {
+  width: 30px;
+  border-left: 1px solid var(--r-line);
+}
+
+.chat-tab-close:hover,
+.chat-tab-add:hover {
+  color: var(--r-gold);
+  background: rgba(212, 175, 99, 0.08);
+}
+
+.chat-tab-add {
+  flex: 0 0 auto;
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  width: 38px;
+  height: 38px;
+  border: 1px dashed var(--r-line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--r-bg-deep) 76%, transparent);
+  box-shadow: -10px 0 18px color-mix(in srgb, var(--r-bg-deep) 82%, transparent);
+}
+
+.chat-tab-add:hover {
+  transform: translateY(-1px) rotate(3deg);
+  border-color: var(--r-line-gold);
 }
 
 .chat-context-bar {
@@ -3975,14 +4096,10 @@ button {
     position: relative;
   }
 
-  /* Context bar is hidden by default on mobile and overlays absolutely
-     when opened, so chat-main only needs two rows: the scrolling
-     transcript and the composer. Without this, chat-main keeps its
-     3-row desktop template (auto / 1fr / auto), the transcript
-     auto-places into the first auto row, and the composer balloons
-     into the 1fr row. */
+  /* Context bar overlays absolutely when opened on mobile, so the tab rail,
+     transcript, and composer are the only in-flow rows. */
   .chat-main {
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: auto minmax(0, 1fr) auto;
   }
 
   /* Compact one-row header on mobile so the conversation isn't pushed off
@@ -4078,6 +4195,34 @@ button {
 
   .hall-rail-toggle {
     display: none;
+  }
+
+  .chat-tab-strip {
+    gap: 7px;
+    padding: 8px 12px;
+  }
+
+  .chat-tab {
+    min-width: 150px;
+    max-width: 190px;
+    min-height: 40px;
+  }
+
+  .chat-tab-main {
+    padding: 7px 9px;
+  }
+
+  .chat-tab-main strong {
+    font-size: 11px;
+  }
+
+  .chat-tab-close {
+    width: 32px;
+  }
+
+  .chat-tab-add {
+    width: 38px;
+    height: 38px;
   }
 
   .rail-icon-button.hall-info-toggle.is-active {

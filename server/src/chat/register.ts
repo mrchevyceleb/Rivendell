@@ -22,11 +22,11 @@ import {
   shutdownAllCodexSessions,
 } from './codex-runner.ts';
 
-type ClientHello = { type: 'hello'; cli: CliKind; repo: string; sinceSeq?: number };
-type ClientSend = { type: 'send'; text: string; images?: Array<{ mediaType: string; base64: string }> };
-type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string };
-type ClientStop = { type: 'stop'; cli: CliKind; repo: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; text: string; images?: Array<{ mediaType: string; base64: string }> };
+type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number };
+type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }> };
+type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string };
+type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }> };
 type ClientMsg = ClientHello | ClientSend | ClientFresh | ClientStop | ClientSteer;
 type ResumeWatchableSession = AnySession & {
   startedWithResume?: () => boolean;
@@ -36,6 +36,15 @@ type ResumeWatchableSession = AnySession & {
 const IDLE_SESSION_TTL_MS = 30 * 60 * 1000;
 const IDLE_REAPER_INTERVAL_MS = 60 * 1000;
 const RESUME_STARTUP_WATCH_MS = 8000;
+const DEFAULT_CHAT_ID = 'main';
+
+function normalizeChatId(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_CHAT_ID;
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_CHAT_ID;
+  const safe = trimmed.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+  return safe || DEFAULT_CHAT_ID;
+}
 
 export async function registerChat(app: express.Express, server: Server): Promise<() => void> {
   await ensureStateDir();
@@ -56,10 +65,27 @@ export async function registerChat(app: express.Express, server: Server): Promis
         cwd: session.cwd,
         repoName: basename(session.cwd),
         busy: session.busy,
+        chatId: session.chatId,
         sessionId: session.sessionId,
         lastActivityAt: session.lastActivityAt,
       })),
     });
+  });
+
+  app.post('/api/chat/interrupt', async (req, res) => {
+    const body = req.body as Partial<{ cli: CliKind; repo: string; chatId: string }>;
+    const cli = body.cli;
+    if (cli !== 'assistant' && cli !== 'claude' && cli !== 'codex') {
+      res.status(400).json({ error: 'invalid cli' });
+      return;
+    }
+    if (typeof body.repo !== 'string' || !body.repo.trim()) {
+      res.status(400).json({ error: 'invalid repo' });
+      return;
+    }
+    const chatId = normalizeChatId(body.chatId);
+    await interruptSession({ cli, repoPath: body.repo, chatId });
+    res.json({ ok: true, chatId });
   });
 
   app.get('/api/chronicle', async (_req, res) => {
@@ -100,6 +126,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     let busy = false;
     let cliKind: CliKind | null = null;
     let repoPath: string | null = null;
+    let chatId = DEFAULT_CHAT_ID;
     let turnGeneration = 0;
 
     const safeSend = (msg: object) => {
@@ -164,7 +191,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
       console.log(`[chat ws#${wsId}] stale resume closed before init, retrying fresh`);
       try {
-        const retrySession = await bindSession(getOrCreateSession({ cli: cliKind, repoPath }));
+        const retrySession = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
         busy = true;
         safeSend({ type: 'sessionRebound' });
         safeSend({ type: 'turnStart' });
@@ -192,32 +219,35 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'hello') {
           cliKind = msg.cli;
           repoPath = msg.repo;
+          chatId = normalizeChatId(msg.chatId);
           const sinceSeq = typeof msg.sinceSeq === 'number' ? msg.sinceSeq : -1;
-          console.log(`[chat ws#${wsId}] hello cli=${msg.cli} repo=${msg.repo} sinceSeq=${sinceSeq}`);
+          console.log(`[chat ws#${wsId}] hello cli=${msg.cli} repo=${msg.repo} chatId=${chatId} sinceSeq=${sinceSeq}`);
           const session = await bindSession(
-            getOrCreateSession({ cli: msg.cli, repoPath: msg.repo }),
+            getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId }),
             sinceSeq,
           );
           const sessionBusy = (session as any).isBusy?.() === true;
           busy = sessionBusy;
           console.log(`[chat ws#${wsId}] session ready key=${session.key} latestSeq=${session.latestSeq()} busy=${sessionBusy}`);
-          safeSend({ type: 'ready', cli: msg.cli, repo: msg.repo, latestSeq: session.latestSeq(), busy: sessionBusy });
+          safeSend({ type: 'ready', cli: msg.cli, repo: msg.repo, chatId, latestSeq: session.latestSeq(), busy: sessionBusy });
           return;
         }
 
         if (msg.type === 'freshStart') {
           turnGeneration += 1;
-          const session = await bindSession(freshStart({ cli: msg.cli, repoPath: msg.repo }));
+          chatId = normalizeChatId(msg.chatId);
+          const session = await bindSession(freshStart({ cli: msg.cli, repoPath: msg.repo, chatId }));
           cliKind = msg.cli;
           repoPath = msg.repo;
           busy = false;
-          safeSend({ type: 'freshStarted', cli: msg.cli, repo: msg.repo, latestSeq: session.latestSeq() });
+          safeSend({ type: 'freshStarted', cli: msg.cli, repo: msg.repo, chatId, latestSeq: session.latestSeq() });
           return;
         }
 
         if (msg.type === 'stop') {
           turnGeneration += 1;
-          await interruptSession({ cli: msg.cli, repoPath: msg.repo });
+          chatId = normalizeChatId(msg.chatId);
+          await interruptSession({ cli: msg.cli, repoPath: msg.repo, chatId });
           sessionPromise = null;
           unsubscribe?.();
           unsubscribe = null;
@@ -228,8 +258,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
         if (msg.type === 'steer') {
           turnGeneration += 1;
-          await interruptSession({ cli: msg.cli, repoPath: msg.repo });
-          const session = await bindSession(getOrCreateSession({ cli: msg.cli, repoPath: msg.repo }));
+          chatId = normalizeChatId(msg.chatId);
+          await interruptSession({ cli: msg.cli, repoPath: msg.repo, chatId });
+          const session = await bindSession(getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId }));
           cliKind = msg.cli;
           repoPath = msg.repo;
           busy = true;
@@ -241,8 +272,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
         }
 
         if (msg.type === 'send') {
+          const requestedChatId = normalizeChatId(msg.chatId ?? chatId);
+          if (requestedChatId !== chatId) {
+            safeSend({ type: 'error', message: 'chat tab changed - reconnect before sending' });
+            return;
+          }
           if (!sessionPromise && cliKind && repoPath) {
-            await bindSession(getOrCreateSession({ cli: cliKind, repoPath }));
+            await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
           }
           if (!sessionPromise) {
             safeSend({ type: 'error', message: 'no session - send hello first' });

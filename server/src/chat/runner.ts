@@ -49,6 +49,7 @@ class ClaudeSession {
   readonly key: string;
   readonly cli: CliKind;
   readonly cwd: string;
+  readonly chatId: string;
   private child: ChildProcessByStdio<Writable, Readable, Readable>;
   private stdoutBuf = '';
   private listeners = new Set<(e: SeqEvent) => void>();
@@ -71,10 +72,11 @@ class ClaudeSession {
   readonly ready: Promise<boolean>;
   private resolveReady!: (ok: boolean) => void;
 
-  constructor(cli: CliKind, cwd: string, resumeId: string | null) {
+  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null) {
     this.cli = cli;
     this.cwd = cwd;
-    this.key = `${cli}|${cwd}`;
+    this.chatId = chatId;
+    this.key = keyOf(cli, cwd, chatId);
     this.pendingResumeId = resumeId;
     this.startedResumeId = resumeId;
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
@@ -123,7 +125,7 @@ class ClaudeSession {
       );
       if (!this.initSeen) {
         this.exitedBeforeInit = true;
-        if (this.pendingResumeId) void setSessionId(this.cli, this.cwd, '');
+        if (this.pendingResumeId) void setSessionId(this.cli, this.cwd, '', this.chatId);
         this.resolveReady(false);
         this.resolveStartupWaiters('closed');
       }
@@ -333,7 +335,7 @@ class ClaudeSession {
         });
       }
       this.currentSessionId = ev.session_id;
-      void setSessionId(this.cli, this.cwd, ev.session_id);
+      void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
 
     // Track session_id from any event that carries it (some events carry it
@@ -341,7 +343,7 @@ class ClaudeSession {
     if (ev && typeof ev === 'object' && typeof ev.session_id === 'string'
         && ev.session_id !== this.currentSessionId) {
       this.currentSessionId = ev.session_id;
-      void setSessionId(this.cli, this.cwd, ev.session_id);
+      void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
 
     this.emit({ type: 'event', event: ev });
@@ -358,8 +360,9 @@ class ClaudeSession {
 
 const sessions = new Map<string, ClaudeSession>();
 
-function keyOf(cli: CliKind, cwd: string): string {
-  return `${cli}|${cwd}`;
+function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
+  const normalized = chatId || 'main';
+  return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 
 // Returned by getOrCreateSession — common interface across both runners.
@@ -368,30 +371,33 @@ export type AnySession = ClaudeSession | CodexSession;
 export async function getOrCreateSession(opts: {
   cli: CliKind;
   repoPath: string;
+  chatId?: string;
 }): Promise<AnySession> {
+  const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex') {
-    return getOrCreateCodexSession({ repoPath: opts.repoPath });
+    return getOrCreateCodexSession({ repoPath: opts.repoPath, chatId });
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
-  const key = keyOf(opts.cli, cwd);
+  const key = keyOf(opts.cli, cwd, chatId);
 
   const existing = sessions.get(key);
   if (existing && existing.isAlive()) return existing;
   if (existing) sessions.delete(key);
 
-  const resumeId = (await getSessionId(opts.cli, cwd)) ?? null;
-  const session = await spawnSession(opts.cli, cwd, resumeId, key);
+  const resumeId = (await getSessionId(opts.cli, cwd, chatId)) ?? null;
+  const session = await spawnSession(opts.cli, cwd, chatId, resumeId, key);
   return session;
 }
 
 async function spawnSession(
   cli: CliKind,
   cwd: string,
+  chatId: string,
   resumeId: string | null,
   key: string,
   attempt = 0,
 ): Promise<ClaudeSession> {
-  const session = new ClaudeSession(cli, cwd, resumeId);
+  const session = new ClaudeSession(cli, cwd, chatId, resumeId);
   sessions.set(key, session);
 
   session.subscribe((se) => {
@@ -407,8 +413,8 @@ async function spawnSession(
     // --resume. Only one retry — if even a fresh spawn dies before init,
     // something else is wrong.
     if (resumeId && attempt === 0) {
-      await setSessionId(cli, cwd, ''); // clear the bad id
-      return spawnSession(cli, cwd, null, key, attempt + 1);
+      await setSessionId(cli, cwd, '', chatId); // clear the bad id
+      return spawnSession(cli, cwd, chatId, null, key, attempt + 1);
     }
     throw new Error('claude exited before initializing — check the CLI install or auth');
   }
@@ -423,6 +429,7 @@ export function shutdownAllSessions(): void {
 export type LiveSession = {
   cli: CliKind;
   cwd: string;
+  chatId: string;
   busy: boolean;
   sessionId: string | null;
   /** ms since epoch of the most recent event (or spawn time if no events yet). */
@@ -435,6 +442,7 @@ export function activeClaudeSessions(): LiveSession[] {
     out.push({
       cli: s.cli,
       cwd: s.cwd,
+      chatId: s.chatId,
       busy: s.isBusy(),
       sessionId: s.sessionId(),
       lastActivityAt: s.lastActivityAt(),
@@ -459,25 +467,26 @@ export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number
 // Drop the warm process AND the stored session id so the next spawn starts a
 // fresh thread. Picks up any `claude update` you've run since the process
 // last spawned.
-export async function freshStart(opts: { cli: CliKind; repoPath: string }): Promise<AnySession> {
+export async function freshStart(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<AnySession> {
+  const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex') {
     const { freshStartCodex } = await import('./codex-runner.ts');
-    return freshStartCodex({ repoPath: opts.repoPath });
+    return freshStartCodex({ repoPath: opts.repoPath, chatId });
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
-  const key = keyOf(opts.cli, cwd);
+  const key = keyOf(opts.cli, cwd, chatId);
   const existing = sessions.get(key);
   if (existing) {
     existing.shutdown();
     sessions.delete(key);
   }
-  await setSessionId(opts.cli, cwd, ''); // drop the stored id so we don't --resume
-  return spawnSession(opts.cli, cwd, null, key);
+  await setSessionId(opts.cli, cwd, '', chatId); // drop the stored id so we don't --resume
+  return spawnSession(opts.cli, cwd, chatId, null, key);
 }
 
-export function dropSession(cli: CliKind, repoPath: string): void {
+export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): void {
   const cwd = cli === 'assistant' ? ASSISTANT_HUB_PATH : repoPath;
-  const key = keyOf(cli, cwd);
+  const key = keyOf(cli, cwd, chatId);
   const s = sessions.get(key);
   if (s) {
     s.shutdown();
@@ -487,14 +496,15 @@ export function dropSession(cli: CliKind, repoPath: string): void {
 
 /** Interrupt the in-flight turn for this (cli, repo) pair. Preserves the
  *  saved session_id so the next message resumes the conversation. */
-export async function interruptSession(opts: { cli: CliKind; repoPath: string }): Promise<void> {
+export async function interruptSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<void> {
+  const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex') {
     const { interruptCodex } = await import('./codex-runner.ts');
-    interruptCodex({ repoPath: opts.repoPath });
+    interruptCodex({ repoPath: opts.repoPath, chatId });
     return;
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
-  const key = keyOf(opts.cli, cwd);
+  const key = keyOf(opts.cli, cwd, chatId);
   const s = sessions.get(key);
   if (s) {
     s.interrupt();
