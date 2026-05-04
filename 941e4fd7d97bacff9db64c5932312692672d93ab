@@ -1,0 +1,1 @@
+Codex-Fix reviewed working tree after tabbed Hall chats. Findings fixed: server rejects mismatched chatId sends, and closing busy tabs interrupts live sessions before removal.
