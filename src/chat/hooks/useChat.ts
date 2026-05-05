@@ -507,13 +507,36 @@ export function useChat(opts: {
           ) {
             windowTokensRef.current = windowForClaudeModel(msg.event.model);
           }
-          // Track usage from claude's `result` events to power the context meter.
-          if (msg.event?.type === 'result' && msg.event?.usage) {
-            const u = msg.event.usage as Record<string, number | undefined>;
-            const input = u.input_tokens ?? 0;
-            const cacheRead = u.cache_read_input_tokens ?? 0;
-            const cacheCreate = u.cache_creation_input_tokens ?? 0;
-            const output = u.output_tokens ?? 0;
+          // Power the context meter from per-API-call usage.
+          //
+          // Claude Code's `result.usage` is cumulative across every API
+          // call in a turn — a turn that uses N tools makes N+1 calls and
+          // cache_read_input_tokens gets summed N+1 times, inflating the
+          // displayed total by roughly Nx. So for claude we track usage
+          // from `assistant` events instead, where each event corresponds
+          // to one API call and `message.usage` is that call's real input
+          // size. Taking the most recent assistant event in a turn gives
+          // us the true context size of the most recent call.
+          //
+          // Codex doesn't have this bug — codex-runner synthesizes a
+          // single `result` event per turn from `turn.completed`, which
+          // is already per-turn — so the result handler still works there.
+          const usagePayload =
+            cli !== 'codex' &&
+            msg.event?.type === 'assistant' &&
+            msg.event?.message?.usage
+              ? (msg.event.message.usage as Record<string, number | undefined>)
+              : cli === 'codex' &&
+                  msg.event?.type === 'result' &&
+                  msg.event?.usage
+                ? (msg.event.usage as Record<string, number | undefined>)
+                : null;
+
+          if (usagePayload) {
+            const input = usagePayload.input_tokens ?? 0;
+            const cacheRead = usagePayload.cache_read_input_tokens ?? 0;
+            const cacheCreate = usagePayload.cache_creation_input_tokens ?? 0;
+            const output = usagePayload.output_tokens ?? 0;
             const total = input + cacheRead + cacheCreate;
             // Safety net (claude only): if observed usage exceeds the known
             // window, ratchet up to 1M. Covers the case where init didn't
