@@ -4,6 +4,7 @@ import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
+import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 
 // One persistent `claude` process per (cli, repoPath) pair, fed JSON over
 // stdin and reading JSONL events from stdout. This kills the per-turn startup
@@ -80,6 +81,25 @@ class ClaudeSession {
     this.pendingResumeId = resumeId;
     this.startedResumeId = resumeId;
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
+
+    // Restore any prior emitted events from disk so a server restart (manual
+    // kickstart, crash, Mac sleep) doesn't drop the conversation tail. The
+    // in-memory eventLog is the source of truth during a process lifetime;
+    // disk is the failover so reconnecting clients with a stale `sinceSeq`
+    // can still replay everything past their last-seen seq.
+    try {
+      const restored = loadEventLogSync(this.key);
+      if (restored.events.length > 0) {
+        this.eventLog = restored.events;
+        this.nextSeq = restored.nextSeq;
+        console.log(
+          `[chat ${cli}] restored ${restored.events.length} event(s) from disk for ${this.key} (nextSeq=${this.nextSeq})`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[chat ${cli}] event-log restore failed for ${this.key}:`, (err as Error).message);
+    }
+    void compactEventLog(this.key);
 
     // Quiet-ready: the modern claude binary doesn't emit system/init until it
     // receives its first stdin message. Per Banana IDE: if the process is
@@ -295,6 +315,7 @@ class ClaudeSession {
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
+    appendEventLog(this.key, se);
     for (const fn of this.listeners) fn(se);
   }
 

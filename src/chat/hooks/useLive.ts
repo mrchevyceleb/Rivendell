@@ -29,9 +29,26 @@ export function useLive(): LiveSession[] {
     };
 
     tick();
+
+    // setTimeout in background tabs is throttled (often to once per minute),
+    // so on tab refocus the "tending" indicator can be stale by minutes.
+    // Force a fresh poll the moment we're visible again.
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
     };
   }, []);
 

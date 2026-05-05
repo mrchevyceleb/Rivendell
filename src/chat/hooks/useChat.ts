@@ -312,6 +312,9 @@ export function useChat(opts: {
   const teardownRef = useRef(false);
   const connectionIdRef = useRef(0);
   const turnIdRef = useRef('');
+  /** Set by the connection effect so the returned `reconnect()` can force a
+   *  close-and-reopen even when auto-reconnect is mid-backoff. */
+  const forceReconnectRef = useRef<() => void>(() => {});
   // Mirror the initial message into a ref so the WS onmessage handler can
   // read the latest value without re-subscribing every render.
   const initialMessageRef = useRef<string | null>(initialMessage ?? null);
@@ -389,6 +392,19 @@ export function useChat(opts: {
     // Mark this conversation as restored so the persistence-write effect can
     // safely begin saving updates back to storage.
     restoredKeyRef.current = conversationKey(cli, repo.path, chatId);
+
+    /** Strip handlers and close a socket so it can't fire onopen/onclose into
+     *  the new connection's state. Used before replacing wsRef during a
+     *  forced reconnect or a fall-through reconcile, where the prior socket
+     *  may still be CONNECTING or CLOSING. */
+    const detachSocket = (socket: WebSocket | null) => {
+      if (!socket) return;
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      try { socket.close(); } catch {}
+    };
 
     const connect = () => {
       if (!isCurrentConnection()) return;
@@ -556,10 +572,73 @@ export function useChat(opts: {
       };
     };
 
+    // Backgrounded tabs get their WebSocket throttled or silently killed by
+    // the browser, and the setTimeout-based reconnect can be deferred for
+    // minutes. When the tab comes back we force a reconcile: if the socket
+    // is still open, re-send hello so the server replays anything missed
+    // via sinceSeq; otherwise reconnect immediately.
+    const reconcile = () => {
+      if (!isCurrentConnection()) return;
+      const live = wsRef.current;
+      if (live && live.readyState === WebSocket.OPEN) {
+        try {
+          live.send(JSON.stringify({
+            type: 'hello',
+            cli,
+            repo: repo.path,
+            chatId,
+            sinceSeq: lastSeqRef.current,
+          }));
+          return;
+        } catch {
+          // fall through to a forced reconnect below
+        }
+      }
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectAttemptRef.current = 0;
+      // Detach the stale socket so its pending onopen/onclose can't fire a
+      // duplicate hello or schedule a competing reconnect timer alongside
+      // the new connection we're about to open.
+      detachSocket(wsRef.current);
+      wsRef.current = null;
+      connect();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') reconcile();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', reconcile);
+    window.addEventListener('online', reconcile);
+    window.addEventListener('pageshow', reconcile);
+
+    forceReconnectRef.current = () => {
+      if (!isCurrentConnection()) return;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectAttemptRef.current = 0;
+      // Same trap as reconcile: a CONNECTING/CLOSING socket whose handlers
+      // are still attached will fire onopen/onclose against the new
+      // connection's state. Detach handlers before replacing.
+      detachSocket(wsRef.current);
+      wsRef.current = null;
+      setError(null);
+      connect();
+    };
+
     connect();
 
     return () => {
       teardownRef.current = true;
+      forceReconnectRef.current = () => {};
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', reconcile);
+      window.removeEventListener('online', reconcile);
+      window.removeEventListener('pageshow', reconcile);
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -628,5 +707,7 @@ export function useChat(opts: {
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images) }));
   };
 
-  return { blocks, status, error, send, steer, freshStart, stop, usage };
+  const reconnect = () => forceReconnectRef.current();
+
+  return { blocks, status, error, send, steer, freshStart, stop, reconnect, usage };
 }

@@ -1,12 +1,14 @@
 // Client-side companion to server/src/lib/proxyLinks.ts. Detects mentions of
-// the workspace label `ASSISTANT-HUB/path/to/thing` in freeform text and
-// rewrites them to inline markdown links with custom protocols
-// (`rivendell-doc:` / `rivendell-folder:`) so the Markdown renderer can swap
-// them for in-app proxy cards. Operates on text only, never on URLs in code
-// fences (those are passed through verbatim by react-markdown's normal
-// parsing).
+// the workspace label `ASSISTANT-HUB/path/to/thing` (or the equivalent Windows
+// absolute path under OneDrive) in freeform text and rewrites them to inline
+// markdown links with custom protocols (`rivendell-doc:` / `rivendell-folder:`)
+// so the Markdown renderer can swap them for in-app proxy cards. Display text
+// is rendered as the Windows path because Matt always views chat from a
+// Windows machine, and a clickable Windows path doubles as something he can
+// paste into Win+R if the in-app viewer is not what he wants.
 
 const LABEL = 'ASSISTANT-HUB';
+const WIN_WORKSPACE_PREFIX = String.raw`C:\Users\mtjoh\OneDrive\Documents\ASSISTANT-HUB`;
 
 // Workspace and OneDrive paths commonly contain spaces ("Client Dashboards/
 // Q1 Plan.md"), so the matcher has to accept them inside segments. To avoid
@@ -16,8 +18,11 @@ const LABEL = 'ASSISTANT-HUB';
 // well enough — a stray over-match on unusual prose is preferable to
 // breaking every path that contains a space.
 const STOP_WORDS = '(?:and|or|but|the|a|an|is|are|was|were|to|of|in|on|at|by|for|that|which|because|since|so|then|with|from|as|when|where|while|after|before|will|would|should|can|could|may|might|like|this|these|those|it|its|i|we|you|he|she|they)';
+const STOP_LOOKAHEAD = String.raw`(?=$|[,;:!?]|[\n\r]|\.(?:\s|$)|\s+${STOP_WORDS}\b|[)\]"'\`<>])`;
+const WORKSPACE_MENTION = String.raw`\b${LABEL}(?:\/[^\n\r]+?)?`;
+const WIN_MENTION = String.raw`C:\\Users\\mtjoh\\OneDrive\\Documents\\ASSISTANT-HUB(?:\\[^\n\r]+?)?`;
 const MENTION_PATTERN = new RegExp(
-  String.raw`\b${LABEL}(\/[^\n\r]+?)?(?=$|[,;:!?]|[\n\r]|\.(?:\s|$)|\s+${STOP_WORDS}\b)`,
+  `(?:${WIN_MENTION}|${WORKSPACE_MENTION})${STOP_LOOKAHEAD}`,
   'g',
 );
 
@@ -25,18 +30,38 @@ const TRAILING_PUNCT = /[\s).,;:!?\]'"`>]+$/;
 
 export function annotateWorkspaceMentions(input: string): string {
   if (!input.includes(LABEL)) return input;
-  return input.replace(MENTION_PATTERN, (_match, tail: string | undefined) => {
-    if (!tail) return `[${LABEL}](rivendell-folder:)`;
-    const trailingMatch = tail.match(TRAILING_PUNCT);
+  return input.replace(MENTION_PATTERN, (match) => {
+    const trailingMatch = match.match(TRAILING_PUNCT);
     const trailing = trailingMatch ? trailingMatch[0] : '';
-    const cleanTail = trailing ? tail.slice(0, tail.length - trailing.length) : tail;
-    const pathParts = splitPathAndTrailingText(cleanTail.replace(/^\//, ''));
-    const rel = pathParts.path;
-    const looksLikeFile = rel.length > 0 && /\.[A-Za-z0-9]+$/.test(rel.split('/').pop() ?? '');
+    const cleanMatch = trailing ? match.slice(0, match.length - trailing.length) : match;
+
+    const rel = extractRelativePath(cleanMatch);
+    if (rel === null) return match;
+
+    const pathParts = splitPathAndTrailingText(rel);
+    const finalRel = pathParts.path;
+    const looksLikeFile = finalRel.length > 0 && /\.[A-Za-z0-9]+$/.test(finalRel.split('/').pop() ?? '');
     const protocol = looksLikeFile ? 'rivendell-doc' : 'rivendell-folder';
-    const display = rel ? `${LABEL}/${rel}` : LABEL;
-    return `[${display}](${protocol}:${encodeURIComponent(rel)})${pathParts.trailingText}${trailing}`;
+    const display = toWindowsDisplay(finalRel);
+    return `[${display}](${protocol}:${encodeURIComponent(finalRel)})${pathParts.trailingText}${trailing}`;
   });
+}
+
+function extractRelativePath(value: string): string | null {
+  if (value.startsWith(WIN_WORKSPACE_PREFIX)) {
+    const tail = value.slice(WIN_WORKSPACE_PREFIX.length);
+    if (tail === '') return '';
+    if (!tail.startsWith('\\')) return null;
+    return tail.slice(1).replace(/\\/g, '/');
+  }
+  if (value === LABEL) return '';
+  if (value.startsWith(`${LABEL}/`)) return value.slice(LABEL.length + 1);
+  return null;
+}
+
+function toWindowsDisplay(rel: string): string {
+  if (!rel) return WIN_WORKSPACE_PREFIX;
+  return `${WIN_WORKSPACE_PREFIX}\\${rel.split('/').join('\\')}`;
 }
 
 export function parseProxyHref(href: string | undefined): { kind: 'doc' | 'folder'; path: string } | null {

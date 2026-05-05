@@ -6,6 +6,7 @@ export type RivendellTask = {
   project: string;
   status: 'in_hand' | 'horizon' | 'delegated' | 'done';
   due: string;
+  dueDate?: string | null;
   priority: 'low' | 'medium' | 'high';
   repo?: string;
   createdAt?: string;
@@ -378,6 +379,7 @@ function mapTask(task: AdminTask): RivendellTask {
     project: task.project || 'Personal',
     status: fromAdminTaskStatus(task.status),
     due: dueLabel(task.due_date),
+    dueDate: task.due_date ? task.due_date.slice(0, 10) : null,
     priority: fromAdminPriority(task.priority),
     repo: task.file_path || undefined,
     createdAt: task.created_at || undefined,

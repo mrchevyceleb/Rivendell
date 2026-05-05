@@ -7,7 +7,9 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Paperclip,
+  Plug,
   Plus,
+  RefreshCw,
   RotateCcw,
   Send,
   Sparkles,
@@ -29,6 +31,7 @@ import { ArtifactCard } from '../chat/components/blocks/ArtifactCard';
 import { DocLinkCard } from '../chat/components/blocks/DocLinkCard';
 import { FolderLinkCard } from '../chat/components/blocks/FolderLinkCard';
 import { Button, Chip } from '../components/Primitives';
+import { useMcpHealth, type McpHealthStatus } from '../hooks/useMcpHealth';
 import { useScribeEvents } from '../hooks/useRoomData';
 import { useScribeSocket } from '../hooks/useScribeSocket';
 import { Evenstar, Signet } from '../theme/Ornaments';
@@ -95,6 +98,7 @@ export function Hall() {
   const { data: initialEvents = [] } = useScribeEvents();
   const { events: scribeEvents, state: scribeState } = useScribeSocket(initialEvents);
   const scribeFeed = (scribeEvents.length ? scribeEvents : initialEvents).slice(-7).reverse();
+  const mcpHealth = useMcpHealth();
 
   useEffect(() => {
     if (!repos.length || repo) return;
@@ -189,7 +193,6 @@ export function Hall() {
   };
 
   const closeChatTab = async (tabId: string) => {
-    if (tabs.length <= 1) return;
     setTabCloseError(null);
     const index = tabs.findIndex((tab) => tab.id === tabId);
     const closingTab = tabs[index];
@@ -207,6 +210,16 @@ export function Hall() {
         setTabCloseError('That tab is still running. I could not stop it, so I left it open.');
         return;
       }
+    }
+    if (tabs.length <= 1) {
+      // Closing the only tab would leave Hall empty, so replace it with a
+      // fresh tab. Same outcome as "wipe this chat" without losing the room.
+      const replacement = createTab(closingTab.cli);
+      setTabs([replacement]);
+      setActiveTabId(replacement.id);
+      clearStoredTab(closingTab, repo);
+      setPendingPrompt(null);
+      return;
     }
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     setTabs(nextTabs);
@@ -292,17 +305,15 @@ export function Hall() {
                     <small>{companionLabel[tab.cli]}</small>
                   </span>
                 </button>
-                {tabs.length > 1 ? (
-                  <button
-                    className="chat-tab-close"
-                    type="button"
-                    onClick={() => void closeChatTab(tab.id)}
-                    title="Close chat tab"
-                    aria-label={`Close ${tab.title}`}
-                  >
-                    <X size={13} />
-                  </button>
-                ) : null}
+                <button
+                  className="chat-tab-close"
+                  type="button"
+                  onClick={() => void closeChatTab(tab.id)}
+                  title={tabs.length > 1 ? 'Close chat tab' : 'Close and start a fresh tab'}
+                  aria-label={`Close ${tab.title}`}
+                >
+                  <X size={13} />
+                </button>
               </div>
             ))}
             <button
@@ -330,6 +341,7 @@ export function Hall() {
 
             <div className="chat-meta-strip">
               <Chip tone={chat.status === 'streaming' ? 'elf' : chat.status === 'ready' ? 'emerald' : 'neutral'}>{statusCopy[chat.status]}</Chip>
+              <McpStatusPill mcp={mcpHealth} />
               <span>{companionSub[companion]}</span>
               <span>{activeCommands.length} commands</span>
             </div>
@@ -375,6 +387,8 @@ export function Hall() {
             onSend={chat.status === 'streaming' ? chat.steer : chat.send}
             onStop={chat.stop}
             onFreshStart={beginFresh}
+            onReconnect={chat.reconnect}
+            chatStatus={chat.status}
             commandPrefix={companion === 'codex' ? '$' : '/'}
             claudeCommands={commands.claude}
             codexCommands={commands.codex}
@@ -458,6 +472,8 @@ function Composer({
   onSend,
   onStop,
   onFreshStart,
+  onReconnect,
+  chatStatus,
   claudeCommands,
   codexCommands,
   agentName,
@@ -469,6 +485,8 @@ function Composer({
   onSend: (text: string, images?: SendImage[]) => void;
   onStop: () => void;
   onFreshStart: () => void;
+  onReconnect: () => void;
+  chatStatus: ChatStatus;
   claudeCommands: CommandEntry[];
   codexCommands: CommandEntry[];
   agentName: string;
@@ -701,6 +719,17 @@ function Composer({
               stop
             </button>
           ) : null}
+          {chatStatus === 'closed' || chatStatus === 'error' || chatStatus === 'connecting' ? (
+            <button
+              type="button"
+              onClick={onReconnect}
+              title="Force reconnect to Elrond"
+              className="composer-reconnect-hint"
+            >
+              <Plug size={14} />
+              reconnect
+            </button>
+          ) : null}
         </div>
         {usage ? <ContextMeter usage={usage} /> : null}
       </div>
@@ -740,6 +769,105 @@ function ContextMeter({ usage }: { usage: ContextUsage }) {
 function formatTokens(n: number): string {
   if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
   return String(n);
+}
+
+const mcpToneFor: Record<McpHealthStatus, 'emerald' | 'gold' | 'rose' | 'neutral'> = {
+  up: 'emerald',
+  slow: 'gold',
+  down: 'rose',
+  unknown: 'neutral',
+};
+
+const mcpLabelFor: Record<McpHealthStatus, string> = {
+  up: 'mcp up',
+  slow: 'mcp slow',
+  down: 'mcp down',
+  unknown: 'mcp checking',
+};
+
+function McpStatusPill({ mcp }: { mcp: ReturnType<typeof useMcpHealth> }) {
+  const [open, setOpen] = useState(false);
+  const detail = mcp.ms != null
+    ? `${mcpLabelFor[mcp.status]} · ${mcp.ms}ms`
+    : mcpLabelFor[mcp.status];
+  const tooltip = mcp.error
+    ? `${detail} — ${mcp.error}`
+    : mcp.checkedAt
+      ? `${detail} — checked ${timeAgo(mcp.checkedAt)}`
+      : detail;
+
+  const handleRedeploy = async () => {
+    if (mcp.redeploying) return;
+    if (!window.confirm('Redeploy assistant-mcp on Railway? Takes about 30 to 60 seconds.')) return;
+    const result = await mcp.redeploy();
+    if (!result.ok) {
+      window.alert(`Redeploy failed: ${result.error || 'unknown error'}`);
+    }
+    setTimeout(() => { void mcp.refresh(); }, 5_000);
+  };
+
+  return (
+    <span className="mcp-status-pill" style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        title={tooltip}
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, background: 'transparent', border: 0, cursor: 'pointer' }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Chip tone={mcpToneFor[mcp.status]}>{detail}</Chip>
+      </button>
+      {open ? (
+        <span
+          role="menu"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 6px)',
+            left: 0,
+            zIndex: 20,
+            background: 'var(--r-card, #1a1a1a)',
+            border: '1px solid var(--r-line, #333)',
+            borderRadius: 8,
+            padding: 10,
+            minWidth: 220,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+            display: 'grid',
+            gap: 6,
+            fontSize: 12,
+          }}
+        >
+          <strong style={{ fontSize: 12 }}>assistant-mcp</strong>
+          <span>{detail}</span>
+          {mcp.error ? <span style={{ color: 'var(--r-rose, #c46a6a)' }}>{mcp.error}</span> : null}
+          {mcp.checkedAt ? <span style={{ opacity: 0.7 }}>checked {timeAgo(mcp.checkedAt)}</span> : null}
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <button
+              type="button"
+              className="r-btn r-btn-ghost"
+              onClick={() => { void mcp.refresh(); }}
+              title="Re-check Railway /health"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            >
+              <RefreshCw size={12} />
+              refresh
+            </button>
+            <button
+              type="button"
+              className="r-btn r-btn-danger"
+              onClick={handleRedeploy}
+              disabled={mcp.redeploying}
+              title="Trigger Railway redeploy of matt-assistant"
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+            >
+              <RotateCcw size={12} />
+              {mcp.redeploying ? 'redeploying…' : 'redeploy'}
+            </button>
+          </div>
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
 function UserImageStrip({ images, imageCount }: { images?: ChatImagePreview[]; imageCount?: number }) {

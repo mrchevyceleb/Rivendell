@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
+import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -71,6 +72,23 @@ export class CodexSession {
     this.chatId = chatId;
     this.key = keyOf(cwd, chatId);
     this.threadId = threadId;
+
+    // Mirror the claude path: rehydrate eventLog from disk so a server
+    // restart between turns doesn't strand a reconnecting client whose
+    // sinceSeq is past the new in-memory latestSeq.
+    try {
+      const restored = loadEventLogSync(this.key);
+      if (restored.events.length > 0) {
+        this.eventLog = restored.events;
+        this.nextSeq = restored.nextSeq;
+        console.log(
+          `[chat codex] restored ${restored.events.length} event(s) from disk for ${this.key} (nextSeq=${this.nextSeq})`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[chat codex] event-log restore failed for ${this.key}:`, (err as Error).message);
+    }
+    void compactEventLog(this.key);
   }
 
   subscribe(fn: Listener, sinceSeq = -1, countSubscriber = true): () => void {
@@ -277,6 +295,7 @@ export class CodexSession {
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
+    appendEventLog(this.key, se);
     for (const fn of this.listeners) fn(se);
   }
 

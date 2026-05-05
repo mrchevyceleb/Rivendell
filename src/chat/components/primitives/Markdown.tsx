@@ -23,7 +23,7 @@ export function Markdown({ children }: { children: string }) {
   return (
     <div className="sw-md">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         urlTransform={proxyUrlTransform}
         components={{
           p: ({ children }) => (

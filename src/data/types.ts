@@ -25,6 +25,7 @@ export type Task = {
   project: string;
   status: 'in_hand' | 'horizon' | 'delegated' | 'done';
   due: string;
+  dueDate?: string | null;
   priority: 'low' | 'medium' | 'high';
   repo?: string;
   order?: number;

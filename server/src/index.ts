@@ -19,6 +19,7 @@ import { weavingsRouter } from './routes/weavings.ts';
 import { scribeRouter } from './routes/scribe.ts';
 import { summaryRouter } from './routes/summary.ts';
 import { artifactsRouter } from './routes/artifacts.ts';
+import { mcpRouter } from './routes/mcp.ts';
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -46,6 +47,7 @@ app.use('/api/messages', messagesRouter);
 app.use('/api/weavings', weavingsRouter);
 app.use('/api/scribe', scribeRouter);
 app.use('/api/artifacts', artifactsRouter);
+app.use('/api/mcp', mcpRouter);
 
 const server = createServer(app);
 const stopChat = await registerChat(app, server);

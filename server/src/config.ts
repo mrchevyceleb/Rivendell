@@ -25,6 +25,17 @@ function dotenvValue(key: string): string {
   return match[1].trim().replace(/^["']|["']$/g, '');
 }
 
+function railwayCliToken(): string {
+  const path = join(homedir(), '.railway', 'config.json');
+  if (!existsSync(path)) return '';
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf8'));
+    return data?.user?.token || '';
+  } catch {
+    return '';
+  }
+}
+
 export const ASSISTANT_ADMIN_BASE_URL =
   process.env.ASSISTANT_ADMIN_BASE_URL ||
   process.env.ASSISTANT_MCP_ADMIN_URL ||
@@ -57,6 +68,18 @@ export const MCP_BEARER_TOKEN =
   process.env.RAILWAY_MCP_TOKEN ||
   ASSISTANT_ADMIN_TOKEN ||
   '';
+
+// Railway service identifiers for assistant-mcp (matt-assistant service in
+// the assistant-mcp project). Defaults match production; override via env if
+// the service is ever rebuilt.
+export const RAILWAY_API_TOKEN =
+  process.env.RAILWAY_API_TOKEN ||
+  process.env.RAILWAY_TOKEN ||
+  railwayCliToken();
+export const RAILWAY_SERVICE_ID =
+  process.env.RAILWAY_SERVICE_ID || 'a5d35005-3540-418a-b7fc-c1fc304ec7fc';
+export const RAILWAY_ENVIRONMENT_ID =
+  process.env.RAILWAY_ENVIRONMENT_ID || '5a4351fa-2041-4e72-af3a-cdd7db808181';
 
 export const WORKER_ENABLED = process.env.RIVENDELL_WORKER_ENABLED !== 'false';
 export const WORKER_RUNNER = process.env.RIVENDELL_WORKER_RUNNER || 'dry-run';

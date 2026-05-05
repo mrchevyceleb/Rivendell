@@ -4795,6 +4795,113 @@ button {
   }
 }
 
+.r-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--r-bg-deep) 78%, transparent);
+  backdrop-filter: blur(4px);
+  animation: proxyFade 160ms ease;
+}
+
+.r-modal-card {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--r-bg-card), var(--r-bg-soft));
+  border: 1px solid var(--r-line-gold);
+  border-radius: 14px;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.r-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--r-line);
+  background: color-mix(in srgb, var(--r-bg-deep) 60%, transparent);
+}
+
+.r-modal-head h2 {
+  margin: 2px 0 0;
+  font-family: var(--r-display);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--r-ink);
+  word-break: break-word;
+}
+
+.r-modal-body {
+  padding: 18px 20px;
+  overflow: auto;
+}
+
+.r-modal-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--r-line);
+  background: color-mix(in srgb, var(--r-bg-deep) 40%, transparent);
+}
+
+.r-modal-foot-end {
+  display: flex;
+  gap: 8px;
+}
+
+.council-edit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.council-edit-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--r-ink-mute);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.council-edit-grid label.wide-field {
+  grid-column: 1 / -1;
+}
+
+.council-edit-grid input,
+.council-edit-grid select {
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--r-line);
+  border-radius: 7px;
+  background: var(--r-bg-deep);
+  color: var(--r-ink);
+  padding: 7px 10px;
+  outline: 0;
+}
+
+.council-edit-grid input:focus,
+.council-edit-grid select:focus {
+  border-color: var(--r-line-gold);
+  box-shadow: 0 0 0 3px rgba(212, 175, 99, 0.08);
+}
+
+@media (max-width: 600px) {
+  .council-edit-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Proxy viewer — universal in-app document/artifact preview. Opens over the
  * current room as a centred drawer so it works the same on desktop and mobile.
  */
