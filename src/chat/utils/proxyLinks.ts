@@ -8,7 +8,67 @@
 // paste into Win+R if the in-app viewer is not what he wants.
 
 const LABEL = 'ASSISTANT-HUB';
-const WIN_WORKSPACE_PREFIX = String.raw`C:\Users\mtjoh\OneDrive\Documents\ASSISTANT-HUB`;
+export const WIN_WORKSPACE_PREFIX = String.raw`C:\Users\mtjoh\OneDrive\Documents\ASSISTANT-HUB`;
+
+// Resolve the workspace-relative path Rivendell stores in ChatBlocks into the
+// two URL forms a Windows client needs: a same-origin HTTP URL (the Tailscale
+// front-door serves whatever Rivendell exposes on :8091, so this works from any
+// device on the tailnet without a custom handler) and a `rivendell://` URL that
+// the one-time PowerShell handler turns into `Start-Process` against the
+// OneDrive-synced ASSISTANT-HUB copy on the local Windows PC.
+export function buildLinkUrls(
+  relPath: string,
+  kind: 'doc' | 'folder',
+): { browserUrl: string; nativeUrl: string; windowsPath: string } {
+  const safeRel = (relPath || '').replace(/^\/+/, '');
+  const windowsPath = safeRel === ''
+    ? WIN_WORKSPACE_PREFIX
+    : `${WIN_WORKSPACE_PREFIX}\\${safeRel.split('/').join('\\')}`;
+  const browserUrl = `/api/files/raw?path=${encodeURIComponent(safeRel)}`;
+  const nativeUrl = `rivendell://open?kind=${kind}&winpath=${encodeURIComponent(windowsPath)}`;
+  return { browserUrl, nativeUrl, windowsPath };
+}
+
+// Triggers a `rivendell://` (or any custom scheme) URL in a way that does not
+// navigate the current page. A throwaway hidden iframe whose `src` is the
+// scheme URL is enough to fire the OS handler; the iframe load failure is
+// silent in modern browsers, and unregistered-scheme dialogs only show in the
+// top-level frame so the user gets at most a one-time "Open with…" prompt.
+export function fireNativeScheme(url: string): void {
+  const frame = document.createElement('iframe');
+  frame.style.display = 'none';
+  frame.setAttribute('aria-hidden', 'true');
+  frame.src = url;
+  document.body.appendChild(frame);
+  setTimeout(() => {
+    if (frame.parentNode) frame.parentNode.removeChild(frame);
+  }, 1500);
+}
+
+export function isWindowsPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Windows/i.test(navigator.userAgent);
+}
+
+// Single entry point for "open this workspace path the right way for this
+// device". On Windows we fire the `rivendell://` handler so the file launches
+// in its native app; on phones, Macs, or Windows machines that haven't run the
+// installer yet, we fall back to a path that always works — Tailscale-served
+// HTTP for files, the in-app Library room for folders.
+export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void {
+  const { browserUrl, nativeUrl } = buildLinkUrls(relPath, kind);
+  if (isWindowsPlatform()) {
+    fireNativeScheme(nativeUrl);
+    return;
+  }
+  if (kind === 'doc') {
+    window.open(browserUrl, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  const url = `/library?path=${encodeURIComponent(relPath || '')}`;
+  window.history.pushState({}, '', url);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+}
 
 // Workspace and OneDrive paths commonly contain spaces ("Client Dashboards/
 // Q1 Plan.md"), so the matcher has to accept them inside segments. To avoid

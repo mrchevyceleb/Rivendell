@@ -4,6 +4,7 @@ import { rooms } from '../data/mock';
 import type { RoomKey } from '../data/types';
 import { Evenstar, StarField } from '../theme/Ornaments';
 import { RoomGlyph } from '../components/RoomGlyph';
+import { NativeOpenHelper } from '../components/NativeOpenHelper';
 
 type LayoutProps = {
   active: RoomKey;
@@ -69,6 +70,7 @@ export function Layout({ active, onNavigate, theme, onThemeChange, collapsed, on
           })}
         </nav>
         <div className="sidebar-footer">
+          {!collapsed ? <NativeOpenHelper /> : null}
           {!collapsed ? (
             <button
               className="theme-toggle"

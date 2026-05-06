@@ -1,8 +1,11 @@
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ReactNode } from 'react';
-import { useProxyViewer } from '../../../hooks/useProxyViewer';
-import { annotateWorkspaceMentions, parseProxyHref } from '../../utils/proxyLinks';
+import {
+  annotateWorkspaceMentions,
+  openWorkspaceLink,
+  parseProxyHref,
+} from '../../utils/proxyLinks';
 
 // Literary-styled wrapper around react-markdown. Agent replies arrive as
 // markdown; this renderer leans on the gold/silver theme tokens so emphasis
@@ -18,7 +21,6 @@ function proxyUrlTransform(url: string): string {
 }
 
 export function Markdown({ children }: { children: string }) {
-  const proxy = useProxyViewer();
   const annotated = annotateWorkspaceMentions(children);
   return (
     <div className="sw-md">
@@ -117,13 +119,7 @@ export function Markdown({ children }: { children: string }) {
             if (proxyTarget) {
               const onClick = (event: React.MouseEvent) => {
                 event.preventDefault();
-                if (proxyTarget.kind === 'doc') {
-                  proxy.open({ source: 'doc', path: proxyTarget.path });
-                } else {
-                  const url = `/library?path=${encodeURIComponent(proxyTarget.path)}`;
-                  window.history.pushState({}, '', url);
-                  window.dispatchEvent(new PopStateEvent('popstate'));
-                }
+                openWorkspaceLink(proxyTarget.path, proxyTarget.kind);
               };
               return (
                 <a

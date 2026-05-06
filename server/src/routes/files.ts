@@ -1,0 +1,187 @@
+import { Router } from 'express';
+import { createReadStream } from 'node:fs';
+import { realpath, stat } from 'node:fs/promises';
+import { extname, basename, resolve as resolvePath, sep as pathSep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { workspaceRoot } from '../lib/workspace.ts';
+import { asyncHandler } from './helpers.ts';
+
+export const filesRouter = Router();
+
+// Stream a file from the OneDrive-synced ASSISTANT-HUB workspace at its real
+// content type. Used by Hall link cards (Browser button) and by `rivendell://`
+// fallbacks when the one-time Windows handler is not installed. Tailscale ACLs
+// are the authn boundary — anyone on the tailnet can reach this, same as the
+// rest of `:8091`. Path is workspace-relative; absolute paths and `..` escapes
+// are refused.
+filesRouter.get('/raw', asyncHandler(async (req, res) => {
+  const requested = String(req.query.path || '');
+  if (!requested) {
+    res.status(400).json({ error: 'path is required' });
+    return;
+  }
+  const root = workspaceRoot();
+  // Reject obvious absolute paths up front so we never resolve them against
+  // the workspace root by accident.
+  if (requested.startsWith('/') || /^[A-Za-z]:[\\/]/.test(requested)) {
+    res.status(400).json({ error: 'path must be workspace-relative' });
+    return;
+  }
+  const lexicalAbs = resolvePath(root, requested);
+
+  // Resolve symlinks on both the workspace root and the requested target. A
+  // lexical prefix check alone wouldn't catch a symlink inside the workspace
+  // pointing somewhere else on disk — `stat` would happily follow it.
+  let realRoot: string;
+  let realTarget: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    res.status(500).json({ error: 'workspace root is not accessible' });
+    return;
+  }
+  try {
+    realTarget = await realpath(lexicalAbs);
+  } catch {
+    res.status(404).json({ error: 'file not found' });
+    return;
+  }
+  const rootWithSep = realRoot.endsWith(pathSep) ? realRoot : realRoot + pathSep;
+  if (realTarget !== realRoot && !realTarget.startsWith(rootWithSep)) {
+    res.status(400).json({ error: 'path is outside the workspace' });
+    return;
+  }
+
+  let info;
+  try {
+    info = await stat(realTarget);
+  } catch {
+    res.status(404).json({ error: 'file not found' });
+    return;
+  }
+  if (!info.isFile()) {
+    res.status(400).json({ error: 'path is not a file' });
+    return;
+  }
+
+  const name = basename(realTarget);
+  const contentType = mimeFor(realTarget);
+  const forceDownload = req.query.download === '1' || req.query.download === 'true';
+  const dispositionType = forceDownload || !browserSafe(contentType) ? 'attachment' : 'inline';
+
+  res.setHeader('Content-Type', contentType);
+  res.setHeader('Content-Disposition', `${dispositionType}; filename="${quoteFilename(name)}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
+  res.setHeader('Accept-Ranges', 'bytes');
+  // Workspace files are user-controlled and may contain hostile scripts (a
+  // saved HTML report, a malformed SVG). When we serve them inline at
+  // Rivendell's own origin, sandbox the response so any embedded JS can't
+  // reach back into /api/* routes. Mirrors the artifacts route's policy.
+  if (dispositionType === 'inline') {
+    res.setHeader(
+      'Content-Security-Policy',
+      "sandbox; default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:",
+    );
+  }
+
+  const range = parseRange(req.headers.range, info.size);
+  if (range) {
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${range.start}-${range.end}/${info.size}`);
+    res.setHeader('Content-Length', String(range.end - range.start + 1));
+    createReadStream(realTarget, { start: range.start, end: range.end }).pipe(res);
+    return;
+  }
+
+  res.setHeader('Content-Length', String(info.size));
+  createReadStream(realTarget).pipe(res);
+}));
+
+// One-time installer for the Windows-side `rivendell://` URL handler. Served
+// as a plain-text PowerShell script Matt downloads on each Windows PC and runs
+// once. The script registers an HKCU URL scheme entry and writes a sibling
+// handler script that translates `rivendell://open?winpath=...` URLs into
+// `Start-Process` against the OneDrive-synced ASSISTANT-HUB copy.
+filesRouter.get('/installer/windows.ps1', asyncHandler(async (_req, res) => {
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const scriptPath = resolvePath(here, '..', '..', '..', 'scripts', 'windows', 'install-rivendell-handler.ps1');
+  let info;
+  try {
+    info = await stat(scriptPath);
+  } catch {
+    res.status(500).json({ error: 'installer script missing on server' });
+    return;
+  }
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="install-rivendell-handler.ps1"');
+  res.setHeader('Content-Length', String(info.size));
+  res.setHeader('Cache-Control', 'no-store');
+  createReadStream(scriptPath).pipe(res);
+}));
+
+function parseRange(header: string | undefined, totalSize: number): { start: number; end: number } | null {
+  if (!header || !header.startsWith('bytes=')) return null;
+  const spec = header.slice('bytes='.length).split(',')[0]?.trim();
+  if (!spec) return null;
+  const [startStr, endStr] = spec.split('-');
+  const start = startStr ? Number.parseInt(startStr, 10) : NaN;
+  const end = endStr ? Number.parseInt(endStr, 10) : totalSize - 1;
+  if (Number.isNaN(start) || Number.isNaN(end) || start < 0 || end >= totalSize || start > end) return null;
+  return { start, end };
+}
+
+function quoteFilename(name: string): string {
+  return name.replace(/["\\\r\n]/g, '');
+}
+
+function browserSafe(contentType: string): boolean {
+  if (contentType.startsWith('text/')) return true;
+  if (contentType.startsWith('image/')) return true;
+  if (contentType.startsWith('audio/')) return true;
+  if (contentType.startsWith('video/')) return true;
+  if (contentType === 'application/pdf') return true;
+  if (contentType === 'application/json') return true;
+  if (contentType === 'application/javascript') return true;
+  return false;
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  '.css': 'text/css; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.mdx': 'text/markdown; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.log': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.ogg': 'audio/ogg',
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.zip': 'application/zip',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.doc': 'application/msword',
+  '.xls': 'application/vnd.ms-excel',
+  '.ppt': 'application/vnd.ms-powerpoint',
+};
+
+function mimeFor(path: string): string {
+  return MIME_BY_EXT[extname(path).toLowerCase()] ?? 'application/octet-stream';
+}
