@@ -1,13 +1,16 @@
-import { useState } from 'react';
-import { ChevronLeft, ChevronRight, Grid3X3, Moon, Sun, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Grid3X3, Moon, Plus, Sun, X } from 'lucide-react';
 import { rooms } from '../data/mock';
-import type { RoomKey } from '../data/types';
+import type { Room, RoomKey } from '../data/types';
 import { Evenstar, StarField } from '../theme/Ornaments';
 import { RoomGlyph } from '../components/RoomGlyph';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
 
 type LayoutProps = {
   active: RoomKey;
+  tabs: RoomKey[];
+  onActivateTab: (room: RoomKey) => void;
+  onCloseTab: (room: RoomKey) => void;
   onNavigate: (room: RoomKey) => void;
   theme: 'dark' | 'light';
   onThemeChange: (theme: 'dark' | 'light') => void;
@@ -17,14 +20,48 @@ type LayoutProps = {
 };
 
 const primaryMobile = ['/', '/dashboard', '/council', '/pins'] as RoomKey[];
+const roomByKey: Record<RoomKey, Room> = rooms.reduce((map, room) => {
+  map[room.key] = room;
+  return map;
+}, {} as Record<RoomKey, Room>);
 
-export function Layout({ active, onNavigate, theme, onThemeChange, collapsed, onCollapsedChange, children }: LayoutProps) {
+function shortRoomName(name: string): string {
+  return name.replace(/^The\s+/, '');
+}
+
+export function Layout({ active, tabs, onActivateTab, onCloseTab, onNavigate, theme, onThemeChange, collapsed, onCollapsedChange, children }: LayoutProps) {
   const [mobileRoomsOpen, setMobileRoomsOpen] = useState(false);
+  const [tabPickerOpen, setTabPickerOpen] = useState(false);
+  const tabPickerRef = useRef<HTMLDivElement | null>(null);
   const navigate = (room: RoomKey) => {
     setMobileRoomsOpen(false);
     onNavigate(room);
   };
   const roomsTabActive = mobileRoomsOpen || !primaryMobile.includes(active);
+  const unopenedRooms = rooms.filter((room) => !tabs.includes(room.key));
+
+  useEffect(() => {
+    if (!tabPickerOpen) return;
+    const onDocClick = (event: MouseEvent) => {
+      if (!tabPickerRef.current) return;
+      if (tabPickerRef.current.contains(event.target as Node)) return;
+      setTabPickerOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTabPickerOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [tabPickerOpen]);
+
+  const pickRoom = (room: RoomKey) => {
+    setTabPickerOpen(false);
+    onActivateTab(room);
+  };
 
   return (
     <div className="app-shell">
@@ -86,7 +123,80 @@ export function Layout({ active, onNavigate, theme, onThemeChange, collapsed, on
           </button>
         </div>
       </aside>
-      <main className="main-pane">{children}</main>
+      <main className="main-pane">
+        <nav className="room-tab-strip" role="tablist" aria-label="Open rooms">
+          {tabs.map((roomKey) => {
+            const room = roomByKey[roomKey];
+            if (!room) return null;
+            const isActive = roomKey === active;
+            return (
+              <div key={roomKey} className={`room-tab ${isActive ? 'active' : ''}`}>
+                <button
+                  className="room-tab-main"
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => onActivateTab(roomKey)}
+                  title={`${room.name} — ${room.role}`}
+                >
+                  <RoomGlyph icon={room.icon} size={14} />
+                  <span>{shortRoomName(room.name)}</span>
+                </button>
+                {tabs.length > 1 ? (
+                  <button
+                    className="room-tab-close"
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onCloseTab(roomKey);
+                    }}
+                    title={`Close ${shortRoomName(room.name)}`}
+                    aria-label={`Close ${shortRoomName(room.name)}`}
+                  >
+                    <X size={12} />
+                  </button>
+                ) : null}
+              </div>
+            );
+          })}
+          <div className="room-tab-add-wrap" ref={tabPickerRef}>
+            <button
+              className="room-tab-add"
+              type="button"
+              onClick={() => setTabPickerOpen((value) => !value)}
+              disabled={unopenedRooms.length === 0}
+              aria-haspopup="menu"
+              aria-expanded={tabPickerOpen}
+              title={unopenedRooms.length === 0 ? 'Every room is already open' : 'Open another room in a tab'}
+              aria-label="Open another room in a tab"
+            >
+              <Plus size={13} />
+              <span>New tab</span>
+            </button>
+            {tabPickerOpen && unopenedRooms.length > 0 ? (
+              <div className="room-tab-picker" role="menu" aria-label="Open a room in a new tab">
+                <div className="room-tab-picker-head">Open in a new tab</div>
+                {unopenedRooms.map((room) => (
+                  <button
+                    key={room.key}
+                    className="room-tab-picker-item"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => pickRoom(room.key)}
+                  >
+                    <RoomGlyph icon={room.icon} size={16} />
+                    <span>
+                      <strong>{shortRoomName(room.name)}</strong>
+                      <small>{room.role}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </nav>
+        <div className="room-stack">{children}</div>
+      </main>
       <button
         type="button"
         className="mobile-theme-toggle"

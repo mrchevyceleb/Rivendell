@@ -29,9 +29,15 @@ export function useStickyScroll() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const userOverrideRef = useRef(false);
   const programmaticUntilRef = useRef(0);
+  // True while the user is mid-drag selecting text inside the transcript, or
+  // is keeping a non-collapsed selection alive after release. While set, we
+  // refuse to pin — a programmatic scroll under the user's cursor collapses
+  // the in-progress selection, which is exactly what Matt was hitting.
+  const selectingRef = useRef(false);
 
   const pin = useCallback(() => {
     if (userOverrideRef.current) return;
+    if (selectingRef.current) return;
     const el = scrollRef.current;
     if (!el) return;
     programmaticUntilRef.current = Date.now() + PROGRAMMATIC_GUARD_MS;
@@ -93,6 +99,62 @@ export function useStickyScroll() {
       el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchstart', takeover);
       el.removeEventListener('keydown', onKey);
+    };
+  }, []);
+
+  // Selection-aware pin gate. `selectingRef` is true whenever a non-collapsed
+  // selection lives inside the transcript, OR a primary-button drag-select is
+  // in flight inside the transcript (so the very-first-frame race between
+  // mousedown and the first selectionchange can't yank scroll out from under
+  // the user). Signals:
+  //   1. pointerdown (primary button only) inside the transcript primes the
+  //      gate before any selection range exists, covering mouse, pen, and the
+  //      pointer-event cousin of mouse on browsers that don't fire mousedown.
+  //   2. selectionchange is the source of truth — it assigns the gate based
+  //      on whether a non-collapsed selection currently overlaps the
+  //      transcript. This catches touch long-press selection, keyboard
+  //      shift-arrow selection, and "Select All" via menu/AT, none of which
+  //      fire pointerdown/mousedown.
+  //   3. pointerup re-evaluates from the live selection so a release outside
+  //      the window still settles the gate correctly.
+  //   4. pointercancel, blur, and visibilitychange clear the gate when the
+  //      drag is interrupted (alt-tab, OS dialog, focus loss) — without
+  //      these, a missed release could leave the chat permanently frozen.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const hasLiveSelection = () => {
+      const sel = typeof window !== 'undefined' ? window.getSelection() : null;
+      if (!sel || sel.isCollapsed) return false;
+      const anchor = sel.anchorNode;
+      const focus = sel.focusNode;
+      return Boolean((anchor && el.contains(anchor)) || (focus && el.contains(focus)));
+    };
+    const settle = () => {
+      selectingRef.current = hasLiveSelection();
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      // Primary button only — we don't gate on right-click, middle-click, or
+      // synthesized touch context-menu pointers.
+      if (event.button !== 0 && event.pointerType !== 'touch') return;
+      selectingRef.current = true;
+    };
+
+    el.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('pointerup', settle);
+    document.addEventListener('pointercancel', settle);
+    document.addEventListener('selectionchange', settle);
+    window.addEventListener('blur', settle);
+    document.addEventListener('visibilitychange', settle);
+    return () => {
+      el.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('pointerup', settle);
+      document.removeEventListener('pointercancel', settle);
+      document.removeEventListener('selectionchange', settle);
+      window.removeEventListener('blur', settle);
+      document.removeEventListener('visibilitychange', settle);
     };
   }, []);
 
