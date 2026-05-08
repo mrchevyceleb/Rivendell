@@ -21,6 +21,7 @@ import {
   pruneIdleCodexSessions,
   shutdownAllCodexSessions,
 } from './codex-runner.ts';
+import { emitScribe } from '../worker/scribe.ts';
 
 type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number };
 type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }> };
@@ -37,6 +38,37 @@ const IDLE_SESSION_TTL_MS = 30 * 60 * 1000;
 const IDLE_REAPER_INTERVAL_MS = 60 * 1000;
 const RESUME_STARTUP_WATCH_MS = 8000;
 const DEFAULT_CHAT_ID = 'main';
+// Mobile networks (especially Android backgrounded tabs) silently drop WS
+// connections without firing onclose on either side. Server-side ping every
+// 25s, terminate after one missed pong, so the client's reconcile path can
+// reopen instead of leaving the user staring at a dead socket.
+const WS_PING_INTERVAL_MS = 25 * 1000;
+
+function previewText(text: unknown): string {
+  if (typeof text !== 'string') return '';
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 80 ? flat.slice(0, 77) + '...' : flat;
+}
+
+/** Mirror every chat turn into the Scribe rail so a "frozen" UI is verifiable
+ *  from the timeline — if the entry shows up there, the server received it
+ *  and the gap is downstream of register. */
+function logChatTurn(
+  wsId: number,
+  kind: 'send' | 'steer',
+  cli: CliKind | null,
+  repo: string | null,
+  chatId: string,
+  text: string,
+): void {
+  const repoLabel = repo ? basename(repo) : 'unknown';
+  void emitScribe({
+    level: 'system',
+    text: `chat ${kind} ws#${wsId} ${cli ?? '?'}/${repoLabel}/${chatId}: ${previewText(text)}`,
+  }).catch((err) => {
+    console.warn(`[chat ws#${wsId}] scribe log failed:`, (err as Error).message);
+  });
+}
 
 function normalizeChatId(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_CHAT_ID;
@@ -129,6 +161,24 @@ export async function registerChat(app: express.Express, server: Server): Promis
     let chatId = DEFAULT_CHAT_ID;
     let turnGeneration = 0;
 
+    // Heartbeat: any pong (or any inbound frame) marks the socket alive. The
+    // interval ticks the ping; if a tick finds the socket already not-alive,
+    // the prior ping went unanswered and we tear it down so the client's
+    // visibility/online listeners can reopen a fresh connection.
+    let alive = true;
+    ws.on('pong', () => { alive = true; });
+    const heartbeat = setInterval(() => {
+      if (ws.readyState !== ws.OPEN) return;
+      if (!alive) {
+        console.log(`[chat ws#${wsId}] heartbeat lost, terminating`);
+        try { ws.terminate(); } catch {}
+        return;
+      }
+      alive = false;
+      try { ws.ping(); } catch {}
+    }, WS_PING_INTERVAL_MS);
+    heartbeat.unref();
+
     const safeSend = (msg: object) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
@@ -214,6 +264,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
     };
 
     ws.on('message', async (raw) => {
+      // Inbound traffic counts as proof-of-life for the heartbeat — no need to
+      // wait for the next pong if the client just sent us a real message.
+      alive = true;
       let msg: ClientMsg;
       try {
         msg = JSON.parse(String(raw));
@@ -271,6 +324,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           repoPath = msg.repo;
           busy = true;
           safeSend({ type: 'turnStart' });
+          logChatTurn(wsId, 'steer', msg.cli, msg.repo, chatId, msg.text);
           const generation = ++turnGeneration;
           await (session as any).send(msg.text, msg.images);
           void retryOnceAfterStaleResume(session, msg.text, generation, msg.images);
@@ -300,6 +354,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'turnStart' });
           }
           const session = await sessionPromise;
+          logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
           await (session as any).send(msg.text, msg.images);
           void retryOnceAfterStaleResume(session, msg.text, generation, msg.images);
         }
@@ -311,6 +366,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     });
 
     ws.on('close', () => {
+      clearInterval(heartbeat);
       unsubscribe?.();
       unsubscribe = null;
       console.log(`[chat ws#${wsId}] close`);

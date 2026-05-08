@@ -30,6 +30,33 @@ export type SessionEvent =
   | { type: 'closed'; code: number | null; signal: NodeJS.Signals | null }
   | { type: 'error'; message: string };
 
+// Match `/<skill-name> <body>` at the very start of a user message. Skill names
+// are kebab-case (lowercase letters, digits, hyphen). The body is anything that
+// follows the first whitespace run after the skill name.
+const SLASH_COMMAND_HEAD = /^\/([a-z][a-z0-9-]*)([ \t]+)([^\n][\s\S]*)$/;
+
+/**
+ * If `text` looks like `/<skill> <body>`, rewrite it to a form where the body
+ * is wrapped in `<command-args>` so the model can't drop it when invoking the
+ * Skill tool. Returns the original string when it doesn't match.
+ *
+ * Why this exists: in `--input-format=stream-json` mode claude doesn't
+ * pre-expand slash commands, so `/sam Send Mario about X` arrives at the model
+ * as a literal user message. The model occasionally invokes
+ * `Skill({ skill: "sam" })` with no `args`, and the skill replies "you only
+ * sent the slash command, no prompt." Wrapping the body in a structural tag
+ * eliminates the ambiguity.
+ */
+export function wrapSlashArgs(text: string): string {
+  if (!text) return text;
+  const match = SLASH_COMMAND_HEAD.exec(text);
+  if (!match) return text;
+  const [, skill, , bodyRaw] = match;
+  const body = bodyRaw.trim();
+  if (!body) return text;
+  return `/${skill}\n<command-args>\n${body}\n</command-args>`;
+}
+
 const ASSISTANT_AGENT_PROMPT =
   "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
   "You're working inside ASSISTANT-HUB, which contains his task system, " +
@@ -214,6 +241,11 @@ class ClaudeSession {
         ts: Date.now(),
       },
     });
+    // The model occasionally drops the body when a user message is
+    // `/<skill> <body>` and invokes the Skill tool with empty args. Wrap any
+    // body in `<command-args>` so the args are structurally obvious before the
+    // text reaches claude stdin. The UI echo above keeps the original visible.
+    const stdinText = wrapSlashArgs(text);
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -225,13 +257,13 @@ class ClaudeSession {
         });
       }
     }
-    if (text) content.push({ type: 'text', text });
+    if (stdinText) content.push({ type: 'text', text: stdinText });
     const payload = JSON.stringify({
       type: 'user',
       message: {
         role: 'user',
         content: content.length === 1 && content[0].type === 'text' && !images?.length
-          ? text
+          ? stdinText
           : content,
       },
     });
