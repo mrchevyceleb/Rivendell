@@ -111,24 +111,40 @@ const MONKEY_BASE_URL = 'https://monkey-models-production.up.railway.app/v1';
 const MONKEY_DEFAULT_TOKEN =
   '086399eca157e4ad2fc0fecfb254da1118d226ac53371757267388b23bd10fa6';
 
-/** Resolve the monkey-models auth token the same way Banana's provider does:
- *  BANANA_MONKEY_TOKEN env var, falling back to the bundled default token. */
+/** Resolve the monkey-models auth token the SAME way Banana's own provider
+ *  does (packages/opencode/src/provider/provider.ts):
+ *  BANANA_MONKEY_TOKEN, then MONKEY_MODELS_TOKEN, then the bundled default.
+ *  Missing the MONKEY_MODELS_TOKEN fallback would send a stale token (403)
+ *  whenever a deploy rotates the proxy key via that var. */
 function resolveMonkeyToken(): string {
-  return process.env.BANANA_MONKEY_TOKEN?.trim() || MONKEY_DEFAULT_TOKEN;
+  return (
+    process.env.BANANA_MONKEY_TOKEN?.trim() ||
+    process.env.MONKEY_MODELS_TOKEN?.trim() ||
+    MONKEY_DEFAULT_TOKEN
+  );
 }
 
 /** True unless explicitly disabled. A deploy can set
- *  RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY=false to turn the override off
- *  without a code change. */
+ *  RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY to a falsy value to turn the
+ *  override off without a code change. Accepts the common boolean-off
+ *  spellings (false/0/no/off, any case) so `FALSE` or `0` also work. */
 function openrouterViaMonkeyEnabled(): boolean {
-  return process.env.RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY?.trim() !== 'false';
+  const raw = process.env.RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY?.trim().toLowerCase();
+  return !(raw === 'false' || raw === '0' || raw === 'no' || raw === 'off');
 }
 
 /** Inline JSON config that overrides Banana's `openrouter` provider to route
  *  through the monkey-models proxy. Passed to `banana serve` as
- *  BANANA_CONFIG_CONTENT. */
+ *  BANANA_CONFIG_CONTENT.
+ *
+ *  If the parent environment already carries an inline Banana config
+ *  (BANANA_CONFIG_CONTENT or its OPENCODE_CONFIG_CONTENT alias), the
+ *  OpenRouter override is MERGED into it rather than replacing it wholesale,
+ *  so operator-supplied providers/agents/permissions survive. A non-JSON or
+ *  unparseable existing value is ignored (logged) and only the override is
+ *  used — better than crashing the spawn. */
 function bananaConfigContent(): string {
-  return JSON.stringify({
+  const override = {
     $schema: 'https://banana-code.dev/config.json',
     provider: {
       openrouter: {
@@ -138,7 +154,52 @@ function bananaConfigContent(): string {
         },
       },
     },
-  });
+  };
+
+  const existingRaw = (
+    process.env.BANANA_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT
+  )?.trim();
+  if (!existingRaw) return JSON.stringify(override);
+
+  let existing: any;
+  try {
+    existing = JSON.parse(existingRaw);
+  } catch {
+    console.warn(
+      '[banana-runner] existing BANANA_CONFIG_CONTENT is not valid JSON — ignoring it, using OpenRouter override only',
+    );
+    return JSON.stringify(override);
+  }
+  if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
+    return JSON.stringify(override);
+  }
+
+  // Merge so the existing config's other providers, and even openrouter's
+  // own `models`/extra `options`, are kept — only baseURL + apiKey are
+  // forced to the proxy values.
+  const existingProvider =
+    existing.provider && typeof existing.provider === 'object' ? existing.provider : {};
+  const existingOpenrouter =
+    existingProvider.openrouter && typeof existingProvider.openrouter === 'object'
+      ? existingProvider.openrouter
+      : {};
+  const existingOptions =
+    existingOpenrouter.options && typeof existingOpenrouter.options === 'object'
+      ? existingOpenrouter.options
+      : {};
+
+  const merged: any = { ...existing, ...override };
+  merged.provider = {
+    ...existingProvider,
+    openrouter: {
+      ...existingOpenrouter,
+      options: {
+        ...existingOptions,
+        ...override.provider.openrouter.options,
+      },
+    },
+  };
+  return JSON.stringify(merged);
 }
 
 /** Parse a model id into the SDK's { providerID, modelID } shape. Split on the
