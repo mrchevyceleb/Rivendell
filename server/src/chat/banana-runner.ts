@@ -42,8 +42,23 @@ type BananaUsage = {
 };
 
 /** Per-turn bookkeeping. Tracks the claude-shaped block indices we have
- *  opened so deltas can be routed to the right block. */
-type PartRecord = { index: number; kind: 'text' | 'reasoning' | 'tool'; started: boolean };
+ *  opened so deltas can be routed to the right block.
+ *
+ *  `emittedLen` is the count of chars already emitted for a text/reasoning
+ *  block. The snapshot reconciler in handlePartUpdated emits only
+ *  `part.text.slice(emittedLen)`, so a dropped or pre-anchor delta can never
+ *  lose text — the next message.part.updated snapshot backfills it. */
+type PartRecord = {
+  index: number;
+  kind: 'text' | 'reasoning' | 'tool';
+  started: boolean;
+  emittedLen: number;
+  /** True once the block's content_block_stop has been emitted. A closed
+   *  text/reasoning record is kept in `state.parts` (not deleted) so a
+   *  repeated/replayed final snapshot for the same partID cannot recreate it
+   *  with emittedLen 0 and re-emit the whole answer as a duplicate block. */
+  closed: boolean;
+};
 type BananaTurnState = {
   messageId: string;
   nextBlockIndex: number;
@@ -54,6 +69,13 @@ type BananaTurnState = {
   bufferedDeltas: Map<string, string[]>;
   /** banana assistant messageID seen for this turn (demux helper). */
   assistantMessageId: string | null;
+  /** True once this turn's prompt has been accepted by the server, or once
+   *  the turn has anchored to an assistant message. A `session.status idle`
+   *  only completes the turn after one of those — a late/trailing idle from
+   *  the PREVIOUS prompt (the banana session is reused) can otherwise land in
+   *  the window between this turn's state being created and its prompt being
+   *  accepted, and would fake-complete the turn before the real answer streams. */
+  promptAccepted: boolean;
   usage: BananaUsage | null;
   done: boolean;
   /** Tear-down for this turn's image temp dir. Carried on the turn (not the
@@ -800,6 +822,7 @@ export class BananaSession {
       parts: new Map(),
       bufferedDeltas: new Map(),
       assistantMessageId: null,
+      promptAccepted: false,
       usage: null,
       done: false,
       cleanup: cleanupImages,
@@ -812,12 +835,19 @@ export class BananaSession {
     //    ends on the `session.status: idle` event. We still await to surface a
     //    request-level failure (auth, model not found, etc.).
     const model = parseModel(opts?.model);
+    const thisTurn = this.turn;
     try {
       const res = await client.session.prompt({
         sessionID: this.threadId,
         ...(model ? { model } : {}),
         parts: [...fileParts, { type: 'text' as const, text }],
       });
+      // The prompt was accepted by the server. Mark THIS turn so a
+      // `session.status idle` is now honored as completion (guarded against
+      // the turn having already settled and been replaced).
+      if (this.turn === thisTurn && !thisTurn.done) {
+        thisTurn.promptAccepted = true;
+      }
       if (res.error) {
         const message = errorText(res.error);
         // If the stream already finished the turn, don't double-end it.
@@ -857,6 +887,8 @@ export class BananaSession {
         // can't splice into the live answer.
         if (state.assistantMessageId && state.assistantMessageId !== info.id) return;
         state.assistantMessageId = info.id;
+        // The turn has a real assistant message — a later idle is now its own.
+        state.promptAccepted = true;
         this.armWatchdog();
         this.ensureMessageStart(state);
         return;
@@ -864,13 +896,22 @@ export class BananaSession {
       case 'message.part.updated': {
         const part = event.properties.part as { messageID?: unknown } | undefined;
         const messageID = part && typeof part.messageID === 'string' ? part.messageID : undefined;
-        if (!this.belongsToTurn(messageID, state)) return;
+        // Do NOT anchor from a part.updated: a part carries no role, and the
+        // user message's own text part can arrive first — anchoring to it
+        // would render the prompt straight back as the answer. Anchoring is
+        // driven by deltas (only the assistant streams) and by an assistant
+        // message.updated. Drop part.updateds until the turn anchors; the
+        // text reconciler backfills their content from a later snapshot.
+        if (!this.belongsToTurn(messageID, state, false)) return;
         this.armWatchdog();
         this.handlePartUpdated(event.properties.part, state);
         return;
       }
       case 'message.part.delta': {
-        if (!this.belongsToTurn(event.properties.messageID, state)) return;
+        // Deltas only ever stream for the assistant message — a user message
+        // is created whole and never streamed. So the first delta reliably
+        // identifies this turn's assistant message; anchor to it.
+        if (!this.belongsToTurn(event.properties.messageID, state, true)) return;
         this.armWatchdog();
         this.handlePartDelta(event.properties.partID, event.properties.field, event.properties.delta, state);
         return;
@@ -885,6 +926,11 @@ export class BananaSession {
         if (event.properties.sessionID !== this.threadId) return;
         this.armWatchdog();
         if (event.properties.status.type === 'idle') {
+          // Only honor idle once this turn's prompt was accepted (or the turn
+          // anchored). A trailing idle from the PREVIOUS prompt — the banana
+          // session is reused — can otherwise land before this turn's prompt
+          // is accepted and fake-complete it before the real answer streams.
+          if (!state.promptAccepted) return;
           this.completeTurn(state);
         }
         return;
@@ -900,15 +946,33 @@ export class BananaSession {
     }
   }
 
-  /** True if a part event belongs to the current turn. The first part event of
-   *  the turn adopts its messageID as the anchor when no assistant
-   *  message.updated has arrived yet; later events must match it. Events with
-   *  no messageID are accepted (best-effort) so nothing is silently dropped. */
-  private belongsToTurn(messageID: string | undefined, state: BananaTurnState): boolean {
-    if (!messageID) return true;
+  /** True if a part event belongs to the current turn.
+   *
+   *  `mayAnchor` is true ONLY for message.part.delta: a delta is emitted just
+   *  for the assistant message (a user message is created whole, never
+   *  streamed), so the first delta reliably anchors the turn. A part.updated
+   *  carries no role and the user message's own text part can arrive first,
+   *  so it must never anchor — it is dropped until a delta (or an assistant
+   *  message.updated) anchors the turn; the text reconciler then backfills
+   *  the snapshot content.
+   *
+   *  A part event with no usable messageID is dropped: it cannot be proven to
+   *  belong to this turn, and accepting it would let a message-less user
+   *  part.updated render the prompt back as the answer — the exact bug the
+   *  delta-driven anchoring closes. */
+  private belongsToTurn(
+    messageID: string | undefined,
+    state: BananaTurnState,
+    mayAnchor: boolean,
+  ): boolean {
+    if (typeof messageID !== 'string' || !messageID) return false;
     if (!state.assistantMessageId) {
-      // First part event — adopt it as the turn anchor.
+      if (!mayAnchor) return false;
+      // First delta of the turn — adopt it as the turn anchor. The turn now
+      // has a real assistant message, so a later idle is its own.
       state.assistantMessageId = messageID;
+      state.promptAccepted = true;
+      this.ensureMessageStart(state);
       return true;
     }
     return state.assistantMessageId === messageID;
@@ -944,10 +1008,14 @@ export class BananaSession {
       if (!partID) return;
       const kind = type === 'text' ? 'text' : 'reasoning';
       let rec = state.parts.get(partID);
+      // The block is already closed. A repeated or replayed final snapshot for
+      // the same partID lands here; ignore it so the answer is not re-emitted
+      // as a duplicate block.
+      if (rec && rec.closed) return;
       if (!rec) {
         // First sight of this part — open a fresh claude text block.
         const index = state.nextBlockIndex++;
-        rec = { index, kind, started: true };
+        rec = { index, kind, started: true, emittedLen: 0, closed: false };
         state.parts.set(partID, rec);
         this.emitStream({
           type: 'content_block_start',
@@ -958,6 +1026,7 @@ export class BananaSession {
         const buffered = state.bufferedDeltas.get(partID);
         if (buffered?.length) {
           for (const d of buffered) {
+            rec.emittedLen += d.length;
             this.emitStream({
               type: 'content_block_delta',
               index,
@@ -967,11 +1036,26 @@ export class BananaSession {
           state.bufferedDeltas.delete(partID);
         }
       }
-      // A text/reasoning part with time.end is finished — close its block.
+      // Reconcile against the snapshot. `part.text` is the full accumulated
+      // text of this block; streaming deltas are an optimization layered on
+      // top. Emitting only the un-emitted remainder here means a dropped or
+      // pre-anchor delta can never lose text — every snapshot backfills it.
+      if (typeof part.text === 'string' && part.text.length > rec.emittedLen) {
+        const remainder = part.text.slice(rec.emittedLen);
+        rec.emittedLen = part.text.length;
+        this.emitStream({
+          type: 'content_block_delta',
+          index: rec.index,
+          delta: { type: 'text_delta', text: remainder },
+        });
+      }
+      // A text/reasoning part with time.end is finished — close its block
+      // once. The record is kept (not deleted) with `closed = true` so a
+      // later duplicate snapshot for this partID cannot recreate it.
       const ended = part.time && typeof part.time === 'object' && part.time.end != null;
       if (ended) {
+        rec.closed = true;
         this.emitStream({ type: 'content_block_stop', index: rec.index });
-        state.parts.delete(partID);
       }
       return;
     }
@@ -998,6 +1082,12 @@ export class BananaSession {
       return;
     }
     if (rec.kind !== 'text' && rec.kind !== 'reasoning') return;
+    // The block was already closed (a late delta after content_block_stop).
+    // Dropping it keeps the closed block immutable on the frontend.
+    if (rec.closed) return;
+    // Advance emittedLen so the part.updated snapshot reconciler emits only
+    // the remainder past what these deltas already streamed.
+    rec.emittedLen += delta.length;
     this.emitStream({
       type: 'content_block_delta',
       index: rec.index,
@@ -1017,7 +1107,7 @@ export class BananaSession {
     let rec = state.parts.get(partID);
     if (!rec && (status === 'running' || status === 'pending')) {
       const index = state.nextBlockIndex++;
-      rec = { index, kind: 'tool', started: true };
+      rec = { index, kind: 'tool', started: true, emittedLen: 0, closed: false };
       state.parts.set(partID, rec);
       const toolUseId = synth('tool');
       // Stash the toolUseId on the record so completed can reference it.
@@ -1142,9 +1232,13 @@ export class BananaSession {
   }
 
   /** Close every still-open claude block (text/reasoning/tool) so the front-end
-   *  reducer doesn't leave them spinning. */
+   *  reducer doesn't leave them spinning. Records already closed (a text block
+   *  that saw its time.end) are skipped — their content_block_stop already
+   *  went out. */
   private closeDanglingBlocks(state: BananaTurnState, toolFallback: string): void {
     for (const [, rec] of state.parts) {
+      if (rec.closed) continue;
+      rec.closed = true;
       this.emitStream({ type: 'content_block_stop', index: rec.index });
       if (rec.kind === 'tool') {
         const toolUseId: string = (rec as any).toolUseId ?? synth('tool');

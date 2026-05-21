@@ -361,7 +361,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
             busy = true;
             safeSend({ type: 'turnStart' });
           }
-          const session = await sessionPromise;
+          let session: AnySession | null = await sessionPromise;
+          if (!session && cliKind && repoPath) {
+            // sessionPromise resolved to a dead/null session — rebind a fresh
+            // one rather than crashing on `null.send`.
+            session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
+          }
+          if (!session) throw new Error('session unavailable, please retry');
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
           await (session as any).send(msg.text, msg.images, { model: msg.model });
           void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model);
