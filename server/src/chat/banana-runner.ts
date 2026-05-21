@@ -1,5 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import type { Event, PermissionRuleset } from '@opencode-ai/sdk/v2';
@@ -52,6 +56,10 @@ type BananaTurnState = {
   assistantMessageId: string | null;
   usage: BananaUsage | null;
   done: boolean;
+  /** Tear-down for this turn's image temp dir. Carried on the turn (not the
+   *  session) so a stale idle event for a previous turn cannot delete the
+   *  current turn's files. Idempotent; a no-op when the turn sent no images. */
+  cleanup: () => void;
 };
 
 // `banana serve` has no internal turn timeout; if the backend stalls the SSE
@@ -200,6 +208,18 @@ function bananaConfigContent(): string {
     },
   };
   return JSON.stringify(merged);
+}
+
+/** Map an image media type to a file extension for the temp file banana reads.
+ *  Falls back to the bare subtype (sans any `+suffix`) so an uncommon image
+ *  type still produces a usable, sanitized extension. */
+function imageExtension(mediaType: string): string {
+  if (mediaType === 'image/jpeg') return 'jpg';
+  if (mediaType === 'image/png') return 'png';
+  if (mediaType === 'image/gif') return 'gif';
+  if (mediaType === 'image/webp') return 'webp';
+  const subtype = mediaType.split('/')[1]?.split('+')[0] ?? 'img';
+  return subtype.replace(/[^a-z0-9]/gi, '') || 'img';
 }
 
 /** Parse a model id into the SDK's { providerID, modelID } shape. Split on the
@@ -545,6 +565,9 @@ export class BananaSession {
   private turn: BananaTurnState | null = null;
   /** Stall watchdog handle for the active turn. */
   private watchdog: NodeJS.Timeout | null = null;
+  /** Cleanup for the current turn's image temp dir — runs once the turn ends
+   *  (success, failure, or shutdown). Null when the turn sent no images. */
+  private turnCleanup: (() => void) | null = null;
   /** Persistent serve means readiness is per-server, not per-session. */
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
@@ -622,6 +645,12 @@ export class BananaSession {
   shutdown(): void {
     this.dead = true;
     this.clearWatchdog();
+    // Drop any image temp dir so a shutdown mid-turn does not leak it. The
+    // cleanup lives on the turn once a turn exists, and on turnCleanup during
+    // the pre-turn setup window — clear both.
+    this.turn?.cleanup();
+    this.turnCleanup?.();
+    this.turnCleanup = null;
     // If a turn is mid-flight (stop / steer / tab close), tell the banana
     // server to abort it too. Without this the prompt keeps running server
     // side and its late events could leak into a future turn of this session.
@@ -659,13 +688,59 @@ export class BananaSession {
       event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
     });
 
-    if (images?.length) {
-      // The chat prompt path here sends text only; flag attachments instead of
-      // silently dropping them.
-      this.emit({
-        type: 'error',
-        message: 'banana chat does not support image attachments — sending text only',
-      });
+    // Write image attachments to temp files; banana's prompt parts reference
+    // them by file:// URL (the same mechanism the run path uses). The temp dir
+    // is torn down when this turn ends. `cleanupImages` is idempotent (the
+    // null-out makes a second call a no-op) and swallows rm failures so a
+    // cleanup error can never crash the process with an unhandled rejection.
+    // It is held on `turnCleanup` only for the pre-turn-state window (an early
+    // setup failure or a shutdown before the turn object exists); once the
+    // turn object is built it owns the cleanup, so a stale idle event for a
+    // previous turn can never delete this turn's files.
+    let imageTempDir: string | null = null;
+    const cleanupImages = () => {
+      const dir = imageTempDir;
+      imageTempDir = null;
+      if (dir) {
+        void rm(dir, { recursive: true, force: true }).catch((err) => {
+          console.warn(`[chat banana] image temp cleanup failed (${dir}): ${(err as Error).message}`);
+        });
+      }
+    };
+    this.turnCleanup = cleanupImages;
+
+    const fileParts: Array<{ type: 'file'; url: string; filename: string; mime: string }> = [];
+    try {
+      if (images?.length) {
+        imageTempDir = await mkdtemp(join(tmpdir(), 'rivendell-banana-images-'));
+        for (const [index, image] of images.entries()) {
+          if (!image.mediaType.startsWith('image/')) {
+            throw new Error(`unsupported image media type: ${image.mediaType}`);
+          }
+          const ext = imageExtension(image.mediaType);
+          const filename = `image-${index + 1}.${ext}`;
+          const path = join(imageTempDir, filename);
+          await writeFile(path, Buffer.from(image.base64, 'base64'));
+          fileParts.push({
+            type: 'file',
+            url: pathToFileURL(path).href,
+            filename,
+            mime: image.mediaType,
+          });
+        }
+      }
+    } catch (err) {
+      this.failTurn(`image preparation failed: ${(err as Error).message}`);
+      return;
+    }
+    // The session was shut down (tab close / stop) while images were being
+    // written. Bail before touching the server so banana never receives URLs
+    // for a temp dir shutdown() already deleted.
+    if (this.dead) {
+      this.turnCleanup?.();
+      this.turnCleanup = null;
+      this.busy = false;
+      return;
     }
 
     // 1. Make sure the shared serve process is up.
@@ -673,6 +748,12 @@ export class BananaSession {
       await bananaServer.ensure();
     } catch (err) {
       this.failTurn(`banana serve unavailable: ${(err as Error).message}`);
+      return;
+    }
+    if (this.dead) {
+      this.turnCleanup?.();
+      this.turnCleanup = null;
+      this.busy = false;
       return;
     }
 
@@ -698,11 +779,20 @@ export class BananaSession {
         return;
       }
     }
+    if (this.dead) {
+      this.turnCleanup?.();
+      this.turnCleanup = null;
+      this.busy = false;
+      return;
+    }
 
     // 3. Register the route so the shared event loop fans events to us.
     bananaServer.registerRoute(this.threadId, this);
 
-    // 4. Open per-turn streaming state and arm the stall watchdog.
+    // 4. Open per-turn streaming state and arm the stall watchdog. The image
+    //    cleanup moves onto the turn object now, so only this turn's own end
+    //    (completeTurn / failTurn) tears its files down — a stale idle for a
+    //    prior turn can no longer reach them.
     this.turn = {
       messageId: synth('msg'),
       nextBlockIndex: 0,
@@ -712,7 +802,9 @@ export class BananaSession {
       assistantMessageId: null,
       usage: null,
       done: false,
+      cleanup: cleanupImages,
     };
+    this.turnCleanup = null;
     this.armWatchdog();
 
     // 5. Fire the prompt. `prompt` resolves when the turn completes server
@@ -724,7 +816,7 @@ export class BananaSession {
       const res = await client.session.prompt({
         sessionID: this.threadId,
         ...(model ? { model } : {}),
-        parts: [{ type: 'text', text }],
+        parts: [...fileParts, { type: 'text' as const, text }],
       });
       if (res.error) {
         const message = errorText(res.error);
@@ -996,6 +1088,8 @@ export class BananaSession {
     if (state.done) return;
     state.done = true;
     this.clearWatchdog();
+    // Tear down this turn's image temp dir now that the turn is over.
+    state.cleanup();
     this.closeDanglingBlocks(state, 'Banana finished before this block closed.');
     this.emit({
       type: 'event',
@@ -1022,6 +1116,15 @@ export class BananaSession {
       this.closeDanglingBlocks(state, 'Banana stopped before this block closed.');
     }
     this.clearWatchdog();
+    // Tear down the failed turn's image temp dir. Once the turn object exists
+    // it owns the cleanup; before that (an early setup failure) it is still on
+    // turnCleanup. Run whichever applies.
+    if (state) {
+      state.cleanup();
+    } else {
+      this.turnCleanup?.();
+    }
+    this.turnCleanup = null;
     this.emit({ type: 'error', message });
     this.emit({
       type: 'event',

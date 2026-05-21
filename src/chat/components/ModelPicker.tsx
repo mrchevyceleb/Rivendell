@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { MONKEY_TIERS, useBananaModel } from '../hooks/useBananaModel';
 
 // Model selector for the Banana companion. Renders a trigger button + a
-// dropdown with the four monkey quick-picks and a searchable OpenRouter list.
+// dropdown with the monkey-tier quick-picks and a searchable OpenRouter list.
 // The picked model id is owned by useBananaModel (localStorage-backed); this
 // component only surfaces it.
 

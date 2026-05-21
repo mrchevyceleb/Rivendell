@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-// Model picker state for the Banana companion. Quick-picks are the four
-// monkey tiers; the searchable list is every OpenRouter model. The last pick
+// Model picker state for the Banana companion. Quick-picks are the monkey
+// tiers; the searchable list is every OpenRouter model. The last pick
 // is persisted in localStorage and reused as the default.
 
 export type BananaModelOption = {
@@ -14,12 +14,11 @@ export type BananaModelOption = {
   detail?: string;
 };
 
-// The four monkey tiers, biggest to smallest. These are always offered as
+// The monkey tiers, biggest to smallest. These are always offered as
 // quick-picks regardless of network state.
 export const MONKEY_TIERS: BananaModelOption[] = [
   { id: 'monkey/silverback', label: 'Silverback', detail: 'top tier' },
   { id: 'monkey/mandrill', label: 'Mandrill', detail: 'balanced' },
-  { id: 'monkey/gibbon', label: 'Gibbon', detail: 'fast' },
   { id: 'monkey/tamarin', label: 'Tamarin', detail: 'lightweight' },
 ];
 
@@ -74,7 +73,20 @@ function readStoredModel(): string {
   if (typeof window === 'undefined') return DEFAULT_BANANA_MODEL;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw && raw.trim()) return raw.trim();
+    const stored = raw?.trim();
+    if (stored) {
+      // A `monkey/<tier>` value that is no longer an offered tier (e.g. the
+      // retired `monkey/gibbon`) would dead-end at the runner — the proxy has
+      // no such model. Migrate any stale monkey tier to the default. Non-monkey
+      // ids (every `openrouter/...` pick) pass through untouched.
+      if (stored.startsWith('monkey/') && !MONKEY_TIERS.some((t) => t.id === stored)) {
+        try {
+          localStorage.setItem(STORAGE_KEY, DEFAULT_BANANA_MODEL);
+        } catch {}
+        return DEFAULT_BANANA_MODEL;
+      }
+      return stored;
+    }
   } catch {}
   return DEFAULT_BANANA_MODEL;
 }
