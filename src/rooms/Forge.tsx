@@ -1,78 +1,61 @@
 import {
+  Bot,
   CalendarClock,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  Cloud,
-  Clock3,
-  HelpCircle,
-  Laptop,
+  Code2,
   Pencil,
   Pause,
   Play,
   Plus,
   RotateCcw,
   Save,
-  ShieldAlert,
   Sparkles,
   Trash2,
   X,
+  Zap,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
-import type { CronJob, CronPermissionMode, CronRuntime } from '../data/types';
-import { Button, Chip, EmptyState, Metric, Surface } from '../components/Primitives';
+import type { CronAiModel, CronJob } from '../data/types';
+import { Button, Chip, EmptyState, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { useCronJobs } from '../hooks/useRoomData';
-import { timeAgo } from '../utils/format';
 
 type CronDraft = {
   name: string;
-  description: string;
+  aiModel: CronAiModel;
   schedule: string;
-  actionType: string;
   prompt: string;
-  toolName: string;
-  deliveryChannel: string;
-  maxTokens: number;
+  repo: string;
   status: CronJob['status'];
-  runtime: CronRuntime;
-  cwd: string;
-  permissionMode: CronPermissionMode;
 };
 
 const emptyDraft: CronDraft = {
   name: '',
-  description: '',
-  schedule: '0 9 * * *',
-  actionType: 'ai_prompt',
+  aiModel: 'claude',
+  schedule: 'daily 9am',
   prompt: '',
-  toolName: '',
-  deliveryChannel: 'log_only',
-  maxTokens: 1024,
-  status: 'paused',
-  runtime: 'railway',
-  cwd: '',
-  permissionMode: 'default',
+  repo: '',
+  status: 'active',
 };
 
 const schedulePresets = [
-  { label: 'Every 5 min', value: '*/5 * * * *' },
-  { label: 'Every 15 min', value: '*/15 * * * *' },
-  { label: 'Hourly', value: '0 * * * *' },
-  { label: 'Daily 6 AM', value: '0 6 * * *' },
-  { label: 'Weekdays 9 AM', value: '0 9 * * 1-5' },
-  { label: 'M/F 7 AM', value: '0 7 * * 1,5' },
+  { label: 'Every 5 min', value: 'every 5 minutes', cron: '*/5 * * * *' },
+  { label: 'Every 15 min', value: 'every 15 minutes', cron: '*/15 * * * *' },
+  { label: 'Hourly', value: 'hourly', cron: '0 * * * *' },
+  { label: 'Daily 6 AM', value: 'daily 6am', cron: '0 6 * * *' },
+  { label: 'Weekdays 9 AM', value: 'weekdays 9am', cron: '0 9 * * 1-5' },
+  { label: 'M/F 7 AM', value: 'mon/fri 7am', cron: '0 7 * * 1,5' },
 ];
 
-const permissionModes: { value: CronPermissionMode; label: string; hint: string }[] = [
-  { value: 'default', label: 'default', hint: 'Honour your local settings.json' },
-  { value: 'acceptEdits', label: 'acceptEdits', hint: 'Auto-accept edits, prompt on bash' },
-  { value: 'bypassPermissions', label: 'bypassPermissions', hint: 'Unattended — no prompts' },
-  { value: 'plan', label: 'plan', hint: 'Plan only, never execute' },
-];
+const modelLabels: Record<CronAiModel, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  mandrill: 'Mandrill',
+};
+
+const defaultNoRepoCwd = '/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB';
 
 export function Forge() {
   const { data: jobs = [], refetch } = useCronJobs();
@@ -81,30 +64,21 @@ export function Forge() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<CronDraft>(emptyDraft);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [showGuide, setShowGuide] = useState(false);
-  const [filterRuntime, setFilterRuntime] = useState<'all' | CronRuntime>('all');
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-
-  const filteredJobs = useMemo(
-    () => (filterRuntime === 'all' ? jobs : jobs.filter((job) => (job.runtime || 'railway') === filterRuntime)),
-    [jobs, filterRuntime],
-  );
+  const scheduleInputRef = useRef<HTMLInputElement | null>(null);
 
   const selected = useMemo(() => {
-    if (!filteredJobs.length) return null;
-    return filteredJobs.find((job) => job.id === selectedId) ?? filteredJobs[0];
-  }, [filteredJobs, selectedId]);
+    if (!jobs.length) return null;
+    return jobs.find((job) => job.id === selectedId) ?? jobs[0];
+  }, [jobs, selectedId]);
 
   const isCreating = editingId === 'new';
   const editing = isCreating ? null : jobs.find((job) => job.id === editingId) ?? null;
   const activeCount = jobs.filter((job) => job.status === 'active').length;
   const pausedCount = jobs.filter((job) => job.status === 'paused').length;
   const failedCount = jobs.filter((job) => job.status === 'failed').length;
-  const localCount = jobs.filter((job) => job.runtime === 'local').length;
-  const railwayCount = jobs.length - localCount;
-
-  const draftIsLocalAi = draft.runtime === 'local' && draft.actionType === 'ai_prompt';
-  const cwdMissing = draftIsLocalAi && !draft.cwd.trim();
+  const resolvedSchedule = resolveScheduleInput(draft.schedule);
+  const cannotSave = !draft.name.trim() || !draft.prompt.trim() || !resolvedSchedule.valid;
+  const customSchedule = !isPresetSchedule(draft.schedule);
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['cron'] });
@@ -114,29 +88,23 @@ export function Forge() {
     setDraft(emptyDraft);
     setEditingId('new');
     setSelectedId(null);
-    setAdvancedOpen(false);
   };
 
   const startEdit = (job: CronJob) => {
-    const next = draftFromJob(job);
-    setDraft(next);
+    if (job.readOnly) return;
+    setDraft(draftFromJob(job));
     setEditingId(job.id);
     setSelectedId(job.id);
-    // Open Advanced automatically if this job uses any non-default knob, so
-    // the user sees what's actually set instead of having to hunt for it.
-    setAdvancedOpen(hasNonDefaultAdvanced(next));
   };
 
   const closeEditor = () => {
     setEditingId(null);
     setDraft(emptyDraft);
-    setAdvancedOpen(false);
   };
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
-    if (!draft.name.trim()) return;
-    if (cwdMissing) return;
+    if (cannotSave) return;
     const payload = normalizeDraft(draft);
     const saved = await apiJson<CronJob>(isCreating ? '/api/cron' : `/api/cron/${encodeURIComponent(editingId || '')}`, {
       method: isCreating ? 'POST' : 'PATCH',
@@ -148,6 +116,7 @@ export function Forge() {
   };
 
   const toggle = async (job: CronJob) => {
+    if (job.readOnly) return;
     setBusyId(job.id);
     try {
       await apiJson<CronJob>(`/api/cron/${encodeURIComponent(job.id)}`, {
@@ -161,6 +130,7 @@ export function Forge() {
   };
 
   const runNow = async (job: CronJob) => {
+    if (job.readOnly) return;
     setBusyId(job.id);
     try {
       await apiJson(`/api/cron/${encodeURIComponent(job.id)}/run-now`, { method: 'POST' });
@@ -171,6 +141,7 @@ export function Forge() {
   };
 
   const remove = async (job: CronJob) => {
+    if (job.readOnly) return;
     if (!window.confirm(`Delete "${job.name}"?`)) return;
     setBusyId(job.id);
     try {
@@ -187,80 +158,36 @@ export function Forge() {
     <div className="room-scroll r-scroll forge-room">
       <RoomHeader
         eyebrow="The Forge"
-        title="Cron jobs"
-        subtitle={`${jobs.length} schedules · ${activeCount} active · ${pausedCount} paused${failedCount ? ` · ${failedCount} failed` : ''} · ${railwayCount} on Railway · ${localCount} on Bag End.`}
+        title="Scheduled tasks"
+        subtitle={`${jobs.length} tasks. ${activeCount} active, ${pausedCount} paused${failedCount ? `, ${failedCount} failed` : ''}.`}
         actions={
           <>
-            <Button tone="ghost" onClick={() => setShowGuide((value) => !value)} title="Which runtime should I pick?">
-              <HelpCircle size={15} />
-              {showGuide ? 'Hide tips' : 'Tips'}
-            </Button>
             <Button tone="ghost" onClick={() => refetch()}>
               <RotateCcw size={15} />
               Refresh
             </Button>
             <Button tone="gold" onClick={startCreate}>
               <Plus size={15} />
-              New cron job
+              New task
             </Button>
           </>
         }
       />
 
-      {showGuide ? <RuntimeGuide onClose={() => setShowGuide(false)} /> : null}
-
-      <div className="forge-summary">
-        <Metric label="Active" value={activeCount} tone="emerald" />
-        <Metric label="Paused" value={pausedCount} tone="gold" />
-        <Metric label="Failed" value={failedCount} tone="rose" />
-        <Metric label="On Railway" value={railwayCount} tone="elf" />
-        <Metric label="On Bag End" value={localCount} tone="gold" />
-      </div>
-
-      <div className="forge-studio">
+      <div className="forge-studio forge-studio-simple">
         <section className="cron-list-panel">
           <div className="section-head">
             <div>
-              <p className="r-eyebrow-gold">Schedules</p>
-              <h2>Existing jobs</h2>
-            </div>
-            <div className="runtime-filter" role="tablist" aria-label="Filter by runtime">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={filterRuntime === 'all'}
-                className={filterRuntime === 'all' ? 'is-active' : ''}
-                onClick={() => setFilterRuntime('all')}
-              >
-                All <em>{jobs.length}</em>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={filterRuntime === 'railway'}
-                className={filterRuntime === 'railway' ? 'is-active' : ''}
-                onClick={() => setFilterRuntime('railway')}
-                title="Always-on cloud scheduler"
-              >
-                <Cloud size={12} /> Railway <em>{railwayCount}</em>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={filterRuntime === 'local'}
-                className={filterRuntime === 'local' ? 'is-active' : ''}
-                onClick={() => setFilterRuntime('local')}
-                title="Bag End local launchd runner"
-              >
-                <Laptop size={12} /> Bag End <em>{localCount}</em>
-              </button>
+              <p className="r-eyebrow-gold">Tasks</p>
+              <h2>Existing schedules</h2>
             </div>
           </div>
+
           <div className="cron-card-list">
-            {filteredJobs.length ? (
-              filteredJobs.map((job) => (
+            {jobs.length ? (
+              jobs.map((job) => (
                 <article
-                  className={`cron-card status-${job.status} runtime-${job.runtime || 'railway'} ${selected?.id === job.id ? 'is-selected' : ''}`}
+                  className={`cron-card status-${job.status} model-${job.aiModel || inferAiModel(job)} source-${job.source || 'assistant-mcp'} ${job.readOnly ? 'is-readonly' : ''} ${selected?.id === job.id ? 'is-selected' : ''}`}
                   key={job.id}
                   onClick={() => setSelectedId(job.id)}
                 >
@@ -268,45 +195,55 @@ export function Forge() {
                     <span className={`status-pin status-${job.status}`} />
                     <div>
                       <h3>{job.name}</h3>
-                      <p>{job.description || job.prompt || 'No description yet.'}</p>
+                      <p>{job.prompt || 'No prompt saved.'}</p>
                     </div>
                   </div>
                   <div className="cron-card-meta">
                     <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>
                       {job.status}
                     </Chip>
-                    <RuntimeChip runtime={job.runtime} />
+                    <ModelChip model={job.aiModel || inferAiModel(job)} />
+                    {job.sourceLabel ? (
+                      <span title={job.description || job.sourceLabel}>
+                        <Bot size={13} />
+                        {job.sourceLabel}
+                      </span>
+                    ) : null}
                     <span>
                       <CalendarClock size={13} />
-                      {job.schedule}
+                      {humanizeCron(job.schedule)}
                     </span>
-                    <span>
-                      <Clock3 size={13} />
-                      {job.lastRun}
+                    <span title={displayRepo(job) || 'No repo saved'}>
+                      <Code2 size={13} />
+                      {shortRepo(displayRepo(job))}
                     </span>
                   </div>
                   <div className="cron-card-actions" onClick={(event) => event.stopPropagation()}>
-                    <button type="button" onClick={() => runNow(job)} disabled={busyId === job.id} title="Run now">
-                      <Play size={14} />
-                    </button>
-                    <button type="button" onClick={() => toggle(job)} disabled={busyId === job.id} title={job.status === 'active' ? 'Pause' : 'Resume'}>
-                      {job.status === 'active' ? <Pause size={14} /> : <Check size={14} />}
-                    </button>
-                    <button type="button" onClick={() => startEdit(job)} title="Edit">
-                      <Pencil size={14} />
-                    </button>
-                    <button type="button" onClick={() => remove(job)} disabled={busyId === job.id} title="Delete">
-                      <Trash2 size={14} />
-                    </button>
+                    {job.readOnly ? (
+                      <span className="cron-readonly-note">Managed in {job.sourceLabel || 'source'}</span>
+                    ) : (
+                      <>
+                        <button type="button" onClick={() => toggle(job)} disabled={busyId === job.id} title={job.status === 'active' ? 'Pause schedule' : 'Resume schedule'}>
+                          {job.status === 'active' ? <Pause size={14} /> : <Play size={14} />}
+                        </button>
+                        <button type="button" onClick={() => runNow(job)} disabled={busyId === job.id} title="Run once now">
+                          <Zap size={14} />
+                        </button>
+                        <button type="button" onClick={() => startEdit(job)} title="Edit">
+                          <Pencil size={14} />
+                        </button>
+                        <button type="button" onClick={() => remove(job)} disabled={busyId === job.id} title="Delete">
+                          <Trash2 size={14} />
+                        </button>
+                      </>
+                    )}
                   </div>
                 </article>
               ))
             ) : (
               <EmptyState
-                title={filterRuntime === 'all' ? 'No cron jobs yet' : `No ${filterRuntime === 'local' ? 'Bag End' : 'Railway'} jobs yet`}
-                body={filterRuntime === 'local'
-                  ? 'Create a local schedule for jobs that need a real repo and Claude Code Opus.'
-                  : 'Create a schedule to have Elrond run recurring work.'}
+                title="No scheduled tasks yet"
+                body="Create one with a title, model, schedule, and prompt."
               />
             )}
           </div>
@@ -314,20 +251,19 @@ export function Forge() {
 
         <aside className="cron-detail-panel">
           {editingId ? (
-            <form className="cron-editor" onSubmit={save}>
+            <form className="cron-editor cron-editor-simple" onSubmit={save}>
               <div className="section-head">
                 <div>
-                  <p className="r-eyebrow-gold">{isCreating ? 'New schedule' : 'Edit schedule'}</p>
-                  <h2>{isCreating ? 'Create cron job' : editing?.name}</h2>
+                  <p className="r-eyebrow-gold">{isCreating ? 'New task' : 'Edit task'}</p>
+                  <h2>{isCreating ? 'Create schedule' : editing?.name}</h2>
                 </div>
                 <button type="button" onClick={closeEditor} title="Close editor">
                   <X size={16} />
                 </button>
               </div>
 
-              {/* Required basics — what most jobs actually need. */}
               <label className="cron-field">
-                Name
+                Task title
                 <input
                   value={draft.name}
                   onChange={(event) => setDraft({ ...draft, name: event.target.value })}
@@ -336,27 +272,46 @@ export function Forge() {
                 />
               </label>
 
+              <div className="cron-field">
+                AI model to use
+                <ModelToggle
+                  value={draft.aiModel}
+                  onChange={(aiModel) => setDraft({ ...draft, aiModel })}
+                />
+              </div>
+
               <label className="cron-field">
                 Schedule
                 <input
+                  ref={scheduleInputRef}
                   value={draft.schedule}
                   onChange={(event) => setDraft({ ...draft, schedule: event.target.value })}
-                  placeholder="0 9 * * *"
+                  placeholder="every 10 minutes, daily 6am, weekdays 8:30am"
                 />
-                <small className="muted">Pick a preset below or type a cron expression.</small>
+                <small className="cron-schedule-hint">{describeSchedule(draft.schedule)}</small>
               </label>
 
               <div className="cron-presets" aria-label="Schedule presets">
                 {schedulePresets.map((preset) => (
                   <button
                     type="button"
-                    key={preset.value}
-                    className={draft.schedule === preset.value ? 'is-active' : ''}
+                    key={preset.cron}
+                    className={resolvedSchedule.cron === preset.cron ? 'is-active' : ''}
                     onClick={() => setDraft({ ...draft, schedule: preset.value })}
                   >
                     {preset.label}
                   </button>
                 ))}
+                <button
+                  type="button"
+                  className={customSchedule ? 'is-active is-custom' : 'is-custom'}
+                  onClick={() => {
+                    if (!customSchedule) setDraft({ ...draft, schedule: '' });
+                    window.requestAnimationFrame(() => scheduleInputRef.current?.focus());
+                  }}
+                >
+                  Custom
+                </button>
               </div>
 
               <label className="cron-field">
@@ -364,162 +319,31 @@ export function Forge() {
                 <textarea
                   value={draft.prompt}
                   onChange={(event) => setDraft({ ...draft, prompt: event.target.value })}
-                  placeholder="Describe the recurring work. Be specific about output format and length."
-                  rows={7}
+                  placeholder="Describe the recurring work. Be specific about the result you want."
+                  rows={8}
                 />
               </label>
 
               <label className="cron-field">
-                Delivery <span className="cron-optional">optional</span>
-                <select value={draft.deliveryChannel} onChange={(event) => setDraft({ ...draft, deliveryChannel: event.target.value })}>
-                  <option value="log_only">Just log it — silent, no message</option>
-                  <option value="telegram">Telegram — DM Matt</option>
-                  <option value="email">Email — send to Matt</option>
-                </select>
-              </label>
-
-              <label className="cron-toggle">
+                <span>Repo <span className="cron-optional">optional</span></span>
                 <input
-                  type="checkbox"
-                  checked={draft.status === 'active'}
-                  onChange={(event) => setDraft({ ...draft, status: event.target.checked ? 'active' : 'paused' })}
+                  value={draft.repo}
+                  onChange={(event) => setDraft({ ...draft, repo: event.target.value })}
+                  placeholder="Leave blank for no repo"
                 />
-                Turn on immediately
               </label>
 
-              {/* Advanced — collapsed by default. Most jobs never touch any of this. */}
-              <div className="cron-advanced">
-                <button
-                  type="button"
-                  className="cron-advanced-toggle"
-                  onClick={() => setAdvancedOpen((value) => !value)}
-                  aria-expanded={advancedOpen}
-                >
-                  {advancedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  <span>Advanced</span>
-                  <small>runtime, action type, permissions — usually leave alone</small>
-                </button>
-
-                {advancedOpen ? (
-                  <div className="cron-advanced-body">
-                    <label className="cron-field">
-                      Description <span className="cron-optional">optional</span>
-                      <input
-                        value={draft.description}
-                        onChange={(event) => setDraft({ ...draft, description: event.target.value })}
-                        placeholder="What this job does"
-                      />
-                    </label>
-
-                    <div className="runtime-toggle-row">
-                      <div>
-                        <p className="r-eyebrow-gold">Runtime</p>
-                        <p className="muted small">Where this schedule fires. Default: Railway.</p>
-                      </div>
-                      <RuntimeToggle
-                        value={draft.runtime}
-                        onChange={(runtime) => setDraft({ ...draft, runtime })}
-                      />
-                      <button
-                        type="button"
-                        className="r-icon-button"
-                        onClick={() => setShowGuide(true)}
-                        title="Which runtime should I pick?"
-                        aria-label="Runtime help"
-                      >
-                        <HelpCircle size={14} />
-                      </button>
-                    </div>
-
-                    {draftIsLocalAi ? (
-                      <p className="runtime-hint">
-                        <Sparkles size={12} /> Bag End jobs run <code>claude -p</code> in <code>{draft.cwd || '<cwd>'}</code> with full Opus + repo access.
-                      </p>
-                    ) : draft.runtime === 'railway' ? (
-                      <p className="runtime-hint">
-                        <Cloud size={12} /> Railway jobs run in-process on the always-on Railway server. Best for time-critical and stateless work.
-                      </p>
-                    ) : null}
-
-                    <div className="cron-form-grid">
-                      <label>
-                        Action type
-                        <select value={draft.actionType} onChange={(event) => setDraft({ ...draft, actionType: event.target.value })}>
-                          <option value="ai_prompt">ai_prompt — Claude does the work</option>
-                          <option value="tool_call">tool_call — call an MCP tool directly</option>
-                          <option value="webhook">webhook — POST to a URL</option>
-                        </select>
-                      </label>
-                      <label>
-                        Tool name <span className="cron-optional">optional</span>
-                        <input
-                          value={draft.toolName}
-                          onChange={(event) => setDraft({ ...draft, toolName: event.target.value })}
-                          placeholder={draft.actionType === 'tool_call' ? 'gmail_send' : 'Optional MCP tool'}
-                          disabled={draft.actionType === 'webhook'}
-                        />
-                      </label>
-                      <label>
-                        Max tokens
-                        <input
-                          type="number"
-                          min={256}
-                          step={128}
-                          value={draft.maxTokens}
-                          onChange={(event) => setDraft({ ...draft, maxTokens: Number(event.target.value) })}
-                        />
-                      </label>
-                    </div>
-
-                    {draftIsLocalAi ? (
-                      <div className="cron-local-fields">
-                        <label className="cron-field">
-                          Working directory
-                          <input
-                            value={draft.cwd}
-                            onChange={(event) => setDraft({ ...draft, cwd: event.target.value })}
-                            placeholder="/Users/mjohnst/samwise/KG-Apps/operly"
-                          />
-                          <small className="muted">
-                            Required for Bag End ai_prompt jobs. Absolute path where <code>claude -p</code> will run.
-                          </small>
-                        </label>
-                        <label className="cron-field">
-                          Permission mode
-                          <select
-                            value={draft.permissionMode}
-                            onChange={(event) => setDraft({ ...draft, permissionMode: event.target.value as CronPermissionMode })}
-                          >
-                            {permissionModes.map((mode) => (
-                              <option key={mode.value} value={mode.value}>
-                                {mode.label} — {mode.hint}
-                              </option>
-                            ))}
-                          </select>
-                          {draft.permissionMode === 'bypassPermissions' ? (
-                            <small className="warn">
-                              <ShieldAlert size={11} /> Unattended bypass. The CLI will run any tool/command without prompting. Only use for jobs you trust completely.
-                            </small>
-                          ) : (
-                            <small className="muted">Unattended jobs that need to edit + run shell usually want <code>bypassPermissions</code>.</small>
-                          )}
-                        </label>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
-
-              {cwdMissing ? (
+              {cannotSave ? (
                 <p className="form-error">
-                  <ShieldAlert size={12} /> Bag End ai_prompt jobs need a working directory. Open <strong>Advanced</strong> to set it.
+                  Fill in the task title, schedule, and prompt before saving.
                 </p>
               ) : null}
+
               <div className="cron-editor-actions">
                 <Button tone="ghost" type="button" onClick={closeEditor}>Cancel</Button>
-                <Button tone="gold" type="submit" disabled={cwdMissing}>
+                <Button tone="gold" type="submit" disabled={cannotSave}>
                   <Save size={14} />
-                  Save job
+                  Save task
                 </Button>
               </div>
             </form>
@@ -532,7 +356,10 @@ export function Forge() {
               busy={busyId === selected.id}
             />
           ) : (
-            <RuntimeGuide variant="empty" onClose={() => setShowGuide(false)} />
+            <EmptyState
+              title="Pick a scheduled task"
+              body="The details panel shows the title, model, schedule, prompt, and repo."
+            />
           )}
         </aside>
       </div>
@@ -547,231 +374,382 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
   onToggle: () => void;
   busy: boolean;
 }) {
+  const model = job.aiModel || inferAiModel(job);
+  const repo = displayRepo(job);
+
   return (
-    <Surface className="cron-detail-card">
+    <Surface className="cron-detail-card cron-detail-simple">
       <div className="section-head">
         <div>
-          <p className="r-eyebrow-gold">Selected job</p>
+          <p className="r-eyebrow-gold">Selected task</p>
           <h2>{job.name}</h2>
         </div>
         <div className="cron-detail-chips">
           <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>{job.status}</Chip>
-          <RuntimeChip runtime={job.runtime} />
+          <ModelChip model={model} />
+          {job.sourceLabel ? <Chip tone="elf">{job.sourceLabel}</Chip> : null}
+          {job.readOnly ? <Chip>Read only</Chip> : null}
         </div>
       </div>
-      <p className="cron-description">{job.description || 'No description saved.'}</p>
+
       <dl className="cron-facts">
         <div>
+          <dt>Task title</dt>
+          <dd>{job.name}</dd>
+        </div>
+        <div>
+          <dt>AI model</dt>
+          <dd>{modelLabels[model]}</dd>
+        </div>
+        <div>
           <dt>Schedule</dt>
-          <dd><code>{job.schedule}</code></dd>
+          <dd>{humanizeCron(job.schedule)} <code>{job.schedule}</code></dd>
         </div>
         <div>
-          <dt>Action</dt>
-          <dd>{job.target}</dd>
+          <dt>Repo</dt>
+          <dd><code>{repo || 'No repo saved'}</code></dd>
         </div>
         <div>
-          <dt>Action type</dt>
-          <dd>{job.actionType || 'ai_prompt'}</dd>
-        </div>
-        <div>
-          <dt>Delivery</dt>
-          <dd>{job.deliveryChannel || 'log_only'}</dd>
-        </div>
-        {job.runtime === 'local' && job.cwd ? (
-          <div>
-            <dt>Working dir</dt>
-            <dd><code>{job.cwd}</code></dd>
-          </div>
-        ) : null}
-        {job.runtime === 'local' && job.permissionMode ? (
-          <div>
-            <dt>Permissions</dt>
-            <dd><code>{job.permissionMode}</code></dd>
-          </div>
-        ) : null}
-        <div>
-          <dt>Last run</dt>
-          <dd>{job.lastRunAt ? `${timeAgo(job.lastRunAt)} ago` : job.lastRun}</dd>
-        </div>
-        <div>
-          <dt>Updated</dt>
-          <dd>{job.updatedAt ? `${timeAgo(job.updatedAt)} ago` : 'unknown'}</dd>
+          <dt>Source</dt>
+          <dd>{job.sourceLabel || 'Forge'}</dd>
         </div>
       </dl>
-      {job.prompt ? (
-        <div className="cron-prompt-preview">
-          <p className="r-eyebrow">Prompt</p>
-          <pre>{job.prompt}</pre>
-        </div>
-      ) : null}
+
+      <div className="cron-prompt-preview">
+        <p className="r-eyebrow">Prompt</p>
+        <pre>{job.prompt || 'No prompt saved.'}</pre>
+      </div>
+
       {job.lastRunError ? (
         <div className="cron-error">
           <p className="r-eyebrow">Last error</p>
           <pre>{job.lastRunError}</pre>
         </div>
       ) : null}
+
       <div className="cron-detail-actions">
-        <Button tone="elf" onClick={onRun} disabled={busy}>
-          <Play size={14} />
-          Run now
-        </Button>
-        <Button tone="ghost" onClick={onToggle} disabled={busy}>
-          {job.status === 'active' ? <Pause size={14} /> : <Play size={14} />}
-          {job.status === 'active' ? 'Pause' : 'Resume'}
-        </Button>
-        <Button tone="gold" onClick={onEdit}>
-          <Pencil size={14} />
-          Edit
-        </Button>
+        {job.readOnly ? (
+          <span className="cron-readonly-note">Managed in {job.sourceLabel || 'source'}</span>
+        ) : (
+          <>
+            <Button tone="elf" onClick={onToggle} disabled={busy}>
+              {job.status === 'active' ? <Pause size={14} /> : <Play size={14} />}
+              {job.status === 'active' ? 'Pause' : 'Resume'}
+            </Button>
+            <Button tone="ghost" onClick={onRun} disabled={busy}>
+              <Zap size={14} />
+              Run once
+            </Button>
+            <Button tone="gold" onClick={onEdit}>
+              <Pencil size={14} />
+              Edit
+            </Button>
+          </>
+        )}
       </div>
     </Surface>
   );
 }
 
-function RuntimeToggle({ value, onChange }: { value: CronRuntime; onChange: (value: CronRuntime) => void }) {
+function ModelToggle({ value, onChange }: { value: CronAiModel; onChange: (value: CronAiModel) => void }) {
   return (
-    <div className={`runtime-toggle runtime-${value}`} role="radiogroup" aria-label="Runtime">
+    <div className={`model-toggle model-${value}`} role="radiogroup" aria-label="AI model to use">
       <button
         type="button"
         role="radio"
-        aria-checked={value === 'railway'}
-        className={value === 'railway' ? 'is-active' : ''}
-        onClick={() => onChange('railway')}
+        aria-checked={value === 'claude'}
+        className={value === 'claude' ? 'is-active' : ''}
+        onClick={() => onChange('claude')}
       >
-        <Cloud size={14} />
-        <span>
-          <strong>Railway</strong>
-          <small>always-on cloud</small>
-        </span>
+        <Sparkles size={14} />
+        <span>Claude</span>
       </button>
       <button
         type="button"
         role="radio"
-        aria-checked={value === 'local'}
-        className={value === 'local' ? 'is-active' : ''}
-        onClick={() => onChange('local')}
+        aria-checked={value === 'codex'}
+        className={value === 'codex' ? 'is-active' : ''}
+        onClick={() => onChange('codex')}
       >
-        <Laptop size={14} />
-        <span>
-          <strong>Bag End</strong>
-          <small>local Mac · Claude CLI</small>
-        </span>
+        <Code2 size={14} />
+        <span>Codex</span>
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={value === 'mandrill'}
+        className={value === 'mandrill' ? 'is-active' : ''}
+        onClick={() => onChange('mandrill')}
+      >
+        <Bot size={14} />
+        <span>Mandrill</span>
       </button>
     </div>
   );
 }
 
-function RuntimeChip({ runtime }: { runtime?: CronRuntime }) {
-  const value = runtime || 'railway';
-  if (value === 'local') {
-    return (
-      <span className="runtime-chip runtime-local" title="Runs on Bag End via launchd. Uses Claude Code CLI.">
-        <Laptop size={12} /> Bag End
-      </span>
-    );
-  }
+function ModelChip({ model }: { model: CronAiModel }) {
+  const Icon = model === 'claude' ? Sparkles : model === 'codex' ? Code2 : Bot;
   return (
-    <span className="runtime-chip runtime-railway" title="Runs in-process on the Railway scheduler.">
-      <Cloud size={12} /> Railway
+    <span className={`model-chip model-${model}`} title={`Uses ${modelLabels[model]}`}>
+      <Icon size={12} /> {modelLabels[model]}
     </span>
-  );
-}
-
-function RuntimeGuide({ variant, onClose }: { variant?: 'empty' | 'banner'; onClose: () => void }) {
-  return (
-    <Surface className={`runtime-guide ${variant === 'empty' ? 'runtime-guide-empty' : 'runtime-guide-banner'}`}>
-      <div className="section-head">
-        <div>
-          <p className="r-eyebrow-gold">How to choose a runtime</p>
-          <h2>Railway vs Bag End</h2>
-        </div>
-        {variant !== 'empty' ? (
-          <button type="button" className="r-icon-button" onClick={onClose} title="Hide tips">
-            <X size={14} />
-          </button>
-        ) : null}
-      </div>
-      <p className="muted runtime-guide-lede">
-        Default to Railway. Move a job to Bag End only when one of the local-only powers actually changes the outcome.
-      </p>
-      <div className="runtime-guide-grid">
-        <div className="runtime-guide-card">
-          <header>
-            <Cloud size={14} />
-            <strong>Pick Railway when…</strong>
-          </header>
-          <ul>
-            <li>Job is time-critical (every X min, can't miss a fire).</li>
-            <li>It's a pure tool call or webhook — no reasoning.</li>
-            <li>It handles inbound user data (SMS, webhooks, polls).</li>
-            <li>A 4-hour Mac outage would break something.</li>
-          </ul>
-        </div>
-        <div className="runtime-guide-card">
-          <header>
-            <Laptop size={14} />
-            <strong>Pick Bag End when…</strong>
-          </header>
-          <ul>
-            <li>Job needs a real checkout — git, gh, npm test, edit files.</li>
-            <li>Heavy reasoning that benefits from local Opus.</li>
-            <li>Needs MCP servers only configured locally (Codex, etc.).</li>
-            <li>Misses are tolerable if the Mac sleeps.</li>
-          </ul>
-        </div>
-      </div>
-      <p className="runtime-guide-rule">
-        <Sparkles size={12} /> Gut check: <em>"Could a 4-hour Mac outage break this?"</em> → Railway.&nbsp;
-        <em>"Does this need a real repo or smart reasoning?"</em> → Bag End.
-      </p>
-    </Surface>
-  );
-}
-
-function hasNonDefaultAdvanced(draft: CronDraft): boolean {
-  return (
-    draft.runtime !== emptyDraft.runtime ||
-    draft.actionType !== emptyDraft.actionType ||
-    Boolean(draft.toolName) ||
-    draft.maxTokens !== emptyDraft.maxTokens ||
-    Boolean(draft.cwd) ||
-    draft.permissionMode !== emptyDraft.permissionMode ||
-    Boolean(draft.description)
   );
 }
 
 function draftFromJob(job: CronJob): CronDraft {
   return {
     name: job.name,
-    description: job.description || '',
-    schedule: job.schedule,
-    actionType: job.actionType || 'ai_prompt',
+    aiModel: job.aiModel || inferAiModel(job),
+    schedule: cronToInput(job.schedule),
     prompt: job.prompt || '',
-    toolName: job.toolName || (job.actionType === 'mcp_tool' ? job.target : ''),
-    deliveryChannel: job.deliveryChannel || 'log_only',
-    maxTokens: job.maxTokens || 1024,
+    repo: displayRepo(job),
     status: job.status === 'failed' ? 'paused' : job.status,
-    runtime: job.runtime || 'railway',
-    cwd: job.cwd || '',
-    permissionMode: job.permissionMode || 'default',
   };
 }
 
 function normalizeDraft(draft: CronDraft): Partial<CronJob> {
-  const isLocalAi = draft.runtime === 'local' && draft.actionType === 'ai_prompt';
+  const aiModel = draft.aiModel;
+  const repo = draft.repo.trim();
+  const localModel = aiModel === 'claude' || aiModel === 'codex';
+  const schedule = resolveScheduleInput(draft.schedule);
+
   return {
     name: draft.name.trim(),
-    description: draft.description.trim(),
-    schedule: draft.schedule.trim() || '0 9 * * *',
-    target: draft.toolName.trim() || draft.actionType.trim() || 'ai_prompt',
-    actionType: draft.actionType.trim() || 'ai_prompt',
+    description: '',
+    schedule: schedule.cron,
+    target: aiModel,
+    actionType: 'ai_prompt',
     prompt: draft.prompt.trim(),
-    toolName: draft.toolName.trim(),
-    deliveryChannel: draft.deliveryChannel.trim() || 'log_only',
-    maxTokens: Number(draft.maxTokens) || 1024,
+    aiModel,
+    repo: repo || undefined,
+    toolName: '',
+    deliveryChannel: 'log_only',
+    maxTokens: 2048,
     status: draft.status,
-    runtime: draft.runtime,
-    cwd: isLocalAi ? draft.cwd.trim() : undefined,
-    permissionMode: isLocalAi ? draft.permissionMode : undefined,
+    runtime: localModel ? 'local' : 'railway',
+    cwd: repo || undefined,
+    permissionMode: localModel ? 'default' : undefined,
   };
+}
+
+type ScheduleResolution = {
+  cron: string;
+  label: string;
+  valid: boolean;
+};
+
+function describeSchedule(schedule: string): string {
+  return resolveScheduleInput(schedule).label;
+}
+
+function inferAiModel(job: CronJob): CronAiModel {
+  if (job.runtime === 'local') return 'claude';
+  return 'mandrill';
+}
+
+function isPresetSchedule(schedule: string): boolean {
+  const resolved = resolveScheduleInput(schedule);
+  return resolved.valid && schedulePresets.some((preset) => preset.cron === resolved.cron);
+}
+
+function displayRepo(job: CronJob): string {
+  if (job.repo) return job.repo;
+  if (job.cwd && job.cwd !== defaultNoRepoCwd) return job.cwd;
+  return '';
+}
+
+function resolveScheduleInput(input: string): ScheduleResolution {
+  const raw = input.trim();
+  const normalized = normalizeScheduleText(raw);
+  if (!normalized) {
+    return { cron: '0 9 * * *', label: 'Runs daily at 9:00 AM', valid: true };
+  }
+
+  const preset = schedulePresets.find(
+    (item) => normalized === normalizeScheduleText(item.value) ||
+      normalized === normalizeScheduleText(item.label) ||
+      raw === item.cron,
+  );
+  if (preset) return { cron: preset.cron, label: `Runs ${preset.label.toLowerCase()}`, valid: true };
+
+  const everyMinutes = normalized.match(/^every\s+(\d+)\s*(?:m|min|mins|minute|minutes)$/);
+  if (everyMinutes) {
+    const minutes = Number(everyMinutes[1]);
+    if (minutes >= 1 && minutes <= 59) {
+      return { cron: minutes === 1 ? '* * * * *' : `*/${minutes} * * * *`, label: `Runs every ${minutes} minute${minutes === 1 ? '' : 's'}`, valid: true };
+    }
+    return { cron: '', label: 'Use 1 to 59 minutes for minute intervals.', valid: false };
+  }
+
+  const everyHours = normalized.match(/^every\s+(\d+)\s*(?:h|hr|hrs|hour|hours)$/);
+  if (everyHours) {
+    const hours = Number(everyHours[1]);
+    if (hours >= 1 && hours <= 23) {
+      return { cron: hours === 1 ? '0 * * * *' : `0 */${hours} * * *`, label: `Runs every ${hours} hour${hours === 1 ? '' : 's'}`, valid: true };
+    }
+    return { cron: '', label: 'Use 1 to 23 hours for hourly intervals.', valid: false };
+  }
+
+  const everyDays = normalized.match(/^every\s+(\d+)\s*(?:day|days)(?:\s+(.*))?$/);
+  if (everyDays) {
+    const days = Number(everyDays[1]);
+    const time = parseTimeText(everyDays[2] || '9am');
+    if (days >= 1 && days <= 31 && time) {
+      return {
+        cron: `${time.minute} ${time.hour} ${days === 1 ? '*' : `*/${days}`} * *`,
+        label: `Runs every ${days} day${days === 1 ? '' : 's'} at ${formatCronTime(String(time.hour), String(time.minute))}`,
+        valid: true,
+      };
+    }
+    return { cron: '', label: 'Use a day interval from 1 to 31 with a valid time.', valid: false };
+  }
+
+  const daily = normalized.match(/^(?:daily|every day)(?:\s+(.*))?$/);
+  if (daily) {
+    const time = parseTimeText(daily[1] || '9am');
+    if (time) {
+      return {
+        cron: `${time.minute} ${time.hour} * * *`,
+        label: `Runs daily at ${formatCronTime(String(time.hour), String(time.minute))}`,
+        valid: true,
+      };
+    }
+  }
+
+  const weekdays = normalized.match(/^(?:weekdays|weekday|m-f|mon-fri|monday-friday)(?:\s+(.*))?$/);
+  if (weekdays) {
+    const time = parseTimeText(weekdays[1] || '9am');
+    if (time) {
+      return {
+        cron: `${time.minute} ${time.hour} * * 1-5`,
+        label: `Runs weekdays at ${formatCronTime(String(time.hour), String(time.minute))}`,
+        valid: true,
+      };
+    }
+  }
+
+  const mondayFriday = normalized.match(/^(?:m\/f|mon\/fri|monday\/friday|mondays\/fridays)(?:\s+(.*))?$/);
+  if (mondayFriday) {
+    const time = parseTimeText(mondayFriday[1] || '9am');
+    if (time) {
+      return {
+        cron: `${time.minute} ${time.hour} * * 1,5`,
+        label: `Runs Monday and Friday at ${formatCronTime(String(time.hour), String(time.minute))}`,
+        valid: true,
+      };
+    }
+  }
+
+  const weekday = normalized.match(/^(?:every\s+)?(sun|sunday|mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday)s?(?:\s+(.*))?$/);
+  if (weekday) {
+    const day = weekdayToCron(weekday[1]);
+    const time = parseTimeText(weekday[2] || '9am');
+    if (day !== null && time) {
+      return {
+        cron: `${time.minute} ${time.hour} * * ${day}`,
+        label: `Runs ${weekdayName(day)} at ${formatCronTime(String(time.hour), String(time.minute))}`,
+        valid: true,
+      };
+    }
+  }
+
+  if (isFiveFieldCron(raw)) {
+    return { cron: raw, label: humanizeCron(raw), valid: true };
+  }
+
+  return { cron: '', label: 'Try phrases like every 10 minutes, daily 6am, weekdays 8:30am, or mon/fri 7am.', valid: false };
+}
+
+function cronToInput(cron: string): string {
+  const preset = schedulePresets.find((item) => item.cron === cron);
+  if (preset) return preset.value;
+
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return cron;
+  const [minute, hour, day, month, weekday] = parts;
+  const minuteStep = minute.match(/^\*\/([1-9]\d*)$/);
+  if (minuteStep && hour === '*' && day === '*' && month === '*' && weekday === '*') return `every ${minuteStep[1]} minutes`;
+  const hourStep = hour.match(/^\*\/([1-9]\d*)$/);
+  if (minute === '0' && hourStep && day === '*' && month === '*' && weekday === '*') return `every ${hourStep[1]} hours`;
+  if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && day === '*' && month === '*' && weekday === '*') return `daily ${formatInputTime(hour, minute)}`;
+  if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && day === '*' && month === '*' && weekday === '1-5') return `weekdays ${formatInputTime(hour, minute)}`;
+  if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && day === '*' && month === '*' && weekday === '1,5') return `mon/fri ${formatInputTime(hour, minute)}`;
+  return cron;
+}
+
+function humanizeCron(cron: string): string {
+  const preset = schedulePresets.find((item) => item.cron === cron);
+  if (preset) return preset.label;
+
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return cron;
+  const [minute, hour, day, month, weekday] = parts;
+  const minuteStep = minute.match(/^\*\/([1-9]\d*)$/);
+  if (minuteStep && hour === '*' && day === '*' && month === '*' && weekday === '*') return `Every ${minuteStep[1]} min`;
+  const hourStep = hour.match(/^\*\/([1-9]\d*)$/);
+  if (minute === '0' && hourStep && day === '*' && month === '*' && weekday === '*') return `Every ${hourStep[1]} hours`;
+  if (minute === '0' && hour === '*' && day === '*' && month === '*' && weekday === '*') return 'Hourly';
+  if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && day === '*' && month === '*' && weekday === '*') return `Daily ${formatCronTime(hour, minute)}`;
+  if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && day === '*' && month === '*' && weekday === '1-5') return `Weekdays ${formatCronTime(hour, minute)}`;
+  if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && day === '*' && month === '*' && weekday === '1,5') return `M/F ${formatCronTime(hour, minute)}`;
+  return 'Custom schedule';
+}
+
+function normalizeScheduleText(value: string): string {
+  return value.trim().toLowerCase().replace(/\bat\s+/g, '').replace(/\s+/g, ' ');
+}
+
+function isFiveFieldCron(value: string): boolean {
+  const parts = value.trim().split(/\s+/);
+  return parts.length === 5 && parts.every((part) => /^[\d*,/-]+$/.test(part));
+}
+
+function parseTimeText(value: string): { hour: number; minute: number } | null {
+  const normalized = normalizeScheduleText(value || '9am');
+  const match = normalized.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = match[2] ? Number(match[2]) : 0;
+  const meridiem = match[3];
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute < 0 || minute > 59) return null;
+  if (meridiem === 'pm' && hour < 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+  if (hour < 0 || hour > 23) return null;
+  return { hour, minute };
+}
+
+function formatCronTime(hour: string, minute: string): string {
+  const hourNumber = Number(hour);
+  const minuteNumber = Number(minute);
+  if (!Number.isFinite(hourNumber) || !Number.isFinite(minuteNumber)) return `${hour}:${minute}`;
+  const suffix = hourNumber >= 12 ? 'PM' : 'AM';
+  const displayHour = hourNumber % 12 || 12;
+  return `${displayHour}:${String(minuteNumber).padStart(2, '0')} ${suffix}`;
+}
+
+function formatInputTime(hour: string, minute: string): string {
+  return formatCronTime(hour, minute).toLowerCase().replace(' ', '');
+}
+
+function weekdayToCron(day: string): number | null {
+  const normalized = day.toLowerCase();
+  if (normalized.startsWith('sun')) return 0;
+  if (normalized.startsWith('mon')) return 1;
+  if (normalized.startsWith('tue')) return 2;
+  if (normalized.startsWith('wed')) return 3;
+  if (normalized.startsWith('thu')) return 4;
+  if (normalized.startsWith('fri')) return 5;
+  if (normalized.startsWith('sat')) return 6;
+  return null;
+}
+
+function weekdayName(day: number): string {
+  return ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day] || 'weekday';
+}
+
+function shortRepo(repo?: string): string {
+  if (!repo) return 'No repo';
+  const parts = repo.split('/').filter(Boolean);
+  return parts.at(-1) || repo;
 }

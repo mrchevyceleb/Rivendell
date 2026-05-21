@@ -50,6 +50,15 @@ const imageExtension = (mediaType: string): string => {
   return subtype.replace(/[^a-z0-9]/gi, '') || 'img';
 };
 
+const CODEX_TRACING_LINE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+[\w_]+(?:::[\w_]+)*:/;
+
+function isIgnorableCodexStderr(line: string): boolean {
+  if (/Reading additional input from stdin/i.test(line)) return true;
+  if (/failed to record rollout items/i.test(line)) return true;
+  if (/write_stdin failed: stdin is closed for this session/i.test(line)) return true;
+  return CODEX_TRACING_LINE.test(line);
+}
+
 export class CodexSession {
   readonly key: string;
   readonly cli: CliKind = 'codex';
@@ -240,16 +249,17 @@ export class CodexSession {
 
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
-      // Codex prints a few benign lines on startup (e.g. "Reading additional
-      // input from stdin...") and a "thread X not found" rollout warning when
-      // resuming. Filter those — surface only the lines that look like real
-      // errors.
-      const text = chunk.trim();
-      if (!text) return;
-      if (/Reading additional input from stdin/i.test(text)) return;
-      if (/failed to record rollout items/i.test(text)) return;
-      stderrChunks.push(text);
-      this.emit({ type: 'error', message: text });
+      // Codex stderr mixes real failures with structured internal tracing.
+      // The common `write_stdin failed: stdin is closed` trace is Codex's own
+      // recovery path after a non-TTY command, not a user-actionable chat
+      // error, so keep it out of the transcript.
+      for (const raw of chunk.split('\n')) {
+        const text = raw.trim();
+        if (!text) continue;
+        if (isIgnorableCodexStderr(text)) continue;
+        stderrChunks.push(text);
+        this.emit({ type: 'error', message: text });
+      }
     });
 
     child.on('exit', async (code) => {
@@ -423,12 +433,13 @@ export class CodexSession {
       const input = Number(u.input_tokens ?? 0);
       const cached = Number(u.cached_input_tokens ?? 0);
       const output = Number(u.output_tokens ?? 0);
+      const effectiveInput = cached > 0 && cached < input ? input - cached : input;
       state.usage = {
-        // Claude treats input_tokens as the *uncached* portion. Codex reports
-        // input_tokens as the full prompt and cached_input_tokens as the
-        // already-cached subset, so we subtract to match claude's semantics.
-        input_tokens: Math.max(0, input - cached),
-        cache_read_input_tokens: cached,
+        // Codex reports huge cumulative cache-read counts. For the context
+        // meter, show the effective fresh input instead of reconstructing the
+        // full cache history and producing impossible multi-million totals.
+        input_tokens: Math.max(0, effectiveInput),
+        cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         output_tokens: output,
       };

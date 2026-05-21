@@ -96,7 +96,14 @@ export function usePlEntries() {
 }
 
 export function useCronJobs() {
-  return roomQuery<CronJob[]>(['cron'], '/api/cron', emptyCronJobs);
+  const result = useQuery({
+    queryKey: ['cron'],
+    queryFn: () => apiJson<CronJob[]>('/api/cron'),
+    staleTime: 5_000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
+  });
+  return { ...result, data: result.data ?? emptyCronJobs };
 }
 
 export function useWeavings() {

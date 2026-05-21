@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { assistantAdminJson } from './assistantAdmin.ts';
 
 export type RivendellTask = {
@@ -38,6 +41,7 @@ export type RivendellFamilyItem = {
 };
 
 export type CronRuntime = 'railway' | 'local';
+export type CronAiModel = 'claude' | 'codex' | 'mandrill';
 export type CronPermissionMode = 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk' | 'plan';
 
 export type RivendellCronJob = {
@@ -48,6 +52,8 @@ export type RivendellCronJob = {
   target: string;
   actionType?: string;
   prompt?: string;
+  aiModel?: CronAiModel;
+  repo?: string;
   toolName?: string;
   deliveryChannel?: string;
   maxTokens?: number;
@@ -55,6 +61,9 @@ export type RivendellCronJob = {
   runtime: CronRuntime;
   cwd?: string;
   permissionMode?: CronPermissionMode;
+  source?: 'assistant-mcp' | 'autosam';
+  sourceLabel?: string;
+  readOnly?: boolean;
   lastRun: string;
   lastRunAt?: string | null;
   lastRunStatus?: string | null;
@@ -119,6 +128,10 @@ type AdminCron = {
   created_at?: string | null;
   updated_at?: string | null;
 };
+
+const DEFAULT_NO_REPO_CWD = '/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB';
+const AUTOSAM_SETTINGS_PATH = join(homedir(), 'Library/Application Support/com.mattjohnston.agent-one/settings.json');
+const KIM_PR_REVIEW_REPO_PATH = '/Users/mjohnst/samwise/KG-Apps/r-link-studio-rebuild';
 
 type SamQueueTask = {
   id: string;
@@ -300,7 +313,10 @@ export async function createAdminFamilyTodo(input: Record<string, unknown>): Pro
 
 export async function fetchAdminCronJobs(): Promise<RivendellCronJob[]> {
   const data = await assistantAdminJson<{ jobs?: AdminCron[] }>('/admin/api/cron/jobs');
-  return (data.jobs ?? []).map(mapCron);
+  return [
+    ...autosamObservedCronJobs(),
+    ...(data.jobs ?? []).map(mapCron),
+  ];
 }
 
 export async function updateAdminCronJob(id: string, updates: Partial<RivendellCronJob>): Promise<RivendellCronJob> {
@@ -438,9 +454,11 @@ function mapEmail(email: AdminEmail): RivendellEmail {
 function mapCron(job: AdminCron): RivendellCronJob {
   const actionType = job.action_type || 'ai_prompt';
   const prompt = typeof job.action_config?.prompt === 'string' ? job.action_config.prompt : undefined;
+  const aiModel = normalizeCronModel(job.action_config?.model, job.runtime);
+  const repo = normalizeOptionalString(job.action_config?.repo);
   const toolName = typeof job.action_config?.tool_name === 'string' ? job.action_config.tool_name : undefined;
   const maxTokens = typeof job.action_config?.max_tokens === 'number' ? job.action_config.max_tokens : undefined;
-  const cwd = typeof job.action_config?.cwd === 'string' ? job.action_config.cwd : undefined;
+  const cwd = normalizeOptionalString(job.action_config?.cwd);
   const permissionMode = typeof job.action_config?.permission_mode === 'string'
     ? (job.action_config.permission_mode as CronPermissionMode)
     : undefined;
@@ -455,6 +473,8 @@ function mapCron(job: AdminCron): RivendellCronJob {
     target: toolTarget,
     actionType,
     prompt,
+    aiModel,
+    repo,
     toolName,
     deliveryChannel: job.delivery_channel || undefined,
     maxTokens,
@@ -462,6 +482,8 @@ function mapCron(job: AdminCron): RivendellCronJob {
     runtime,
     cwd,
     permissionMode,
+    source: 'assistant-mcp',
+    sourceLabel: 'Forge',
     lastRun: job.last_run_at ? timeAgo(job.last_run_at) : 'never',
     lastRunAt: job.last_run_at || null,
     lastRunStatus: job.last_run_status || null,
@@ -471,17 +493,81 @@ function mapCron(job: AdminCron): RivendellCronJob {
   };
 }
 
+function autosamObservedCronJobs(): RivendellCronJob[] {
+  const settings = readAutosamSettings();
+  const kimPrReviewEnabled = settings?.kimFullPrReviewEnabled !== false;
+
+  return [
+    {
+      id: 'autosam:kim-full-pr-review',
+      name: 'Kim PR full review watcher',
+      description: 'AutoSam watches Kim\'s ready R-Link Studio PRs and launches Codex `$pr-review`.',
+      schedule: '*/1 * * * *',
+      target: 'Codex $pr-review',
+      actionType: 'autosam_worker_poller',
+      prompt: 'Watch open, non-draft PRs by @kgenterprisesbiz on R-Link-LLC/r-link-studio-rebuild. For each new PR, create an AutoSam audit card and run Codex `$pr-review` through review, fix, merge, and deploy.',
+      aiModel: 'codex',
+      repo: KIM_PR_REVIEW_REPO_PATH,
+      deliveryChannel: 'telegram',
+      status: kimPrReviewEnabled ? 'active' : 'paused',
+      runtime: 'local',
+      cwd: KIM_PR_REVIEW_REPO_PATH,
+      source: 'autosam',
+      sourceLabel: 'AutoSam',
+      readOnly: true,
+      lastRun: 'AutoSam worker poller',
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunError: null,
+      createdAt: undefined,
+    },
+  ];
+}
+
+function readAutosamSettings(): Record<string, unknown> | null {
+  if (!existsSync(AUTOSAM_SETTINGS_PATH)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(AUTOSAM_SETTINGS_PATH, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function actionConfigFromCron(input: Partial<RivendellCronJob>): Record<string, unknown> | null {
   const config: Record<string, unknown> = {};
   if (input.prompt !== undefined) config.prompt = input.prompt;
+  if (input.aiModel !== undefined) config.model = input.aiModel;
+  const repo = normalizeOptionalString(input.repo);
+  const cwd = normalizeOptionalString(input.cwd);
+  if (repo !== undefined) config.repo = repo;
   if (input.toolName !== undefined) config.tool_name = input.toolName;
   if (input.maxTokens !== undefined) config.max_tokens = Number(input.maxTokens) || 1024;
   // Local-runtime ai_prompt jobs need cwd (where claude -p runs) and an
   // optional permission_mode. Stored inside action_config because that's
   // where the cron engine reads them.
-  if (input.cwd !== undefined) config.cwd = input.cwd;
+  if (cwd !== undefined) config.cwd = cwd;
+  if (cwd === undefined && repo !== undefined) config.cwd = repo;
+  if (cwd === undefined && repo === undefined && input.runtime === 'local' && input.actionType === 'ai_prompt') {
+    config.cwd = DEFAULT_NO_REPO_CWD;
+  }
   if (input.permissionMode !== undefined) config.permission_mode = input.permissionMode;
   return Object.keys(config).length ? config : null;
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function normalizeCronModel(value: unknown, runtime?: string | null): CronAiModel {
+  if (value === 'claude' || value === 'codex' || value === 'mandrill') return value;
+  if (typeof value === 'string' && value.toLowerCase() === 'codes') return 'codex';
+  if (runtime === 'local') return 'claude';
+  return 'mandrill';
 }
 
 function mapSamQueue(task: SamQueueTask, status: RivendellQueueJob['status'], skill: string): RivendellQueueJob {

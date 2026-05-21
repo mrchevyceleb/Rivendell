@@ -134,6 +134,7 @@ export type PlEntry = {
 };
 
 export type CronRuntime = 'railway' | 'local';
+export type CronAiModel = 'claude' | 'codex' | 'mandrill';
 export type CronPermissionMode =
   | 'default'
   | 'acceptEdits'
@@ -150,6 +151,8 @@ export type CronJob = {
   target: string;
   actionType?: string;
   prompt?: string;
+  aiModel?: CronAiModel;
+  repo?: string;
   toolName?: string;
   deliveryChannel?: string;
   maxTokens?: number;
@@ -157,6 +160,9 @@ export type CronJob = {
   runtime: CronRuntime;
   cwd?: string;
   permissionMode?: CronPermissionMode;
+  source?: 'assistant-mcp' | 'autosam';
+  sourceLabel?: string;
+  readOnly?: boolean;
   lastRun: string;
   lastRunAt?: string | null;
   lastRunStatus?: string | null;

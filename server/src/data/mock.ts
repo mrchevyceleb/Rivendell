@@ -35,6 +35,8 @@ export type CronJob = {
   target: string;
   actionType?: string;
   prompt?: string;
+  aiModel?: 'claude' | 'codex' | 'mandrill';
+  repo?: string;
   toolName?: string;
   deliveryChannel?: string;
   maxTokens?: number;
@@ -42,6 +44,9 @@ export type CronJob = {
   runtime?: 'railway' | 'local';
   cwd?: string;
   permissionMode?: string;
+  source?: 'assistant-mcp' | 'autosam';
+  sourceLabel?: string;
+  readOnly?: boolean;
   lastRun: string;
   lastRunAt?: string | null;
   lastRunStatus?: string | null;
