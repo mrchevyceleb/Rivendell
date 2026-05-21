@@ -21,13 +21,20 @@ import {
   pruneIdleCodexSessions,
   shutdownAllCodexSessions,
 } from './codex-runner.ts';
+import {
+  activeBananaSessions,
+  pruneIdleBananaSessions,
+  shutdownAllBananaSessions,
+} from './banana-runner.ts';
 import { emitScribe } from '../worker/scribe.ts';
 
 type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number };
-type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }> };
+// `model` is the Banana model id (e.g. `monkey/silverback`). It rides on every
+// send/steer and is forwarded into BananaSession.send. Elrond and Codex ignore it.
+type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string };
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string };
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }> };
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string };
 type ClientMsg = ClientHello | ClientSend | ClientFresh | ClientStop | ClientSteer;
 type ResumeWatchableSession = AnySession & {
   startedWithResume?: () => boolean;
@@ -90,7 +97,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
   });
 
   app.get('/api/live', (_req, res) => {
-    const sessions = [...activeClaudeSessions(), ...activeCodexSessions()];
+    const sessions = [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()];
     res.json({
       sessions: sessions.map((session) => ({
         cli: session.cli,
@@ -107,7 +114,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
   app.post('/api/chat/interrupt', async (req, res) => {
     const body = req.body as Partial<{ cli: CliKind; repo: string; chatId: string }>;
     const cli = body.cli;
-    if (cli !== 'assistant' && cli !== 'claude' && cli !== 'codex') {
+    if (cli !== 'assistant' && cli !== 'claude' && cli !== 'codex' && cli !== 'banana') {
       res.status(400).json({ error: 'invalid cli' });
       return;
     }
@@ -237,6 +244,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       text: string,
       generation: number,
       images?: Array<{ mediaType: string; base64: string }>,
+      model?: string,
     ): Promise<boolean> => {
       if (!cliKind || !repoPath || cliKind === 'codex') return false;
       const watchable = session as ResumeWatchableSession;
@@ -252,7 +260,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         busy = true;
         safeSend({ type: 'sessionRebound' });
         safeSend({ type: 'turnStart' });
-        if ('send' in retrySession) (retrySession as any).send(text, images);
+        if ('send' in retrySession) (retrySession as any).send(text, images, { model });
         return true;
       } catch (error) {
         console.warn(`[chat ws#${wsId}] stale resume retry failed:`, (error as Error).message);
@@ -326,8 +334,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
           safeSend({ type: 'turnStart' });
           logChatTurn(wsId, 'steer', msg.cli, msg.repo, chatId, msg.text);
           const generation = ++turnGeneration;
-          await (session as any).send(msg.text, msg.images);
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images);
+          await (session as any).send(msg.text, msg.images, { model: msg.model });
+          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model);
           return;
         }
 
@@ -355,8 +363,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           const session = await sessionPromise;
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
-          await (session as any).send(msg.text, msg.images);
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images);
+          await (session as any).send(msg.text, msg.images, { model: msg.model });
+          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model);
         }
       } catch (error) {
         busy = false;
@@ -375,7 +383,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
   const idleReaper = setInterval(() => {
     const now = Date.now();
-    const pruned = pruneIdleClaudeSessions(IDLE_SESSION_TTL_MS, now) + pruneIdleCodexSessions(IDLE_SESSION_TTL_MS, now);
+    const pruned = pruneIdleClaudeSessions(IDLE_SESSION_TTL_MS, now)
+      + pruneIdleCodexSessions(IDLE_SESSION_TTL_MS, now)
+      + pruneIdleBananaSessions(IDLE_SESSION_TTL_MS, now);
     if (pruned > 0) console.log(`[chat idle-reaper] pruned ${pruned} idle session(s)`);
   }, IDLE_REAPER_INTERVAL_MS);
   idleReaper.unref();
@@ -385,6 +395,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     server.off('upgrade', onUpgrade);
     shutdownAllSessions();
     shutdownAllCodexSessions();
+    shutdownAllBananaSessions();
     wss.close();
   };
 }

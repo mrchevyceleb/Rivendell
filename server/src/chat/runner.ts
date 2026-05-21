@@ -4,6 +4,7 @@ import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
+import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 
 // One persistent `claude` process per (cli, repoPath) pair, fed JSON over
@@ -18,7 +19,7 @@ import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-s
 //   resume failure, drop the stale id, and let the conversation continue from
 //   the new one (don't spawn again — the user's message hasn't been sent yet).
 
-export type CliKind = 'claude' | 'codex' | 'assistant';
+export type CliKind = 'claude' | 'codex' | 'assistant' | 'banana';
 
 export type StreamEvent = unknown;
 
@@ -418,8 +419,8 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
   return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 
-// Returned by getOrCreateSession — common interface across both runners.
-export type AnySession = ClaudeSession | CodexSession;
+// Returned by getOrCreateSession — common interface across all runners.
+export type AnySession = ClaudeSession | CodexSession | BananaSession;
 
 export async function getOrCreateSession(opts: {
   cli: CliKind;
@@ -429,6 +430,9 @@ export async function getOrCreateSession(opts: {
   const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex') {
     return getOrCreateCodexSession({ repoPath: opts.repoPath, chatId });
+  }
+  if (opts.cli === 'banana') {
+    return getOrCreateBananaSession({ repoPath: opts.repoPath, chatId });
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
@@ -536,6 +540,10 @@ export async function freshStart(opts: { cli: CliKind; repoPath: string; chatId?
     const { freshStartCodex } = await import('./codex-runner.ts');
     return freshStartCodex({ repoPath: opts.repoPath, chatId });
   }
+  if (opts.cli === 'banana') {
+    const { freshStartBanana } = await import('./banana-runner.ts');
+    return freshStartBanana({ repoPath: opts.repoPath, chatId });
+  }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
   const existing = sessions.get(key);
@@ -564,6 +572,11 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
   if (opts.cli === 'codex') {
     const { interruptCodex } = await import('./codex-runner.ts');
     interruptCodex({ repoPath: opts.repoPath, chatId });
+    return;
+  }
+  if (opts.cli === 'banana') {
+    const { interruptBanana } = await import('./banana-runner.ts');
+    interruptBanana({ repoPath: opts.repoPath, chatId });
     return;
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;

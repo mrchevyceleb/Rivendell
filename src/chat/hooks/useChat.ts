@@ -18,12 +18,16 @@ export type ContextUsage = {
 const DEFAULT_WINDOW_TOKENS = 200_000;
 const LARGE_WINDOW_TOKENS = 1_000_000;
 const CODEX_WINDOW_TOKENS = 400_000; // GPT-5 family default
+const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 
 // Pick the starting context window for a given CLI before we've seen any
 // model id from a system/init event. Codex's GPT-5 family is 400K; Claude
-// defaults to 200K and ratchets to 1M when the model id reveals the [1m] beta.
+// defaults to 200K and ratchets to 1M when the model id reveals the [1m]
+// beta; banana defaults to a 200K window.
 function defaultWindowForCli(cli: CompanionId): number {
-  return cli === 'codex' ? CODEX_WINDOW_TOKENS : DEFAULT_WINDOW_TOKENS;
+  if (cli === 'codex') return CODEX_WINDOW_TOKENS;
+  if (cli === 'banana') return BANANA_WINDOW_TOKENS;
+  return DEFAULT_WINDOW_TOKENS;
 }
 
 // Map a claude model id to its real context window. Opus 4.7 with the `[1m]`
@@ -287,8 +291,15 @@ export function useChat(opts: {
   enabled: boolean;
   initialMessage?: string | null;
   onInitialMessageSent?: () => void;
+  /** Banana model id (e.g. `monkey/silverback`). Rides on every send/steer.
+   *  Elrond and Codex ignore it server-side. */
+  model?: string;
 }) {
-  const { repo, cli, chatId = 'main', enabled, initialMessage, onInitialMessageSent } = opts;
+  const { repo, cli, chatId = 'main', enabled, initialMessage, onInitialMessageSent, model } = opts;
+  // Mirror the model into a ref so the WS send path always reads the latest
+  // pick without re-subscribing the connection effect on every change.
+  const modelRef = useRef<string | undefined>(model);
+  modelRef.current = model;
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [status, setStatus] = useState<Status>('idle');
   // Mirror status into a ref so WS handlers can read the latest value
@@ -352,7 +363,7 @@ export function useChat(opts: {
             { kind: 'user', id: id(), text: initialMessage, ts: Date.now() },
           ];
         });
-        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage }));
+        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage, model: modelRef.current }));
       }
     } else if (!initialSendInFlightRef.current) {
       initialMessageRef.current = null;
@@ -458,7 +469,7 @@ export function useChat(opts: {
                 { kind: 'user', id: id(), text: pending, ts: Date.now() },
               ];
             });
-            ws.send(JSON.stringify({ type: 'send', chatId, text: pending }));
+            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, model: modelRef.current }));
           }
         }
         else if (msg.type === 'sessionRebound') {
@@ -688,7 +699,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'send', chatId, text, images: payloadImages(images) }));
+    ws.send(JSON.stringify({ type: 'send', chatId, text, images: payloadImages(images), model: modelRef.current }));
   };
 
   const freshStart = () => {
@@ -727,7 +738,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images) }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), model: modelRef.current }));
   };
 
   const reconnect = () => forceReconnectRef.current();

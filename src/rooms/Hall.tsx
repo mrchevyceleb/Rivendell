@@ -22,6 +22,8 @@ import type { ChatBlock, ChatImagePreview, CommandEntry, CompanionId, LiveSessio
 import { commandText, getCommandSuggestionMulti } from '../chat/utils/commandAutocomplete';
 import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
+import { useBananaModel } from '../chat/hooks/useBananaModel';
+import { ModelPicker } from '../chat/components/ModelPicker';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
 import { useRepos } from '../chat/hooks/useRepos';
@@ -52,18 +54,21 @@ const companionLabel: Record<CompanionId, string> = {
   assistant: 'Elrond',
   claude: 'Claude Code',
   codex: 'Codex',
+  banana: 'Banana',
 };
 
 const companionTitle: Record<CompanionId, string> = {
   assistant: 'Lord of Imladris',
   claude: 'Anthropic emissary',
   codex: 'OpenAI emissary',
+  banana: 'Banana Code emissary',
 };
 
 const companionSub: Record<CompanionId, string> = {
   assistant: 'local Claude Code session in ASSISTANT-HUB',
   claude: 'tool-rich, persistent session',
   codex: 'local Codex session in ASSISTANT-HUB',
+  banana: 'local Banana Code session in ASSISTANT-HUB',
 };
 
 const statusCopy: Record<ChatStatus, string> = {
@@ -140,6 +145,10 @@ export function Hall() {
     localStorage.setItem(SCRIBE_COLLAPSED_KEY, String(scribeCollapsed));
   }, [scribeCollapsed]);
 
+  // Banana model picker — only the Banana companion threads a model id into
+  // its sends. Elrond and Codex ignore the field server-side.
+  const bananaModel = useBananaModel();
+
   const chat = useChat({
     repo,
     cli: companion,
@@ -147,6 +156,7 @@ export function Hall() {
     enabled: Boolean(repo),
     initialMessage: pendingPrompt,
     onInitialMessageSent: () => setPendingPrompt(null),
+    model: companion === 'banana' ? bananaModel.model : undefined,
   });
 
   useEffect(() => {
@@ -257,7 +267,7 @@ export function Hall() {
 
         <div className="hall-chat-controls">
           <div className="companion-toggle" role="group" aria-label="Choose agent">
-            {(['assistant', 'codex'] as CompanionId[]).map((item) => (
+            {(['assistant', 'codex', 'banana'] as CompanionId[]).map((item) => (
               <button key={item} className={companion === item ? 'active' : ''} onClick={() => switchCompanion(item)}>
                 <span className={`status-pin status-${item === 'assistant' ? 'done' : 'running'}`} />
                 {companionLabel[item]}
@@ -394,6 +404,7 @@ export function Hall() {
             codexCommands={commands.codex}
             agentName={companionLabel[companion]}
             usage={chat.usage}
+            modelPicker={companion === 'banana' ? bananaModel : null}
           />
         </main>
 
@@ -478,6 +489,7 @@ function Composer({
   codexCommands,
   agentName,
   usage,
+  modelPicker,
 }: {
   disabled: boolean;
   streaming: boolean;
@@ -491,6 +503,8 @@ function Composer({
   codexCommands: CommandEntry[];
   agentName: string;
   usage: ContextUsage | null;
+  /** Non-null only for the Banana companion — renders the model selector. */
+  modelPicker: ReturnType<typeof useBananaModel> | null;
 }) {
   const [value, setValue] = useState('');
   const [images, setImages] = useState<StagedImage[]>([]);
@@ -690,7 +704,8 @@ function Composer({
         </button>
       </div>
       <div className="composer-footer">
-        <div>
+        <div className={modelPicker ? 'has-model-picker' : undefined}>
+          {modelPicker ? <ModelPicker state={modelPicker} /> : null}
           <button type="button" onClick={onFreshStart} title="Start a fresh thread">
             <SquarePen size={14} />
             fresh
@@ -738,7 +753,9 @@ function Composer({
 }
 
 function ContextMeter({ usage }: { usage: ContextUsage }) {
-  const used = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens;
+  const rawUsed = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens;
+  const overflow = rawUsed > usage.windowTokens;
+  const used = Math.min(rawUsed, usage.windowTokens);
   const pct = Math.round(usage.fraction * 100);
   const tone =
     usage.fraction < 0.5 ? 'var(--r-moss, #6f8f5e)'
@@ -751,7 +768,7 @@ function ContextMeter({ usage }: { usage: ContextUsage }) {
   return (
     <div
       className="composer-context-meter"
-      title={`${used.toLocaleString()} of ${usage.windowTokens.toLocaleString()} tokens used — ${hint}`}
+      title={`${overflow ? `${rawUsed.toLocaleString()} reported, capped at ` : ''}${used.toLocaleString()} of ${usage.windowTokens.toLocaleString()} tokens used — ${hint}`}
     >
       <span className="composer-context-meter-track">
         <span
@@ -760,7 +777,7 @@ function ContextMeter({ usage }: { usage: ContextUsage }) {
         />
       </span>
       <span className="composer-context-meter-label">
-        {formatTokens(used)} / {formatTokens(usage.windowTokens)}
+        {formatTokens(used)}{overflow ? '+' : ''} / {formatTokens(usage.windowTokens)}
       </span>
     </div>
   );
@@ -1089,7 +1106,7 @@ function readActive(): ActiveChat | null {
     const parsed = JSON.parse(raw);
     if (
       parsed &&
-      (parsed.cli === 'claude' || parsed.cli === 'codex' || parsed.cli === 'assistant') &&
+      (parsed.cli === 'claude' || parsed.cli === 'codex' || parsed.cli === 'assistant' || parsed.cli === 'banana') &&
       typeof parsed.repoPath === 'string'
     ) {
       return parsed as ActiveChat;
@@ -1101,7 +1118,9 @@ function readActive(): ActiveChat | null {
 }
 
 function normalizeCompanion(value: CompanionId | undefined): CompanionId {
-  return value === 'codex' ? 'codex' : 'assistant';
+  if (value === 'codex') return 'codex';
+  if (value === 'banana') return 'banana';
+  return 'assistant';
 }
 
 function writeActive(active: ActiveChat) {

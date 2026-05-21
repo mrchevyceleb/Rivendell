@@ -1,6 +1,6 @@
 // Shared types between mock + real-backend data shapes.
 
-export type CompanionId = 'claude' | 'codex' | 'assistant';
+export type CompanionId = 'claude' | 'codex' | 'assistant' | 'banana';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.
