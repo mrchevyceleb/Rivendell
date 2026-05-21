@@ -3589,6 +3589,42 @@ button {
   color: var(--r-gold);
 }
 
+/* Rows that carry a star toggle reserve room on the right for the star, and
+   for the optional active check mark sitting just left of it. */
+.model-picker-row.has-star {
+  padding-right: 50px;
+}
+
+.model-picker-row.has-star .model-picker-row-check {
+  right: 30px;
+}
+
+.model-picker-star {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--r-ink-faint);
+  transition: color 0.12s ease, background 0.12s ease, transform 0.12s ease;
+}
+
+.model-picker-star:hover {
+  color: var(--r-gold);
+  background: color-mix(in srgb, var(--r-gold) 14%, transparent);
+  transform: translateY(-50%) scale(1.12);
+}
+
+.model-picker-star.is-favorite {
+  color: var(--r-gold);
+}
+
 .model-picker-empty {
   font-size: 11.5px;
   color: var(--r-ink-faint);

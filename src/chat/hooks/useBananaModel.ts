@@ -25,6 +25,7 @@ export const MONKEY_TIERS: BananaModelOption[] = [
 
 export const DEFAULT_BANANA_MODEL = 'monkey/silverback';
 const STORAGE_KEY = 'rivendell:banana-model';
+const FAVORITES_KEY = 'banana-model-favorites';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/models';
 
 // Cache the OpenRouter model list for the lifetime of the page so opening the
@@ -78,6 +79,20 @@ function readStoredModel(): string {
   return DEFAULT_BANANA_MODEL;
 }
 
+/** Read the persisted set of favorited OpenRouter model ids. */
+function readStoredFavorites(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(FAVORITES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.filter((id): id is string => typeof id === 'string' && id.length > 0);
+    }
+  } catch {}
+  return [];
+}
+
 /** Resolve a model id to a friendly label for the trigger button. Falls back
  *  to the bare id when the model is not one of the known options. */
 export function labelForModel(id: string, openRouter: BananaModelOption[]): string {
@@ -93,6 +108,7 @@ export function labelForModel(id: string, openRouter: BananaModelOption[]): stri
 export function useBananaModel() {
   const [model, setModelState] = useState<string>(() => readStoredModel());
   const [openRouter, setOpenRouter] = useState<BananaModelOption[]>(() => openRouterCache ?? []);
+  const [favorites, setFavorites] = useState<string[]>(() => readStoredFavorites());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Tracks whether we have already kicked off a fetch this mount.
@@ -103,6 +119,19 @@ export function useBananaModel() {
     try {
       localStorage.setItem(STORAGE_KEY, next);
     } catch {}
+  }, []);
+
+  // Toggle an OpenRouter model id in/out of the favorites set and persist it.
+  const toggleFavorite = useCallback((id: string) => {
+    setFavorites((current) => {
+      const next = current.includes(id)
+        ? current.filter((favId) => favId !== id)
+        : [...current, id];
+      try {
+        localStorage.setItem(FAVORITES_KEY, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
   }, []);
 
   // Lazily load the OpenRouter list — called when the picker opens so we do
@@ -134,5 +163,15 @@ export function useBananaModel() {
 
   const triggerLabel = useMemo(() => labelForModel(model, openRouter), [model, openRouter]);
 
-  return { model, setModel, openRouter, loading, error, loadOpenRouter, triggerLabel };
+  return {
+    model,
+    setModel,
+    openRouter,
+    favorites,
+    toggleFavorite,
+    loading,
+    error,
+    loadOpenRouter,
+    triggerLabel,
+  };
 }

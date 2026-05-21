@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Cpu, Search } from 'lucide-react';
+import { Check, ChevronDown, Cpu, Search, Star } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { MONKEY_TIERS, useBananaModel } from '../hooks/useBananaModel';
 
@@ -10,7 +10,17 @@ import { MONKEY_TIERS, useBananaModel } from '../hooks/useBananaModel';
 type ModelPickerState = ReturnType<typeof useBananaModel>;
 
 export function ModelPicker({ state }: { state: ModelPickerState }) {
-  const { model, setModel, openRouter, loading, error, loadOpenRouter, triggerLabel } = state;
+  const {
+    model,
+    setModel,
+    openRouter,
+    favorites,
+    toggleFavorite,
+    loading,
+    error,
+    loadOpenRouter,
+    triggerLabel,
+  } = state;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -50,10 +60,29 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
       .slice(0, 60);
   }, [query, openRouter]);
 
+  // Resolve favorited ids to full model options. Favorites whose model is not
+  // in the OpenRouter list yet (e.g. catalogue still loading) are kept, falling
+  // back to a bare-id label so the row still renders and stays selectable.
+  const favoriteModels = useMemo(() => {
+    return favorites.map((id) => {
+      const match = openRouter.find((m) => m.id === id);
+      if (match) return match;
+      const slash = id.indexOf('/');
+      return { id, label: slash >= 0 ? id.slice(slash + 1) : id };
+    });
+  }, [favorites, openRouter]);
+
   const pick = (id: string) => {
     setModel(id);
     setOpen(false);
     setQuery('');
+  };
+
+  // Toggle a model's favorite state without selecting it. Stops propagation so
+  // the click does not bubble to the row's select handler.
+  const onStarClick = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    toggleFavorite(id);
   };
 
   return (
@@ -93,6 +122,45 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
             </div>
           </div>
 
+          {favoriteModels.length > 0 ? (
+            <div className="model-picker-section">
+              <p className="model-picker-heading">Favorites</p>
+              <div className="model-picker-list">
+                {favoriteModels.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    role="option"
+                    aria-selected={model === m.id}
+                    className={`model-picker-row has-star ${model === m.id ? 'is-active' : ''}`}
+                    onClick={() => pick(m.id)}
+                    title={m.id}
+                  >
+                    <span className="model-picker-row-label">{m.label}</span>
+                    {m.detail ? <span className="model-picker-row-detail">{m.detail}</span> : null}
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Unfavorite ${m.label}`}
+                      className="model-picker-star is-favorite"
+                      onClick={(e) => onStarClick(e, m.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggleFavorite(m.id);
+                        }
+                      }}
+                    >
+                      <Star size={13} fill="currentColor" />
+                    </span>
+                    {model === m.id ? <Check size={13} className="model-picker-row-check" /> : null}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           <div className="model-picker-section">
             <p className="model-picker-heading">OpenRouter</p>
             <div className="model-picker-search">
@@ -115,21 +183,41 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
                   {query.trim() ? 'No models match that search.' : 'No models available.'}
                 </p>
               ) : (
-                filtered.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    role="option"
-                    aria-selected={model === m.id}
-                    className={`model-picker-row ${model === m.id ? 'is-active' : ''}`}
-                    onClick={() => pick(m.id)}
-                    title={m.id}
-                  >
-                    <span className="model-picker-row-label">{m.label}</span>
-                    {m.detail ? <span className="model-picker-row-detail">{m.detail}</span> : null}
-                    {model === m.id ? <Check size={13} className="model-picker-row-check" /> : null}
-                  </button>
-                ))
+                filtered.map((m) => {
+                  const isFavorite = favorites.includes(m.id);
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      role="option"
+                      aria-selected={model === m.id}
+                      className={`model-picker-row has-star ${model === m.id ? 'is-active' : ''}`}
+                      onClick={() => pick(m.id)}
+                      title={m.id}
+                    >
+                      <span className="model-picker-row-label">{m.label}</span>
+                      {m.detail ? <span className="model-picker-row-detail">{m.detail}</span> : null}
+                      <span
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`${isFavorite ? 'Unfavorite' : 'Favorite'} ${m.label}`}
+                        aria-pressed={isFavorite}
+                        className={`model-picker-star ${isFavorite ? 'is-favorite' : ''}`}
+                        onClick={(e) => onStarClick(e, m.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            toggleFavorite(m.id);
+                          }
+                        }}
+                      >
+                        <Star size={13} fill={isFavorite ? 'currentColor' : 'none'} />
+                      </span>
+                      {model === m.id ? <Check size={13} className="model-picker-row-check" /> : null}
+                    </button>
+                  );
+                })
               )}
             </div>
           </div>
