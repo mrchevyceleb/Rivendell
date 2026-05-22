@@ -88,12 +88,31 @@ type BananaTurnState = {
 // stream simply goes quiet. Default 120s of silence aborts the turn. The
 // watchdog NEVER kills the shared server — it only ends the stuck turn.
 const DEFAULT_STALL_TIMEOUT_MS = 120_000;
+const SESSION_VALIDATION_TIMEOUT_MS = 5_000;
 
 function stallTimeoutMs(): number {
   const raw = process.env.RIVENDELL_BANANA_STALL_TIMEOUT_MS;
   if (!raw) return DEFAULT_STALL_TIMEOUT_MS;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_STALL_TIMEOUT_MS;
+}
+
+async function validateSessionExists(client: any, sessionID: string): Promise<string | null> {
+  try {
+    const result = await Promise.race([
+      client.session.get({ sessionID }),
+      new Promise((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`session.get timed out after ${SESSION_VALIDATION_TIMEOUT_MS}ms`)),
+          SESSION_VALIDATION_TIMEOUT_MS,
+        ).unref();
+      }),
+    ]);
+    const error = (result as any)?.error;
+    return error ? errorText(error) : null;
+  } catch (err) {
+    return (err as Error).message;
+  }
 }
 
 // The launchd service PATH often omits /opt/homebrew/bin, so resolve the
@@ -276,6 +295,10 @@ class BananaServer {
   /** Incremented on every (re)start so a stale per-cwd SSE loop from a prior
    *  serve generation knows to exit instead of fighting the new one. */
   private generation = 0;
+
+  currentGeneration(): number {
+    return this.generation;
+  }
   /** banana sessionID -> the BananaSession that owns it. */
   private readonly routes = new Map<string, BananaSession>();
   /** Directories with an active SSE subscription. The SDK pins `/event` to a
@@ -518,7 +541,11 @@ class BananaServer {
       while (!this.dead && this.generation === generation) {
         const client = this.clientFor(cwd);
         try {
-          const events = await client.event.subscribe();
+          // The v2 /event stream is directory-scoped — subscribe() with no
+          // directory delivers events only for the serve process cwd, so a
+          // session in any other repo would never see its turn events and
+          // hang forever. Pass the loop's cwd explicitly.
+          const events = await client.event.subscribe({ directory: cwd });
           for await (const event of events.stream) {
             if (this.dead || this.generation !== generation) break;
             this.fanOut(event as Event);
@@ -578,6 +605,7 @@ export class BananaSession {
   private subscriberCount = 0;
   /** banana sessionID, captured on create, persisted for resume. */
   private threadId: string | null = null;
+  private threadServeGeneration: number | null = null;
   private busy = false;
   private dead = false;
   private eventLog: SeqEvent[] = [];
@@ -695,6 +723,16 @@ export class BananaSession {
     })();
   }
 
+  private async clearSavedThreadId(reason: string): Promise<void> {
+    const old = this.threadId;
+    if (!old) return;
+    console.warn(`[chat banana] clearing stale session ${old}: ${reason}`);
+    bananaServer.unregisterRoute(old);
+    this.threadId = null;
+    this.threadServeGeneration = null;
+    await setSessionId('banana', this.cwd, '', this.chatId);
+  }
+
   async send(text: string, images?: ChatImage[], opts?: { model?: string }): Promise<void> {
     if (this.busy) {
       this.emit({
@@ -780,8 +818,20 @@ export class BananaSession {
     }
 
     const client = bananaServer.clientFor(this.cwd);
+    const serveGeneration = bananaServer.currentGeneration();
 
-    // 2. Reuse the saved sessionID, or create a new one with the plan ruleset.
+    // 2. Reuse the saved sessionID only if this banana serve process can see
+    //    it. A persisted id can outlive the serve instance that owned it;
+    //    prompting that stale id hangs silently with no SSE events.
+    if (this.threadId && this.threadServeGeneration !== serveGeneration) {
+      await this.clearSavedThreadId('banana serve restarted');
+    }
+    if (this.threadId) {
+      const staleReason = await validateSessionExists(client, this.threadId);
+      if (staleReason) await this.clearSavedThreadId(staleReason);
+    }
+
+    // 3. Reuse the validated sessionID, or create a new one with the plan ruleset.
     if (!this.threadId) {
       try {
         const created = await client.session.create({
@@ -794,6 +844,7 @@ export class BananaSession {
           return;
         }
         this.threadId = newId;
+        this.threadServeGeneration = serveGeneration;
         await setSessionId('banana', this.cwd, newId, this.chatId);
         this.emit({ type: 'event', event: { type: 'system', subtype: 'init', session_id: newId } });
       } catch (err) {
@@ -808,10 +859,10 @@ export class BananaSession {
       return;
     }
 
-    // 3. Register the route so the shared event loop fans events to us.
+    // 4. Register the route so the shared event loop fans events to us.
     bananaServer.registerRoute(this.threadId, this);
 
-    // 4. Open per-turn streaming state and arm the stall watchdog. The image
+    // 5. Open per-turn streaming state and arm the stall watchdog. The image
     //    cleanup moves onto the turn object now, so only this turn's own end
     //    (completeTurn / failTurn) tears its files down — a stale idle for a
     //    prior turn can no longer reach them.
@@ -830,7 +881,7 @@ export class BananaSession {
     this.turnCleanup = null;
     this.armWatchdog();
 
-    // 5. Fire the prompt. `prompt` resolves when the turn completes server
+    // 6. Fire the prompt. `prompt` resolves when the turn completes server
     //    side, but we drive the UI off the streamed events; the turn formally
     //    ends on the `session.status: idle` event. We still await to surface a
     //    request-level failure (auth, model not found, etc.).
@@ -980,9 +1031,10 @@ export class BananaSession {
 
   // ── streaming normalization ────────────────────────────────
 
-  /** message.part.updated — a part was created or progressed. Open the matching
-   *  claude block on first sight, flush any deltas that arrived early, and on
-   *  time.end close the block. Tool parts get the v1 tool handling.
+  /** message.part.updated — a part was created or progressed. Open answer text
+   *  blocks on first sight, suppress reasoning scratchpad parts, flush any
+   *  deltas that arrived early, and on time.end close the block. Tool parts
+   *  get the v1 tool handling.
    *  `part` is the SDK `Part` union; it is read structurally here. */
   private handlePartUpdated(part: any, state: BananaTurnState): void {
     if (!part || typeof part !== 'object') return;
@@ -1004,9 +1056,22 @@ export class BananaSession {
       return;
     }
 
-    if (type === 'text' || type === 'reasoning') {
+    if (type === 'reasoning') {
       if (!partID) return;
-      const kind = type === 'text' ? 'text' : 'reasoning';
+      let rec = state.parts.get(partID);
+      if (!rec) {
+        rec = { index: -1, kind: 'reasoning', started: false, emittedLen: 0, closed: false };
+        state.parts.set(partID, rec);
+      }
+      if (typeof part.text === 'string') rec.emittedLen = part.text.length;
+      state.bufferedDeltas.delete(partID);
+      const ended = part.time && typeof part.time === 'object' && part.time.end != null;
+      if (ended) rec.closed = true;
+      return;
+    }
+
+    if (type === 'text') {
+      if (!partID) return;
       let rec = state.parts.get(partID);
       // The block is already closed. A repeated or replayed final snapshot for
       // the same partID lands here; ignore it so the answer is not re-emitted
@@ -1015,7 +1080,7 @@ export class BananaSession {
       if (!rec) {
         // First sight of this part — open a fresh claude text block.
         const index = state.nextBlockIndex++;
-        rec = { index, kind, started: true, emittedLen: 0, closed: false };
+        rec = { index, kind: 'text', started: true, emittedLen: 0, closed: false };
         state.parts.set(partID, rec);
         this.emitStream({
           type: 'content_block_start',
@@ -1081,7 +1146,11 @@ export class BananaSession {
       state.bufferedDeltas.set(partID, buf);
       return;
     }
-    if (rec.kind !== 'text' && rec.kind !== 'reasoning') return;
+    if (rec.kind === 'reasoning') {
+      rec.emittedLen += delta.length;
+      return;
+    }
+    if (rec.kind !== 'text') return;
     // The block was already closed (a late delta after content_block_stop).
     // Dropping it keeps the closed block immutable on the frontend.
     if (rec.closed) return;
@@ -1237,6 +1306,7 @@ export class BananaSession {
    *  went out. */
   private closeDanglingBlocks(state: BananaTurnState, toolFallback: string): void {
     for (const [, rec] of state.parts) {
+      if (rec.kind === 'reasoning') continue;
       if (rec.closed) continue;
       rec.closed = true;
       this.emitStream({ type: 'content_block_stop', index: rec.index });
@@ -1375,8 +1445,15 @@ export async function getOrCreateBananaSession(opts: { repoPath: string; chatId?
   const existing = bananaSessions.get(key);
   if (existing && existing.isAlive()) return existing;
 
-  const threadId = (await getSessionId('banana', cwd, chatId)) ?? null;
-  const session = new BananaSession(cwd, chatId, threadId);
+  // Banana/opencode session ids are not reliable across `banana serve` or
+  // Node process restarts. The session can still be returned by session.get
+  // but hang forever on session.prompt with no SSE events. Keep continuity
+  // while the in-memory BananaSession is alive, but always start fresh after
+  // a process restart / idle prune.
+  if (await getSessionId('banana', cwd, chatId)) {
+    await setSessionId('banana', cwd, '', chatId);
+  }
+  const session = new BananaSession(cwd, chatId, null);
   bananaSessions.set(key, session);
   return session;
 }
