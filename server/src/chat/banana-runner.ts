@@ -10,7 +10,7 @@ import type { Event, PermissionRuleset } from '@opencode-ai/sdk/v2';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
-import { BANANA_COMMANDS_DIR } from './config.ts';
+import { BANANA_COMMANDS_DIR, BANANA_GLOBAL_INSTRUCTIONS_HTML } from './config.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -134,43 +134,63 @@ function resolveBananaBin(): string {
 }
 
 const BANANA_GLOBAL_COMMANDS_LINK = join(homedir(), '.config', 'banana', 'commands');
+const BANANA_GLOBAL_INSTRUCTIONS_LINK = join(homedir(), '.bananacode', '.banana.md');
+
+async function ensureSymlink(linkPath: string, targetPath: string, label: string): Promise<void> {
+  const target = await lstat(targetPath).catch(() => null);
+  if (!target) return;
+
+  await mkdir(dirname(linkPath), { recursive: true });
+  const existing = await lstat(linkPath).catch(() => null);
+  if (!existing) {
+    await symlink(targetPath, linkPath, target.isDirectory() ? 'dir' : 'file');
+    console.log(`[banana-runner] linked ${label} from ${targetPath}`);
+    return;
+  }
+
+  if (existing.isSymbolicLink()) {
+    const current = await readlink(linkPath).catch(() => '');
+    const resolvedCurrent = isAbsolute(current)
+      ? resolve(current)
+      : resolve(dirname(linkPath), current);
+    if (resolvedCurrent === resolve(targetPath)) return;
+    await unlink(linkPath);
+    await symlink(targetPath, linkPath, target.isDirectory() ? 'dir' : 'file');
+    console.log(`[banana-runner] relinked ${label} from ${targetPath}`);
+    return;
+  }
+
+  if (existing.isDirectory()) {
+    const entries = await readdir(linkPath).catch(() => []);
+    if (entries.length === 0) {
+      await rm(linkPath, { recursive: true, force: true });
+      await symlink(targetPath, linkPath, 'dir');
+      console.log(`[banana-runner] linked ${label} from ${targetPath}`);
+      return;
+    }
+  }
+
+  if (existing.isFile() && existing.size === 0) {
+    await rm(linkPath, { force: true });
+    await symlink(targetPath, linkPath, target.isDirectory() ? 'dir' : 'file');
+    console.log(`[banana-runner] linked ${label} from ${targetPath}`);
+    return;
+  }
+
+  console.warn(`[banana-runner] ${linkPath} exists, leaving it unchanged`);
+}
+
+async function ensureBananaGlobalInstructionsLinked(): Promise<void> {
+  try {
+    await ensureSymlink(BANANA_GLOBAL_INSTRUCTIONS_LINK, BANANA_GLOBAL_INSTRUCTIONS_HTML, 'Banana global instructions');
+  } catch (err) {
+    console.warn(`[banana-runner] could not link Banana global instructions: ${(err as Error).message}`);
+  }
+}
 
 async function ensureBananaCommandsLinked(): Promise<void> {
   try {
-    const source = await lstat(BANANA_COMMANDS_DIR).catch(() => null);
-    if (!source?.isDirectory()) return;
-
-    await mkdir(dirname(BANANA_GLOBAL_COMMANDS_LINK), { recursive: true });
-    const existing = await lstat(BANANA_GLOBAL_COMMANDS_LINK).catch(() => null);
-    if (!existing) {
-      await symlink(BANANA_COMMANDS_DIR, BANANA_GLOBAL_COMMANDS_LINK, 'dir');
-      console.log(`[banana-runner] linked Banana commands from ${BANANA_COMMANDS_DIR}`);
-      return;
-    }
-
-    if (existing.isSymbolicLink()) {
-      const target = await readlink(BANANA_GLOBAL_COMMANDS_LINK).catch(() => '');
-      const resolvedTarget = isAbsolute(target)
-        ? resolve(target)
-        : resolve(dirname(BANANA_GLOBAL_COMMANDS_LINK), target);
-      if (resolvedTarget === resolve(BANANA_COMMANDS_DIR)) return;
-      await unlink(BANANA_GLOBAL_COMMANDS_LINK);
-      await symlink(BANANA_COMMANDS_DIR, BANANA_GLOBAL_COMMANDS_LINK, 'dir');
-      console.log(`[banana-runner] relinked Banana commands from ${BANANA_COMMANDS_DIR}`);
-      return;
-    }
-
-    if (existing.isDirectory()) {
-      const entries = await readdir(BANANA_GLOBAL_COMMANDS_LINK).catch(() => []);
-      if (entries.length === 0) {
-        await rm(BANANA_GLOBAL_COMMANDS_LINK, { recursive: true, force: true });
-        await symlink(BANANA_COMMANDS_DIR, BANANA_GLOBAL_COMMANDS_LINK, 'dir');
-        console.log(`[banana-runner] linked Banana commands from ${BANANA_COMMANDS_DIR}`);
-        return;
-      }
-    }
-
-    console.warn(`[banana-runner] ${BANANA_GLOBAL_COMMANDS_LINK} exists, leaving it unchanged`);
+    await ensureSymlink(BANANA_GLOBAL_COMMANDS_LINK, BANANA_COMMANDS_DIR, 'Banana commands');
   } catch (err) {
     console.warn(`[banana-runner] could not link Banana commands: ${(err as Error).message}`);
   }
@@ -959,6 +979,7 @@ class BananaServer {
       // A concurrent ensure() is already starting; wait on its promise.
       if (this.readyPromise) return this.readyPromise;
     }
+    await ensureBananaGlobalInstructionsLinked();
     await ensureBananaCommandsLinked();
     this.starting = true;
     this.password = randomBytes(24).toString('hex');
