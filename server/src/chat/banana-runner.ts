@@ -132,18 +132,30 @@ function resolveBananaBin(): string {
   return 'banana';
 }
 
-// One fixed free port for the lifetime of the app process. Picked once at
-// module load so a serve restart reuses the same port (do NOT pick port 0
-// per spawn — every restart would change the SDK baseUrl).
-const SERVE_PORT = pickFixedPort();
-function pickFixedPort(): number {
+const CONFIGURED_SERVE_PORT = configuredServePort();
+function configuredServePort(): number | null {
   const raw = process.env.RIVENDELL_BANANA_SERVE_PORT;
   if (raw) {
     const n = Number(raw);
     if (Number.isInteger(n) && n > 0 && n < 65536) return n;
   }
-  // A high, unlikely-to-collide port. 41000-firsthalf range.
-  return 41000 + Math.floor(Math.random() * 4000);
+  return null;
+}
+
+function pickServePort(previous?: number): number {
+  if (CONFIGURED_SERVE_PORT) return CONFIGURED_SERVE_PORT;
+  let next: number;
+  do {
+    next = 41000 + Math.floor(Math.random() * 4000);
+  } while (next === previous);
+  return next;
+}
+
+function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  try { child.kill(signal); } catch {}
+  if (child.pid) {
+    try { process.kill(-child.pid, signal); } catch {}
+  }
 }
 
 // ── OpenRouter via monkey-models ─────────────────────────────────────────
@@ -730,6 +742,7 @@ export function parseModel(modelId: string | undefined): { providerID: string; m
 class BananaServer {
   private child: ChildProcess | null = null;
   private password = '';
+  private servePort = pickServePort();
   /** Resolves once the server is reachable. Recreated on each (re)start. */
   private readyPromise: Promise<void> | null = null;
   private dead = false;
@@ -809,9 +822,9 @@ class BananaServer {
     const child = this.child;
     this.child = null;
     if (child && child.exitCode === null) {
-      try { child.kill('SIGTERM'); } catch {}
+      terminateProcessTree(child, 'SIGTERM');
       setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch {}
+        terminateProcessTree(child, 'SIGKILL');
       }, 3000).unref();
     }
     for (const session of owners) {
@@ -822,8 +835,12 @@ class BananaServer {
   /** The shared SDK client, bound to a per-session directory. The SDK sends
    *  the directory as a header/query param, so one client per cwd is cheap. */
   clientFor(directory: string) {
+    return this.clientForPort(directory, this.servePort);
+  }
+
+  private clientForPort(directory: string, port: number) {
     return createOpencodeClient({
-      baseUrl: `http://127.0.0.1:${SERVE_PORT}`,
+      baseUrl: `http://127.0.0.1:${port}`,
       directory,
       headers: {
         Authorization: 'Basic ' + Buffer.from(`banana:${this.password}`).toString('base64'),
@@ -857,7 +874,7 @@ class BananaServer {
     this.dead = true;
     this.readyPromise = null;
     if (this.child) {
-      try { this.child.kill('SIGTERM'); } catch {}
+      terminateProcessTree(this.child, 'SIGTERM');
       this.child = null;
     }
   }
@@ -871,13 +888,14 @@ class BananaServer {
     }
     this.starting = true;
     this.password = randomBytes(24).toString('hex');
+    const port = this.servePort;
     // New serve generation — any SSE loop from a prior generation will exit.
     this.generation += 1;
     const generation = this.generation;
     this.configSignature = configSignature;
 
     const bin = resolveBananaBin();
-    const args = ['serve', '--port', String(SERVE_PORT), '--hostname', '127.0.0.1'];
+    const args = ['serve', '--port', String(port), '--hostname', '127.0.0.1'];
     // Build the spawn env: always a random BANANA_SERVER_PASSWORD, and
     // (unless disabled) the BANANA_CONFIG_CONTENT override that routes the
     // `openrouter` provider through the monkey-models proxy.
@@ -890,10 +908,11 @@ class BananaServer {
       cwd: process.cwd(),
       // Never run unsecured: inject a random Basic-auth password.
       env: serveEnv,
+      detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child = child;
-    console.log(`[banana serve] spawning ${bin} on 127.0.0.1:${SERVE_PORT} pid=${child.pid ?? '-'}`);
+    console.log(`[banana serve] spawning ${bin} on 127.0.0.1:${port} pid=${child.pid ?? '-'}`);
 
     let resolveReady!: () => void;
     let rejectReady!: (e: Error) => void;
@@ -915,7 +934,7 @@ class BananaServer {
       this.starting = false;
       this.restartBackoffMs = 0;
       clearStartReject();
-      console.log(`[banana serve] ready on 127.0.0.1:${SERVE_PORT}`);
+      console.log(`[banana serve] ready on 127.0.0.1:${port}`);
       resolveReady();
       // Restart an SSE loop for every cwd that still has a live route, so a
       // serve restart reconnects streaming for in-progress conversations.
@@ -940,7 +959,7 @@ class BananaServer {
     };
 
     const readyLine = new RegExp(
-      `Banana Code server listening on http://127\\.0\\.0\\.1:${SERVE_PORT}`,
+      `Banana Code server listening on http://127\\.0\\.0\\.1:${port}`,
     );
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
@@ -966,7 +985,7 @@ class BananaServer {
 
     // Backstop readiness: even without the log line, poll config.get() until
     // it answers. Whichever path resolves first wins.
-    void this.pollReady(markReady, markFailed, () => settled);
+    void this.pollReady(port, markReady, markFailed, () => settled);
 
     return ready;
   }
@@ -974,11 +993,12 @@ class BananaServer {
   /** Poll `sdk.config.get()` until it succeeds (covers a serve build whose
    *  ready log line ever changes). Gives up after ~30s. */
   private async pollReady(
+    port: number,
     markReady: () => void,
     markFailed: (msg: string) => void,
     isSettled: () => boolean,
   ): Promise<void> {
-    const client = this.clientFor(process.cwd());
+    const client = this.clientForPort(process.cwd(), port);
     const deadline = Date.now() + 30_000;
     while (!isSettled()) {
       if (this.child?.exitCode !== null && this.child?.exitCode !== undefined) return;
@@ -1017,11 +1037,16 @@ class BananaServer {
     const child = this.child;
     this.child = null;
     if (child && child.exitCode === null) {
-      try { child.kill('SIGTERM'); } catch {}
+      terminateProcessTree(child, 'SIGTERM');
       // SIGKILL backstop if SIGTERM doesn't take it down promptly.
       setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch {}
+        terminateProcessTree(child, 'SIGKILL');
       }, 3000).unref();
+    }
+    const nextPort = pickServePort(this.servePort);
+    if (nextPort !== this.servePort) {
+      console.warn(`[banana serve] switching port ${this.servePort} -> ${nextPort}`);
+      this.servePort = nextPort;
     }
     const owners = new Set(this.routes.values());
     this.routes.clear();
