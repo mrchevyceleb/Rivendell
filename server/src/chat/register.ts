@@ -23,6 +23,7 @@ import {
 } from './codex-runner.ts';
 import {
   activeBananaSessions,
+  listBananaOpenRouterModels,
   pruneIdleBananaSessions,
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
@@ -109,6 +110,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
         lastActivityAt: session.lastActivityAt,
       })),
     });
+  });
+
+  app.get('/api/banana/models', async (_req, res) => {
+    try {
+      res.json({ data: await listBananaOpenRouterModels() });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
   });
 
   app.post('/api/chat/interrupt', async (req, res) => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 // Model picker state for the Banana companion. Quick-picks are the monkey
 // tiers; the searchable list is every OpenRouter model. The last pick
@@ -25,36 +25,48 @@ export const MONKEY_TIERS: BananaModelOption[] = [
 export const DEFAULT_BANANA_MODEL = 'monkey/silverback';
 const STORAGE_KEY = 'rivendell:banana-model';
 const FAVORITES_KEY = 'banana-model-favorites';
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/models';
+const OPENROUTER_URL = '/api/banana/models';
+const OPENROUTER_CACHE_TTL_MS = 60 * 1000;
 
-// Cache the OpenRouter model list for the lifetime of the page so opening the
-// picker repeatedly does not refetch.
+// Cache briefly so long-lived Rivendell tabs notice OpenRouter adds, removals,
+// and metadata changes without needing a browser refresh.
 let openRouterCache: BananaModelOption[] | null = null;
+let openRouterCacheAt = 0;
 let openRouterInflight: Promise<BananaModelOption[]> | null = null;
 
 type RawModel = { id?: unknown; name?: unknown; context_length?: unknown };
 
 async function fetchOpenRouterModels(): Promise<BananaModelOption[]> {
-  if (openRouterCache) return openRouterCache;
+  const cached = openRouterCache;
+  const fresh = cached !== null && Date.now() - openRouterCacheAt < OPENROUTER_CACHE_TTL_MS;
+  if (fresh) return cached;
   if (openRouterInflight) return openRouterInflight;
   openRouterInflight = (async () => {
-    const res = await fetch(OPENROUTER_URL);
-    if (!res.ok) throw new Error(`OpenRouter responded ${res.status}`);
-    const body = (await res.json()) as { data?: RawModel[] };
-    const list = Array.isArray(body.data) ? body.data : [];
-    const mapped: BananaModelOption[] = list
-      .filter((m): m is RawModel & { id: string } => typeof m.id === 'string' && m.id.length > 0)
-      .map((m) => {
-        const ctx = typeof m.context_length === 'number' ? m.context_length : undefined;
-        return {
-          id: `openrouter/${m.id}`,
-          label: typeof m.name === 'string' && m.name ? m.name : m.id,
-          detail: ctx ? `${m.id} · ${formatContext(ctx)} ctx` : m.id,
-        };
-      })
-      .sort((a, b) => a.label.localeCompare(b.label));
-    openRouterCache = mapped;
-    return mapped;
+    try {
+      const res = await fetch(OPENROUTER_URL);
+      if (!res.ok) throw new Error(`OpenRouter responded ${res.status}`);
+      const body = (await res.json()) as { data?: RawModel[] };
+      const list = Array.isArray(body.data) ? body.data : [];
+      const mapped: BananaModelOption[] = list
+        .filter((m): m is RawModel & { id: string } => typeof m.id === 'string' && m.id.length > 0)
+        .map((m) => {
+          const ctx = typeof m.context_length === 'number' ? m.context_length : undefined;
+          return {
+            id: `openrouter/${m.id}`,
+            label: typeof m.name === 'string' && m.name ? m.name : m.id,
+            detail: ctx ? `${m.id} · ${formatContext(ctx)} ctx` : m.id,
+          };
+        })
+        .sort((a, b) => a.label.localeCompare(b.label));
+      if (mapped.length > 0) {
+        openRouterCache = mapped;
+        openRouterCacheAt = Date.now();
+      }
+      return mapped.length > 0 ? mapped : openRouterCache ?? [];
+    } catch (error) {
+      if (openRouterCache) return openRouterCache;
+      throw error;
+    }
   })();
   try {
     return await openRouterInflight;
@@ -123,8 +135,6 @@ export function useBananaModel() {
   const [favorites, setFavorites] = useState<string[]>(() => readStoredFavorites());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Tracks whether we have already kicked off a fetch this mount.
-  const fetchedRef = useRef(false);
 
   const setModel = useCallback((next: string) => {
     setModelState(next);
@@ -149,11 +159,13 @@ export function useBananaModel() {
   // Lazily load the OpenRouter list — called when the picker opens so we do
   // not pay the network cost unless the user actually wants to browse.
   const loadOpenRouter = useCallback(() => {
-    if (fetchedRef.current || openRouterCache) {
-      if (openRouterCache) setOpenRouter(openRouterCache);
+    const cached = openRouterCache;
+    const fresh = cached !== null && Date.now() - openRouterCacheAt < OPENROUTER_CACHE_TTL_MS;
+    if (fresh) {
+      setOpenRouter(cached);
       return;
     }
-    fetchedRef.current = true;
+    if (openRouterCache) setOpenRouter(openRouterCache);
     setLoading(true);
     setError(null);
     fetchOpenRouterModels()
@@ -164,8 +176,6 @@ export function useBananaModel() {
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : 'failed to load OpenRouter models');
         setLoading(false);
-        // Allow a retry on the next open.
-        fetchedRef.current = false;
       });
   }, []);
 

@@ -177,6 +177,164 @@ function resolveMonkeyToken(): string {
   );
 }
 
+const MONKEY_MODEL_CATALOG_TTL_MS = 60 * 1000;
+const MONKEY_MODEL_CATALOG_TIMEOUT_MS = 10_000;
+
+let monkeyModelCatalogCache: unknown[] | null = null;
+let monkeyModelCatalogAt = 0;
+let monkeyModelCatalogInflight: Promise<unknown[]> | null = null;
+
+type BananaPickerModel = {
+  id: string;
+  name: string;
+  context_length?: number;
+};
+
+function numberFrom(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return undefined;
+}
+
+function recordOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function normalizedModalities(value: unknown): string[] {
+  if (!Array.isArray(value)) return ['text'];
+  const allowed = new Set(['text', 'audio', 'image', 'video', 'pdf']);
+  const out: string[] = [];
+  for (const item of value) {
+    const raw = String(item);
+    const normalized = raw === 'file' ? 'pdf' : raw;
+    if (allowed.has(normalized) && !out.includes(normalized)) out.push(normalized);
+  }
+  return out.length ? out : ['text'];
+}
+
+async function fetchMonkeyModelCatalog(): Promise<unknown[]> {
+  const cached = monkeyModelCatalogCache;
+  const fresh = cached !== null && Date.now() - monkeyModelCatalogAt < MONKEY_MODEL_CATALOG_TTL_MS;
+  if (fresh) return cached;
+  if (monkeyModelCatalogInflight) return monkeyModelCatalogInflight;
+
+  monkeyModelCatalogInflight = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MONKEY_MODEL_CATALOG_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${MONKEY_BASE_URL}/models`, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${resolveMonkeyToken()}`,
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        console.warn(`[banana-runner] monkey model catalog returned ${response.status}, keeping prior catalog`);
+        return monkeyModelCatalogCache ?? [];
+      }
+      const body = await response.json() as { data?: unknown[] };
+      const models = Array.isArray(body.data) ? body.data : [];
+      if (models.length > 0) {
+        monkeyModelCatalogCache = models;
+        monkeyModelCatalogAt = Date.now();
+      }
+      return monkeyModelCatalogCache ?? [];
+    } catch (error) {
+      const reason = (error as Error)?.name === 'AbortError'
+        ? 'timeout'
+        : ((error as Error)?.message || 'unknown error');
+      console.warn(`[banana-runner] monkey model catalog fetch failed (${reason}), keeping prior catalog`);
+      return monkeyModelCatalogCache ?? [];
+    } finally {
+      clearTimeout(timeout);
+      monkeyModelCatalogInflight = null;
+    }
+  })();
+
+  return monkeyModelCatalogInflight;
+}
+
+function toPickerModel(model: unknown): BananaPickerModel | null {
+  const row = recordOf(model);
+  const id = typeof row.id === 'string' ? row.id.trim() : '';
+  if (!id || !id.includes('/')) return null;
+  const context = numberFrom(row.context_length, recordOf(row.top_provider).context_length);
+  return {
+    id,
+    name: typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id,
+    ...(context ? { context_length: context } : {}),
+  };
+}
+
+function toProviderModelConfig(model: unknown): [string, Record<string, unknown>] | null {
+  const row = recordOf(model);
+  const id = typeof row.id === 'string' ? row.id.trim() : '';
+  if (!id || !id.includes('/')) return null;
+
+  const architecture = recordOf(row.architecture);
+  const topProvider = recordOf(row.top_provider);
+  const supported = Array.isArray(row.supported_parameters)
+    ? row.supported_parameters.map((item) => String(item))
+    : [];
+  const input = normalizedModalities(architecture.input_modalities);
+  const outputModalities = normalizedModalities(architecture.output_modalities);
+  const context = numberFrom(row.context_length, topProvider.context_length);
+  const output = numberFrom(topProvider.max_completion_tokens, context) ?? context;
+  const name = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : id;
+  const lower = `${id} ${name}`.toLowerCase();
+  const reasoning = supported.includes('reasoning') ||
+    supported.includes('include_reasoning') ||
+    lower.includes('reasoning') ||
+    lower.includes('thinking');
+
+  const config: Record<string, unknown> = {
+    id,
+    name,
+    attachment: input.some((item) => item !== 'text'),
+    reasoning,
+    temperature: supported.length === 0 || supported.includes('temperature'),
+    tool_call: supported.length === 0 ||
+      supported.includes('tools') ||
+      supported.includes('tool_choice') ||
+      supported.includes('function_calling'),
+    modalities: { input, output: outputModalities },
+  };
+  if (context && output) {
+    config.limit = {
+      context,
+      input: context,
+      output,
+    };
+  }
+  if (reasoning) {
+    config.interleaved = { field: 'reasoning_details' };
+  }
+  return [id, config];
+}
+
+async function monkeyOpenRouterConfigModels(): Promise<Record<string, Record<string, unknown>>> {
+  const rows = await fetchMonkeyModelCatalog();
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const row of rows) {
+    const next = toProviderModelConfig(row);
+    if (next) out[next[0]] = next[1];
+  }
+  return out;
+}
+
+export async function listBananaOpenRouterModels(): Promise<BananaPickerModel[]> {
+  const rows = await fetchMonkeyModelCatalog();
+  return rows
+    .map(toPickerModel)
+    .filter((model): model is BananaPickerModel => model !== null)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** True unless explicitly disabled. A deploy can set
  *  RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY to a falsy value to turn the
  *  override off without a code change. Accepts the common boolean-off
@@ -446,15 +604,17 @@ function readClaudeMcpServers(projectPathHint?: string): Record<string, BananaMc
  *  so operator-supplied providers/agents/permissions survive. A non-JSON or
  *  unparseable existing value is ignored (logged) and only the override is
  *  used — better than crashing the spawn. */
-function bananaConfigContent(projectPathHint?: string): string | null {
+async function bananaConfigContent(projectPathHint?: string): Promise<string | null> {
   const includeOpenrouterProxy = openrouterViaMonkeyEnabled();
   const mirroredMcp = readClaudeMcpServers(projectPathHint);
   const override: any = {
     $schema: 'https://banana-code.dev/config.json',
   };
   if (includeOpenrouterProxy) {
+    const models = await monkeyOpenRouterConfigModels();
     override.provider = {
       openrouter: {
+        ...(Object.keys(models).length ? { models } : {}),
         options: {
           baseURL: MONKEY_BASE_URL,
           apiKey: resolveMonkeyToken(),
@@ -497,6 +657,14 @@ function bananaConfigContent(projectPathHint?: string): string | null {
       ? existingOpenrouter.options
       : {};
   const existingMcp = existing.mcp && typeof existing.mcp === 'object' ? existing.mcp : {};
+  const existingOpenrouterModels =
+    existingOpenrouter.models && typeof existingOpenrouter.models === 'object'
+      ? existingOpenrouter.models
+      : {};
+  const overrideOpenrouterModels =
+    override.provider?.openrouter?.models && typeof override.provider.openrouter.models === 'object'
+      ? override.provider.openrouter.models
+      : {};
 
   const merged: any = { ...existing, ...override };
   if (includeOpenrouterProxy) {
@@ -508,6 +676,9 @@ function bananaConfigContent(projectPathHint?: string): string | null {
           ...existingOptions,
           ...override.provider.openrouter.options,
         },
+        ...(Object.keys(overrideOpenrouterModels).length || Object.keys(existingOpenrouterModels).length
+          ? { models: { ...overrideOpenrouterModels, ...existingOpenrouterModels } }
+          : {}),
       },
     };
   }
@@ -586,7 +757,7 @@ class BananaServer {
 
   /** Lazily start (or restart) the serve process. Resolves when reachable. */
   async ensure(projectPathHint?: string): Promise<void> {
-    const inlineConfig = bananaConfigContent(projectPathHint);
+    const inlineConfig = await bananaConfigContent(projectPathHint);
     const configSignature = inlineConfig ?? '';
     if (this.readyPromise && !this.dead) {
       if (configSignature !== this.configSignature) {
