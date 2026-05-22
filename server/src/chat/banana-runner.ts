@@ -848,6 +848,11 @@ class BananaServer {
     return !this.dead && this.child !== null && this.child.exitCode === null;
   }
 
+  notePromptTransportFailure(reason: string): void {
+    console.warn(`[banana serve] prompt transport failure, restarting serve: ${reason}`);
+    this.handleDeath(`prompt transport failure: ${reason}`);
+  }
+
   shutdown(): void {
     this.dead = true;
     this.readyPromise = null;
@@ -1416,7 +1421,13 @@ export class BananaSession {
       }
     } catch (err) {
       if (this.turn && !this.turn.done) {
-        this.failTurn(`banana prompt failed: ${(err as Error).message}`);
+        const message = errorText(err);
+        this.failTurn(isPromptTransportFailure(message)
+          ? `banana prompt failed: local Banana server connection failed, restarting for the next turn (${message})`
+          : `banana prompt failed: ${message}`);
+        if (isPromptTransportFailure(message)) {
+          bananaServer.notePromptTransportFailure(message);
+        }
       }
     }
   }
@@ -1953,6 +1964,10 @@ function errorText(error: unknown): string {
     try { return JSON.stringify(error); } catch { return 'banana reported an error'; }
   }
   return String(error);
+}
+
+function isPromptTransportFailure(message: string): boolean {
+  return /fetch failed|ECONNREFUSED|ECONNRESET|EPIPE|UND_ERR|socket|terminated/i.test(message);
 }
 
 function keyOf(cwd: string, chatId = 'main'): string {
