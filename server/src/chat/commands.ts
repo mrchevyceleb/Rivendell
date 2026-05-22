@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, parse } from 'node:path';
-import { CLAUDE_COMMANDS_DIR, CODEX_SKILLS_DIR } from './config.ts';
+import { BANANA_COMMANDS_DIR, CLAUDE_COMMANDS_DIR, CODEX_SKILLS_DIR } from './config.ts';
 
 export type CommandEntry = {
   name: string;
@@ -11,6 +11,7 @@ export type CommandEntry = {
 export type CommandCatalog = {
   claude: CommandEntry[];
   codex: CommandEntry[];
+  banana: CommandEntry[];
 };
 
 async function markdownCommands(dir: string): Promise<CommandEntry[]> {
@@ -88,9 +89,10 @@ function sortCommands(a: CommandEntry, b: CommandEntry): number {
 }
 
 export async function readCommands(): Promise<CommandCatalog> {
-  const [claude, codex] = await Promise.all([
+  const [claude, codex, banana] = await Promise.all([
     markdownCommands(CLAUDE_COMMANDS_DIR),
     skillCommands(CODEX_SKILLS_DIR),
+    markdownCommands(BANANA_COMMANDS_DIR),
   ]);
-  return { claude, codex };
+  return { claude, codex, banana };
 }

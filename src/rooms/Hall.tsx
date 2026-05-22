@@ -171,7 +171,10 @@ export function Hall() {
     )));
   }, [activeTab?.id, chat.blocks]);
 
-  const activeCommands = companion === 'codex' ? commands.codex : commands.claude;
+  const activeCommands =
+    companion === 'codex' ? commands.codex
+    : companion === 'banana' ? commands.banana
+    : commands.claude;
   const activeLive = liveSessions.find((session) => (
     session.cwd === repo?.path &&
     session.cli === companion &&
@@ -400,7 +403,7 @@ export function Hall() {
             onReconnect={chat.reconnect}
             chatStatus={chat.status}
             commandPrefix={companion === 'codex' ? '$' : '/'}
-            claudeCommands={commands.claude}
+            claudeCommands={companion === 'banana' ? commands.banana : commands.claude}
             codexCommands={commands.codex}
             agentName={companionLabel[companion]}
             usage={chat.usage}
@@ -713,7 +716,7 @@ function Composer({
           <button
             type="button"
             className="composer-commands-hint"
-            title="Tool command prefix — type / for Claude, $ for Codex"
+            title={`Tool command prefix, type ${commandPrefix} for ${agentName}, $ for Codex`}
           >
             <TerminalSquare size={14} />
             {commandPrefix} commands

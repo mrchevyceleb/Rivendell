@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { CommandCatalog } from '../data/types';
 
-const EMPTY_COMMANDS: CommandCatalog = { claude: [], codex: [] };
+const EMPTY_COMMANDS: CommandCatalog = { claude: [], codex: [], banana: [] };
 
 export function useCommands(): CommandCatalog {
   const [commands, setCommands] = useState<CommandCatalog>(EMPTY_COMMANDS);

@@ -36,6 +36,7 @@ export type CommandEntry = {
 export type CommandCatalog = {
   claude: CommandEntry[];
   codex: CommandEntry[];
+  banana: CommandEntry[];
 };
 
 export type ChatImagePreview = {
