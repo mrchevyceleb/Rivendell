@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
@@ -67,7 +67,9 @@ type BananaTurnState = {
   parts: Map<string, PartRecord>;
   /** deltas that arrived before their part-created event, keyed by partID. */
   bufferedDeltas: Map<string, string[]>;
-  /** banana assistant messageID seen for this turn (demux helper). */
+  /** banana assistant messageID currently being normalized. A tool-using turn
+   *  can have more than one assistant message: one for tool_use blocks, then
+   *  a later one for final text after tool results. */
   assistantMessageId: string | null;
   /** True once this turn's prompt has been accepted by the server, or once
    *  the turn has anchored to an assistant message. A `session.status idle`
@@ -76,6 +78,8 @@ type BananaTurnState = {
    *  the window between this turn's state being created and its prompt being
    *  accepted, and would fake-complete the turn before the real answer streams. */
   promptAccepted: boolean;
+  /** True once this turn has actually emitted or observed a tool_use part. */
+  sawToolUse: boolean;
   usage: BananaUsage | null;
   done: boolean;
   /** Tear-down for this turn's image temp dir. Carried on the turn (not the
@@ -182,6 +186,256 @@ function openrouterViaMonkeyEnabled(): boolean {
   return !(raw === 'false' || raw === '0' || raw === 'no' || raw === 'off');
 }
 
+type BananaMcpConfig =
+  | {
+      type: 'local';
+      command: string[];
+      environment?: Record<string, string>;
+      enabled?: boolean;
+      timeout?: number;
+    }
+  | {
+      type: 'remote';
+      url: string;
+      headers?: Record<string, string>;
+      enabled?: boolean;
+      oauth?: false | Record<string, string>;
+      timeout?: number;
+    }
+  | { enabled: boolean };
+
+const DEFAULT_MCP_MIRROR_SERVERS = new Set([
+  'assistant-mcp',
+  'playwright',
+  'supabase-elite',
+  'supabase-personal',
+  'game-assets-mcp',
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function toStringMap(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item === undefined || item === null) continue;
+    out[key] = String(item);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function enabledByEnv(raw: string | undefined): boolean {
+  const value = raw?.trim().toLowerCase();
+  return value === 'true' || value === '1' || value === 'yes' || value === 'on';
+}
+
+function shouldMirrorMcpServer(name: string): boolean {
+  const raw = process.env.RIVENDELL_BANANA_MCP_MIRROR_SERVERS ?? process.env.BANANA_MCP_MIRROR_SERVERS;
+  if (!raw?.trim()) return DEFAULT_MCP_MIRROR_SERVERS.has(name);
+  const requested = raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return requested.includes('*') || requested.includes(name);
+}
+
+function isWindowsAbsolutePath(value: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(value);
+}
+
+function isRelativePathLike(value: string): boolean {
+  return (
+    value === '.' ||
+    value === '..' ||
+    value.startsWith('./') ||
+    value.startsWith('../') ||
+    value.startsWith('.\\') ||
+    value.startsWith('..\\')
+  );
+}
+
+function resolveMcpPathPart(value: string, sourceDir: string): string {
+  if (!isRelativePathLike(value) || isAbsolute(value) || isWindowsAbsolutePath(value)) return value;
+  return resolve(sourceDir, value);
+}
+
+function stripJsoncForParse(input: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    const next = input[i + 1];
+    if (inString) {
+      out += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === '/' && next === '/') {
+      i += 2;
+      while (i < input.length && input[i] !== '\n' && input[i] !== '\r') i += 1;
+      i -= 1;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) {
+        if (input[i] === '\n' || input[i] === '\r') out += input[i];
+        i += 1;
+      }
+      i += 1;
+      continue;
+    }
+    out += ch;
+  }
+
+  let cleaned = '';
+  inString = false;
+  escaped = false;
+  for (let i = 0; i < out.length; i += 1) {
+    const ch = out[i];
+    if (inString) {
+      cleaned += ch;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      cleaned += ch;
+      continue;
+    }
+    if (ch === ',') {
+      let j = i + 1;
+      while (j < out.length && /\s/.test(out[j])) j += 1;
+      if (out[j] === '}' || out[j] === ']') continue;
+    }
+    cleaned += ch;
+  }
+  return cleaned;
+}
+
+function parseJsoncObject(raw: string): Record<string, unknown> {
+  const parsed = JSON.parse(stripJsoncForParse(raw));
+  if (!isRecord(parsed)) throw new Error('config content must be a JSON object');
+  return parsed;
+}
+
+function mapClaudeMcpServer(name: string, value: unknown, sourceDir: string): BananaMcpConfig | null {
+  if (!isRecord(value)) return null;
+  if (value.enabled === false || value.disabled === true) return { enabled: false };
+
+  const type = typeof value.type === 'string' ? value.type.toLowerCase() : '';
+  const timeout = typeof value.timeout === 'number' && value.timeout > 0 ? value.timeout : undefined;
+
+  const command = typeof value.command === 'string' ? value.command.trim() : '';
+  if ((type === 'stdio' || type === 'local' || (!type && command)) && command) {
+    const args = Array.isArray(value.args) ? value.args.map((arg) => resolveMcpPathPart(String(arg), sourceDir)) : [];
+    const environment = toStringMap(value.env ?? value.environment);
+    return {
+      type: 'local',
+      command: [resolveMcpPathPart(command, sourceDir), ...args],
+      ...(environment ? { environment } : {}),
+      ...(timeout ? { timeout } : {}),
+    };
+  }
+
+  const url = typeof value.url === 'string' ? value.url.trim() : '';
+  if ((type === 'http' || type === 'sse' || type === 'remote' || (!type && url)) && url) {
+    const headers = toStringMap(value.headers);
+    return {
+      type: 'remote',
+      url,
+      ...(headers ? { headers } : {}),
+      ...(timeout ? { timeout } : {}),
+      // Matt's mirrored servers already carry their auth in config/env. Avoid
+      // Banana's OAuth auto-detection trying to pop an interactive flow.
+      oauth: false,
+    };
+  }
+
+  console.warn(`[banana-runner] skipping unsupported Claude MCP server "${name}"`);
+  return null;
+}
+
+function readClaudeMcpServers(projectPathHint?: string): Record<string, BananaMcpConfig> {
+  if (enabledByEnv(process.env.RIVENDELL_BANANA_MCP_MIRROR_DISABLED ?? process.env.BANANA_MCP_MIRROR_DISABLED)) {
+    return {};
+  }
+
+  const merged: Record<string, BananaMcpConfig> = {};
+  const addServers = (servers: unknown, sourceDir: string) => {
+    if (!isRecord(servers)) return;
+    for (const [name, entry] of Object.entries(servers)) {
+      if (!shouldMirrorMcpServer(name)) continue;
+      const mapped = mapClaudeMcpServer(name, entry, sourceDir);
+      if (mapped) merged[name] = mapped;
+    }
+  };
+
+  const readJson = (filePath: string): Record<string, unknown> | null => {
+    if (!existsSync(filePath)) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
+      return isRecord(parsed) ? parsed : null;
+    } catch (error) {
+      console.warn(`[banana-runner] failed to parse ${filePath} for MCP mirroring: ${errorText(error)}`);
+      return null;
+    }
+  };
+
+  const claudeConfigPath = process.env.CLAUDE_CONFIG_FILE?.trim() || join(homedir(), '.claude.json');
+  const claudeConfig = readJson(claudeConfigPath);
+  if (claudeConfig) addServers(claudeConfig.mcpServers, dirname(claudeConfigPath));
+
+  const projects = claudeConfig && isRecord(claudeConfig.projects) ? claudeConfig.projects : undefined;
+  const envProjectHint =
+    process.env.RIVENDELL_BANANA_MCP_PROJECT_PATH ?? process.env.BANANA_MCP_PROJECT_PATH;
+  const fallbackProjectHints = projectPathHint
+    ? []
+    : [process.env.ELROND_WORKSPACE_PATH, process.cwd()];
+  const projectCandidates = [
+    envProjectHint,
+    projectPathHint,
+    ...fallbackProjectHints,
+  ].flatMap((item) => {
+    if (typeof item !== 'string') return [];
+    const trimmed = item.trim();
+    return trimmed ? [trimmed] : [];
+  });
+
+  for (const projectPath of Array.from(new Set(projectCandidates))) {
+    const mcpJson = readJson(join(projectPath, '.mcp.json'));
+    if (mcpJson) addServers(mcpJson.mcpServers, projectPath);
+    const project = projects?.[projectPath];
+    if (isRecord(project)) addServers(project.mcpServers, projectPath);
+  }
+
+  const names = Object.keys(merged);
+  if (names.length) {
+    console.log(`[banana-runner] mirrored ${names.length} MCP server(s) into Banana: ${names.join(', ')}`);
+  }
+  return merged;
+}
+
 /** Inline JSON config that overrides Banana's `openrouter` provider to route
  *  through the monkey-models proxy. Passed to `banana serve` as
  *  BANANA_CONFIG_CONTENT.
@@ -192,35 +446,41 @@ function openrouterViaMonkeyEnabled(): boolean {
  *  so operator-supplied providers/agents/permissions survive. A non-JSON or
  *  unparseable existing value is ignored (logged) and only the override is
  *  used — better than crashing the spawn. */
-function bananaConfigContent(): string {
-  const override = {
+function bananaConfigContent(projectPathHint?: string): string | null {
+  const includeOpenrouterProxy = openrouterViaMonkeyEnabled();
+  const mirroredMcp = readClaudeMcpServers(projectPathHint);
+  const override: any = {
     $schema: 'https://banana-code.dev/config.json',
-    provider: {
+  };
+  if (includeOpenrouterProxy) {
+    override.provider = {
       openrouter: {
         options: {
           baseURL: MONKEY_BASE_URL,
           apiKey: resolveMonkeyToken(),
         },
       },
-    },
-  };
+    };
+  }
+  if (Object.keys(mirroredMcp).length) override.mcp = mirroredMcp;
+  const hasOverride = includeOpenrouterProxy || Object.keys(mirroredMcp).length > 0;
 
   const existingRaw = (
     process.env.BANANA_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT
   )?.trim();
-  if (!existingRaw) return JSON.stringify(override);
+  if (!existingRaw) return hasOverride ? JSON.stringify(override) : null;
 
   let existing: any;
   try {
-    existing = JSON.parse(existingRaw);
+    existing = parseJsoncObject(existingRaw);
   } catch {
     console.warn(
-      '[banana-runner] existing BANANA_CONFIG_CONTENT is not valid JSON — ignoring it, using OpenRouter override only',
+      '[banana-runner] existing BANANA_CONFIG_CONTENT is not valid JSON/JSONC, ignoring it and using generated Banana override only',
     );
-    return JSON.stringify(override);
+    return hasOverride ? JSON.stringify(override) : null;
   }
   if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
-    return JSON.stringify(override);
+    return hasOverride ? JSON.stringify(override) : null;
   }
 
   // Merge so the existing config's other providers, and even openrouter's
@@ -236,18 +496,29 @@ function bananaConfigContent(): string {
     existingOpenrouter.options && typeof existingOpenrouter.options === 'object'
       ? existingOpenrouter.options
       : {};
+  const existingMcp = existing.mcp && typeof existing.mcp === 'object' ? existing.mcp : {};
 
   const merged: any = { ...existing, ...override };
-  merged.provider = {
-    ...existingProvider,
-    openrouter: {
-      ...existingOpenrouter,
-      options: {
-        ...existingOptions,
-        ...override.provider.openrouter.options,
+  if (includeOpenrouterProxy) {
+    merged.provider = {
+      ...existingProvider,
+      openrouter: {
+        ...existingOpenrouter,
+        options: {
+          ...existingOptions,
+          ...override.provider.openrouter.options,
+        },
       },
-    },
-  };
+    };
+  }
+  if (Object.keys(mirroredMcp).length || Object.keys(existingMcp).length) {
+    // Operator-supplied Banana MCP config wins over the mirrored Claude stack,
+    // so a deploy can disable or replace one server without editing code.
+    merged.mcp = {
+      ...mirroredMcp,
+      ...existingMcp,
+    };
+  }
   return JSON.stringify(merged);
 }
 
@@ -308,10 +579,22 @@ class BananaServer {
   /** When the serve child died, the next ensure() restarts after this delay. */
   private restartBackoffMs = 0;
   private lastDeathAtMs = 0;
+  /** Inline config content used by the currently running serve process. */
+  private configSignature = '';
+  /** Rejects the in-flight start promise when a config-change restart supersedes it. */
+  private startReject: ((e: Error) => void) | null = null;
 
   /** Lazily start (or restart) the serve process. Resolves when reachable. */
-  async ensure(): Promise<void> {
-    if (this.readyPromise && !this.dead) return this.readyPromise;
+  async ensure(projectPathHint?: string): Promise<void> {
+    const inlineConfig = bananaConfigContent(projectPathHint);
+    const configSignature = inlineConfig ?? '';
+    if (this.readyPromise && !this.dead) {
+      if (configSignature !== this.configSignature) {
+        this.restartForConfigChange();
+      } else {
+        return this.readyPromise;
+      }
+    }
     if (this.dead) {
       // Small backoff between restarts so a crash-looping binary doesn't spin.
       const since = Date.now() - this.lastDeathAtMs;
@@ -322,9 +605,47 @@ class BananaServer {
       this.readyPromise = null;
     }
     if (!this.readyPromise) {
-      this.readyPromise = this.start();
+      this.readyPromise = this.start(inlineConfig, configSignature);
     }
-    return this.readyPromise;
+    const waitingOn = this.readyPromise;
+    try {
+      await waitingOn;
+    } catch (err) {
+      if (this.readyPromise === waitingOn) {
+        this.dead = true;
+        this.readyPromise = null;
+        this.starting = false;
+        this.configSignature = '';
+        this.startReject = null;
+        this.lastDeathAtMs = Date.now();
+        this.restartBackoffMs = Math.min(Math.max(this.restartBackoffMs * 2, 1000), 15_000);
+      }
+      throw err;
+    }
+  }
+
+  private restartForConfigChange(): void {
+    this.generation += 1;
+    this.configSignature = '';
+    this.starting = false;
+    const rejectStart = this.startReject;
+    this.startReject = null;
+    if (rejectStart) rejectStart(new Error('banana serve start superseded by config change'));
+    this.eventLoops.clear();
+    const owners = new Set(this.routes.values());
+    this.routes.clear();
+    this.readyPromise = null;
+    const child = this.child;
+    this.child = null;
+    if (child && child.exitCode === null) {
+      try { child.kill('SIGTERM'); } catch {}
+      setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch {}
+      }, 3000).unref();
+    }
+    for (const session of owners) {
+      session.onServerDeath('config changed, restarting banana serve');
+    }
   }
 
   /** The shared SDK client, bound to a per-session directory. The SDK sends
@@ -367,7 +688,7 @@ class BananaServer {
 
   // ── private ────────────────────────────────────────────────
 
-  private async start(): Promise<void> {
+  private async start(inlineConfig: string | null, configSignature: string): Promise<void> {
     if (this.starting) {
       // A concurrent ensure() is already starting; wait on its promise.
       if (this.readyPromise) return this.readyPromise;
@@ -376,6 +697,8 @@ class BananaServer {
     this.password = randomBytes(24).toString('hex');
     // New serve generation — any SSE loop from a prior generation will exit.
     this.generation += 1;
+    const generation = this.generation;
+    this.configSignature = configSignature;
 
     const bin = resolveBananaBin();
     const args = ['serve', '--port', String(SERVE_PORT), '--hostname', '127.0.0.1'];
@@ -386,9 +709,7 @@ class BananaServer {
       ...process.env,
       BANANA_SERVER_PASSWORD: this.password,
     };
-    if (openrouterViaMonkeyEnabled()) {
-      serveEnv.BANANA_CONFIG_CONTENT = bananaConfigContent();
-    }
+    if (inlineConfig) serveEnv.BANANA_CONFIG_CONTENT = inlineConfig;
     const child = spawn(bin, args, {
       cwd: process.cwd(),
       // Never run unsecured: inject a random Basic-auth password.
@@ -404,13 +725,20 @@ class BananaServer {
       resolveReady = res;
       rejectReady = rej;
     });
+    this.startReject = rejectReady;
 
     let settled = false;
+    const isCurrentServe = () => this.child === child && this.generation === generation;
+    const clearStartReject = () => {
+      if (this.startReject === rejectReady) this.startReject = null;
+    };
     const markReady = () => {
+      if (!isCurrentServe()) return;
       if (settled) return;
       settled = true;
       this.starting = false;
       this.restartBackoffMs = 0;
+      clearStartReject();
       console.log(`[banana serve] ready on 127.0.0.1:${SERVE_PORT}`);
       resolveReady();
       // Restart an SSE loop for every cwd that still has a live route, so a
@@ -419,12 +747,14 @@ class BananaServer {
       for (const cwd of cwds) this.ensureEventLoop(cwd);
     };
     const markFailed = (msg: string) => {
+      if (!isCurrentServe()) return;
       if (settled) {
         // Already running and then it died — handled by the close handler.
         return;
       }
       settled = true;
       this.starting = false;
+      clearStartReject();
       console.warn(`[banana serve] failed to start: ${msg}`);
       // Drive a full death so the next ensure() can restart through the normal
       // backoff path. Without this the rejected readyPromise would stick around
@@ -447,10 +777,12 @@ class BananaServer {
     });
 
     child.on('error', (err) => {
+      if (this.child !== child || this.generation !== generation) return;
       markFailed(err.message);
       this.handleDeath(`spawn error: ${err.message}`);
     });
     child.on('close', (code, signal) => {
+      if (this.child !== child || this.generation !== generation) return;
       console.warn(`[banana serve] closed code=${code} signal=${signal ?? '-'}`);
       if (!settled) markFailed(`exited code=${code} before ready`);
       this.handleDeath(`process exited code=${code} signal=${signal ?? '-'}`);
@@ -610,6 +942,10 @@ export class BananaSession {
   private dead = false;
   private eventLog: SeqEvent[] = [];
   private nextSeq = 1;
+  /** Assistant message ids already used by this long-lived banana session.
+   *  Prevents delayed events from a previous prompt from rendering into the
+   *  next prompt once a reused opencode session goes quiet. */
+  private seenMessageIds = new Set<string>();
   private lastActivityAtMs = Date.now();
   /** Per-turn streaming state — non-null only while busy. */
   private turn: BananaTurnState | null = null;
@@ -805,7 +1141,7 @@ export class BananaSession {
 
     // 1. Make sure the shared serve process is up.
     try {
-      await bananaServer.ensure();
+      await bananaServer.ensure(this.cwd);
     } catch (err) {
       this.failTurn(`banana serve unavailable: ${(err as Error).message}`);
       return;
@@ -874,6 +1210,7 @@ export class BananaSession {
       bufferedDeltas: new Map(),
       assistantMessageId: null,
       promptAccepted: false,
+      sawToolUse: false,
       usage: null,
       done: false,
       cleanup: cleanupImages,
@@ -932,12 +1269,11 @@ export class BananaSession {
       case 'message.updated': {
         const info = event.properties.info;
         if (info.role !== 'assistant') return;
-        // The first assistant message of this turn anchors the turn. A second
-        // assistant id while we already have one means a stale message from an
-        // earlier prompt in the same banana session — ignore it so its text
-        // can't splice into the live answer.
-        if (state.assistantMessageId && state.assistantMessageId !== info.id) return;
-        state.assistantMessageId = info.id;
+        if (state.assistantMessageId && state.assistantMessageId !== info.id) {
+          if (!this.trySwitchAssistantMessage(info.id, state)) return;
+        } else {
+          if (!this.tryAnchorAssistantMessage(info.id, state)) return;
+        }
         // The turn has a real assistant message — a later idle is now its own.
         state.promptAccepted = true;
         this.armWatchdog();
@@ -1021,12 +1357,60 @@ export class BananaSession {
       if (!mayAnchor) return false;
       // First delta of the turn — adopt it as the turn anchor. The turn now
       // has a real assistant message, so a later idle is its own.
-      state.assistantMessageId = messageID;
-      state.promptAccepted = true;
-      this.ensureMessageStart(state);
-      return true;
+      return this.tryAnchorAssistantMessage(messageID, state);
     }
-    return state.assistantMessageId === messageID;
+    if (state.assistantMessageId === messageID) return true;
+    return mayAnchor ? this.trySwitchAssistantMessage(messageID, state) : false;
+  }
+
+  private tryAnchorAssistantMessage(messageID: unknown, state: BananaTurnState): boolean {
+    if (typeof messageID !== 'string' || !messageID) return false;
+    if (this.seenMessageIds.has(messageID)) return false;
+    state.assistantMessageId = messageID;
+    state.promptAccepted = true;
+    this.rememberSeenMessageId(messageID);
+    this.ensureMessageStart(state);
+    return true;
+  }
+
+  /** Switch to a later assistant message in the same turn. Required for MCP
+   *  tool use: opencode emits a tool_use assistant message, then a second
+   *  assistant message with the final answer after tool_result blocks. */
+  private trySwitchAssistantMessage(messageID: string, state: BananaTurnState): boolean {
+    if (messageID === state.assistantMessageId) return true;
+    if (this.seenMessageIds.has(messageID)) return false;
+    if (!state.sawToolUse) {
+      this.rememberSeenMessageId(messageID);
+      return false;
+    }
+    if (this.hasOpenBlocks(state)) return false;
+
+    state.assistantMessageId = messageID;
+    state.messageId = synth('msg');
+    state.nextBlockIndex = 0;
+    state.messageStarted = false;
+    state.parts.clear();
+    state.bufferedDeltas.clear();
+    state.promptAccepted = true;
+    this.rememberSeenMessageId(messageID);
+    this.ensureMessageStart(state);
+    return true;
+  }
+
+  private rememberSeenMessageId(messageID: string): void {
+    if (this.seenMessageIds.has(messageID)) return;
+    this.seenMessageIds.add(messageID);
+    if (this.seenMessageIds.size > 256) {
+      const oldest = this.seenMessageIds.values().next().value;
+      if (oldest !== undefined) this.seenMessageIds.delete(oldest);
+    }
+  }
+
+  private hasOpenBlocks(state: BananaTurnState): boolean {
+    for (const rec of state.parts.values()) {
+      if (rec.started && !rec.closed) return true;
+    }
+    return false;
   }
 
   // ── streaming normalization ────────────────────────────────
@@ -1167,6 +1551,7 @@ export class BananaSession {
   /** Tool parts: open a tool_use block on `running`, then on completed/error
    *  close it and emit a synthetic user tool_result the way v1 / claude do. */
   private handleToolPart(part: any, state: BananaTurnState): void {
+    state.sawToolUse = true;
     const callID: string = typeof part.callID === 'string' ? part.callID : (typeof part.id === 'string' ? part.id : synth('call'));
     const toolName: string = typeof part.tool === 'string' ? part.tool : 'tool';
     const stateBlock = part.state ?? {};
