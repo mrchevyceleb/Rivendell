@@ -1551,6 +1551,16 @@ export class BananaSession {
     } catch (err) {
       if (this.turn && !this.turn.done) {
         const message = errorText(err);
+        if (
+          isPromptTransportFailure(message) &&
+          this.turn === thisTurn &&
+          this.turnHasServerActivity(thisTurn)
+        ) {
+          console.warn(
+            `[chat banana] ${slashCommand ? 'command' : 'prompt'} transport ended after stream activity; keeping turn alive (${message})`,
+          );
+          return;
+        }
         this.failTurn(isPromptTransportFailure(message)
           ? `banana ${slashCommand ? 'command' : 'prompt'} failed: local Banana server connection failed, restarting for the next turn (${message})`
           : `banana ${slashCommand ? 'command' : 'prompt'} failed: ${message}`);
@@ -1722,6 +1732,18 @@ export class BananaSession {
       if (rec.started && !rec.closed) return true;
     }
     return false;
+  }
+
+  private turnHasServerActivity(state: BananaTurnState): boolean {
+    return (
+      state.promptAccepted ||
+      state.messageStarted ||
+      state.assistantMessageId !== null ||
+      state.parts.size > 0 ||
+      state.bufferedDeltas.size > 0 ||
+      state.sawToolUse ||
+      state.usage !== null
+    );
   }
 
   // ── streaming normalization ────────────────────────────────
