@@ -21,15 +21,12 @@ export const REPO_SCAN_HUB_PATHS: string[] = [
 // Hub-level subfolders to skip when walking REPO_SCAN_HUB_PATHS.
 export const IGNORED_HUB_NAMES = new Set<string>(['worktrees', 'node_modules']);
 
-// The Assistant Hub — fixed path, surfaced as the "Assistant" companion's repo.
-export const ASSISTANT_HUB_PATH = join(
-  homedir(),
-  'Library',
-  'CloudStorage',
-  'OneDrive-Personal',
-  'Documents',
-  'ASSISTANT-HUB',
-);
+// The Assistant Hub — surfaced as the "Assistant" companion's repo.
+// Moved off OneDrive to a Syncthing-managed local folder. Env override lets
+// Windows (where ASSISTANT-HUB lives at C:\ASSISTANT-HUB) point at its real
+// location without code changes.
+export const ASSISTANT_HUB_PATH =
+  process.env.ELROND_WORKSPACE_PATH || join(homedir(), 'ASSISTANT-HUB');
 
 export const CROSS_COMPUTER_SHARE_PATH = join(
   homedir(),

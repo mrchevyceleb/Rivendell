@@ -2,7 +2,7 @@
 
 Rivendell is the local always-on office app for Bag End. It serves the Hall chat, dashboard, task board, inbox, messages, family ops, P&L, cron view, employee queue, past sessions, and live worker activity log from this Mac on port `8091`.
 
-Elrond is pinned to `/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB`. The Library room reads that folder as a file tree, and heavy folders such as `node_modules` and `.git` are loaded on demand.
+Elrond is pinned to `~/ASSISTANT-HUB` (a Syncthing-managed local folder, override with `ELROND_WORKSPACE_PATH`). The Library room reads that folder as a file tree, and heavy folders such as `node_modules` and `.git` are loaded on demand.
 
 ## Local Development
 

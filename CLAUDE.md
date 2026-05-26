@@ -60,7 +60,7 @@ Rooms map: `/` Hall, `/council` Council, `/dashboard` Dashboard, `/tidings` Tidi
 See `.env.example`. Notable knobs:
 
 - `PORT` (default `8091`), `HOST` (default `0.0.0.0`).
-- `ELROND_WORKSPACE_PATH` — pinned to `~/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB`. Library room reads this as a file tree; heavy folders (`node_modules`, `.git`) load on demand.
+- `ELROND_WORKSPACE_PATH` — defaults to `~/ASSISTANT-HUB` (Syncthing-managed; moved off OneDrive). Library room reads this as a file tree; heavy folders (`node_modules`, `.git`) load on demand.
 - `RIVENDELL_WORKER_ENABLED` (default `true`), `RIVENDELL_WORKER_RUNNER` (`dry-run` | `claude`), `RIVENDELL_WORKER_POLL_MS`. Keep `dry-run` unless you want jobs to spawn a real headless Claude Code process.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — required for the durable queue and Scribe events.
 - `RAILWAY_MCP_URL`, `ASSISTANT_MCP_TOKEN` — Railway MCP bridge. Routes fall back to local mock data when unset.
