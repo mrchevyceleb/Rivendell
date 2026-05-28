@@ -134,6 +134,12 @@ type CodexTurnState = {
   usage: CodexUsage | null;
 };
 
+// Model + reasoning effort every `codex exec` runs with. Single source of
+// truth, mirrors AutoSam's review.rs pins. Valid efforts: minimal|low|medium|
+// high|xhigh; xhigh is the top tier.
+const CODEX_MODEL = 'gpt-5.5';
+const CODEX_REASONING_CONFIG = 'model_reasoning_effort="xhigh"';
+
 const CODEX_TURN_PREAMBLE = [
   '<samwise-codex-runtime>',
   'When you run shell commands that may take more than a few seconds or need polling, use exec_command with tty=true. This includes gh run watch, dev servers, test watchers, and other watch or follow commands.',
@@ -511,6 +517,8 @@ export class CodexSession {
           'exec',
           'resume',
           '--json',
+          '-m', CODEX_MODEL,
+          '-c', CODEX_REASONING_CONFIG,
           '--dangerously-bypass-approvals-and-sandbox',
           ...imageArgs,
           this.threadId,
@@ -519,6 +527,8 @@ export class CodexSession {
       : [
           'exec',
           '--json',
+          '-m', CODEX_MODEL,
+          '-c', CODEX_REASONING_CONFIG,
           '--dangerously-bypass-approvals-and-sandbox',
           ...imageArgs,
           prompt,
