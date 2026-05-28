@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
@@ -6,6 +6,33 @@ import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
+
+export { MemoryPressureSpawnError } from './memory.ts';
+
+function terminateProcessTree(child: ChildProcessByStdio<Writable, Readable, Readable>, signal: NodeJS.Signals): void {
+  const descendants = child.pid ? collectDescendantPids(child.pid) : [];
+  try { child.kill(signal); } catch {}
+  if (child.pid) {
+    try { process.kill(-child.pid, signal); } catch {}
+  }
+  for (const pid of descendants.reverse()) {
+    try { process.kill(pid, signal); } catch {}
+  }
+}
+
+function collectDescendantPids(pid: number): number[] {
+  try {
+    const out = execFileSync('/usr/bin/pgrep', ['-P', String(pid)], { encoding: 'utf8', timeout: 1000 });
+    const children = out
+      .split(/\s+/)
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    return children.flatMap((childPid) => [childPid, ...collectDescendantPids(childPid)]);
+  } catch {
+    return [];
+  }
+}
 
 // One persistent `claude` process per (cli, repoPath) pair, fed JSON over
 // stdin and reading JSONL events from stdout. This kills the per-turn startup
@@ -27,9 +54,10 @@ type Listener = (msg: SessionEvent) => void;
 
 export type SessionEvent =
   | { type: 'event'; event: any }       // raw stream-json event from claude
+  | { type: 'turnStart' }
   | { type: 'turnEnd'; sessionId?: string }
   | { type: 'closed'; code: number | null; signal: NodeJS.Signals | null }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string; code?: string; retryable?: boolean };
 
 // Match `/<skill-name> <body>` at the very start of a user message. Skill names
 // are kebab-case (lowercase letters, digits, hyphen). The body is anything that
@@ -58,13 +86,23 @@ export function wrapSlashArgs(text: string): string {
   return `/${skill}\n<command-args>\n${body}\n</command-args>`;
 }
 
+// Model + reasoning effort every `claude` spawn runs with. Single source of
+// truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
+// live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
+const CLAUDE_MODEL = 'claude-opus-4-8';
+const CLAUDE_EFFORT = 'max';
+
 const ASSISTANT_AGENT_PROMPT =
   "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
   "You're working inside ASSISTANT-HUB, which contains his task system, " +
   "client dashboards, and personal automation. Address him directly. Stay terse. " +
   "When you reference a workspace file or folder, use the form `ASSISTANT-HUB/relative/path` " +
   "rather than an absolute filesystem path. Matt accesses Rivendell from multiple " +
-  "machines, so absolute Mac paths are useless to him on Windows or iPad.";
+  "machines, so absolute Mac paths are useless to him on Windows or iPad. " +
+  "For file search, use `rg` or `rg --files` with scoped paths and explicit exclusions. " +
+  "Do not run broad recursive `grep` or `find` over `/Users/mjohnst`, `~/samwise`, " +
+  "or ASSISTANT-HUB without excluding `node_modules`, `.git`, and generated output; " +
+  "give the same constraint to any subagent you launch.";
 
 // Each session keeps a rolling tail of recent events so a reconnecting client
 // gets the in-flight turn's output even if its WS dropped mid-stream. Bigger
@@ -146,6 +184,8 @@ class ClaudeSession {
       '--verbose',
       '--include-partial-messages',
       '--dangerously-skip-permissions',
+      '--model', CLAUDE_MODEL,
+      '--effort', CLAUDE_EFFORT,
     ];
     if (resumeId) args.push('--resume', resumeId);
     if (cli === 'assistant') args.push('--append-system-prompt', ASSISTANT_AGENT_PROMPT);
@@ -153,6 +193,7 @@ class ClaudeSession {
     this.child = spawn('claude', args, {
       cwd,
       env: process.env,
+      detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
 
@@ -276,16 +317,23 @@ class ClaudeSession {
   }
 
   /** Tear down the underlying process. */
-  shutdown(): void {
+  shutdown(reason = 'unspecified'): void {
+    const idleMs = Date.now() - this.lastActivityAtMs;
+    console.warn(
+      `[chat ${this.cli}] shutdown key=${this.key} pid=${this.child.pid ?? '-'} initSeen=${this.initSeen} listeners=${this.subscriberCount} idleMs=${idleMs} reason=${reason}`,
+    );
     try { this.child.stdin.end(); } catch {}
-    try { this.child.kill('SIGTERM'); } catch {}
+    terminateProcessTree(this.child, 'SIGTERM');
+    setTimeout(() => {
+      if (this.child.exitCode === null) terminateProcessTree(this.child, 'SIGKILL');
+    }, 3000).unref();
   }
 
   /** Same as shutdown, but framed for the user's "stop" button — keeps the
    *  saved session_id so the next message resumes the conversation. */
-  interrupt(): void {
+  interrupt(reason = 'interrupt'): void {
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
-    this.shutdown();
+    this.shutdown(reason);
   }
 
   isAlive(): boolean {
@@ -464,6 +512,7 @@ async function spawnSession(
   key: string,
   attempt = 0,
 ): Promise<ClaudeSession> {
+  assertMemoryAvailableForSpawn(cli);
   const session = new ClaudeSession(cli, cwd, chatId, resumeId);
   sessions.set(key, session);
 
@@ -489,7 +538,8 @@ async function spawnSession(
 }
 
 export function shutdownAllSessions(): void {
-  for (const s of sessions.values()) s.shutdown();
+  console.warn(`[chat] shutdownAllSessions called (${sessions.size} session(s))`);
+  for (const s of sessions.values()) s.shutdown('shutdownAllSessions');
   sessions.clear();
 }
 
@@ -524,7 +574,7 @@ export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number
     if (session.isBusy()) continue;
     if (session.listenerCount() > 0) continue;
     if (now - session.lastActivityAt() < ttlMs) continue;
-    session.shutdown();
+    session.shutdown('idle-prune');
     sessions.delete(key);
     pruned += 1;
   }
@@ -548,7 +598,7 @@ export async function freshStart(opts: { cli: CliKind; repoPath: string; chatId?
   const key = keyOf(opts.cli, cwd, chatId);
   const existing = sessions.get(key);
   if (existing) {
-    existing.shutdown();
+    existing.shutdown('freshStart');
     sessions.delete(key);
   }
   await setSessionId(opts.cli, cwd, '', chatId); // drop the stored id so we don't --resume
@@ -560,7 +610,7 @@ export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): vo
   const key = keyOf(cli, cwd, chatId);
   const s = sessions.get(key);
   if (s) {
-    s.shutdown();
+    s.shutdown('dropSession');
     sessions.delete(key);
   }
 }
@@ -571,7 +621,7 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
   const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex') {
     const { interruptCodex } = await import('./codex-runner.ts');
-    interruptCodex({ repoPath: opts.repoPath, chatId });
+    await interruptCodex({ repoPath: opts.repoPath, chatId });
     return;
   }
   if (opts.cli === 'banana') {
@@ -583,7 +633,7 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
   const key = keyOf(opts.cli, cwd, chatId);
   const s = sessions.get(key);
   if (s) {
-    s.interrupt();
+    s.interrupt('interruptSession');
     sessions.delete(key);
   }
 }

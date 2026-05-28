@@ -8,7 +8,7 @@
 // paste into Win+R if the in-app viewer is not what he wants.
 
 const LABEL = 'ASSISTANT-HUB';
-export const WIN_WORKSPACE_PREFIX = String.raw`C:\Users\mtjoh\OneDrive\Documents\ASSISTANT-HUB`;
+export const WIN_WORKSPACE_PREFIX = String.raw`C:\ASSISTANT-HUB`;
 
 // Resolve the workspace-relative path Rivendell stores in ChatBlocks into the
 // two URL forms a Windows client needs: a same-origin HTTP URL (the Tailscale
@@ -80,7 +80,7 @@ export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void
 const STOP_WORDS = '(?:and|or|but|the|a|an|is|are|was|were|to|of|in|on|at|by|for|that|which|because|since|so|then|with|from|as|when|where|while|after|before|will|would|should|can|could|may|might|like|this|these|those|it|its|i|we|you|he|she|they)';
 const STOP_LOOKAHEAD = String.raw`(?=$|[,;:!?]|[\n\r]|\.(?:\s|$)|\s+${STOP_WORDS}\b|[)\]"'\`<>])`;
 const WORKSPACE_MENTION = String.raw`\b${LABEL}(?:\/[^\n\r]+?)?`;
-const WIN_MENTION = String.raw`C:\\Users\\mtjoh\\OneDrive\\Documents\\ASSISTANT-HUB(?:\\[^\n\r]+?)?`;
+const WIN_MENTION = String.raw`C:\\ASSISTANT-HUB(?:\\[^\n\r]+?)?`;
 const MENTION_PATTERN = new RegExp(
   `(?:${WIN_MENTION}|${WORKSPACE_MENTION})${STOP_LOOKAHEAD}`,
   'g',

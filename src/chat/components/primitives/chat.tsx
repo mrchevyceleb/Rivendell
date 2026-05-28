@@ -115,29 +115,61 @@ export function UserMessage({
 // ─────────────────────────────────────────────
 // ToolCall — quoted ledger excerpt
 // ─────────────────────────────────────────────
+function useElapsedSeconds(active: boolean, startedAt: number | undefined): number | null {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!active || !startedAt) return;
+    const id = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [active, startedAt]);
+  if (!active || !startedAt) return null;
+  return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+}
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return `${m}m ${s.toString().padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${(m % 60).toString().padStart(2, '0')}m`;
+}
+
 export function ToolCall({
   tool,
   args,
   result,
   status = 'done',
   running = false,
+  startedAt,
 }: {
   tool: string;
   args?: string;
   result?: string;
   status?: 'done' | string;
   running?: boolean;
+  /** ms epoch when the tool call opened. Used to render a ticking elapsed
+   *  counter while the call is in flight so long-running tools (Agent
+   *  subagents, big greps) visibly show they're still working. */
+  startedAt?: number;
 }) {
+  const elapsed = useElapsedSeconds(running, startedAt);
+  const isSlow = elapsed !== null && elapsed >= 8;
   return (
     <div
       style={{
-        borderLeft: '2px solid var(--rule)',
+        borderLeft: running ? '3px solid var(--ember)' : '2px solid var(--rule)',
         paddingLeft: 14,
         marginTop: 10,
         marginBottom: 10,
         minWidth: 0,
         maxWidth: '100%',
         overflow: 'hidden',
+        background: running ? 'color-mix(in srgb, var(--ember) 6%, transparent)' : undefined,
+        borderRadius: running ? 2 : 0,
+        paddingTop: running ? 6 : 0,
+        paddingBottom: running ? 6 : 0,
+        transition: 'background 200ms ease, border-color 200ms ease',
       }}
     >
       <div
@@ -152,16 +184,42 @@ export function ToolCall({
       >
         <span
           className="sw-smallcaps"
-          style={{ fontSize: 11, color: 'var(--ember)', whiteSpace: 'nowrap' }}
+          style={{
+            fontSize: 11,
+            color: running ? 'var(--ember)' : 'var(--ink-soft)',
+            whiteSpace: 'nowrap',
+            fontWeight: running ? 600 : 400,
+            letterSpacing: '0.08em',
+          }}
         >
           {running ? 'Running' : status === 'done' ? 'Ran' : status}
         </span>
         <span
           className="sw-mono"
-          style={{ color: 'var(--ink-2)', fontSize: 13.5, whiteSpace: 'nowrap' }}
+          style={{
+            color: running ? 'var(--ink)' : 'var(--ink-2)',
+            fontSize: 13.5,
+            whiteSpace: 'nowrap',
+            fontWeight: running ? 600 : 400,
+          }}
         >
           {tool}
         </span>
+        {elapsed !== null && (
+          <span
+            className="sw-mono"
+            style={{
+              fontSize: 12,
+              color: isSlow ? 'var(--ember)' : 'var(--ink-faint)',
+              whiteSpace: 'nowrap',
+              fontVariantNumeric: 'tabular-nums',
+              fontWeight: isSlow ? 600 : 400,
+            }}
+            title={isSlow ? 'Still working — long-running tool calls (Agent, big greps) can take minutes.' : undefined}
+          >
+            · {formatElapsed(elapsed)}
+          </span>
+        )}
         {args && (
           <span
             className="sw-mono"

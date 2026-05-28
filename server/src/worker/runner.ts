@@ -4,6 +4,12 @@ import { WORKER_RUNNER } from '../config.ts';
 import { emitScribe } from './scribe.ts';
 import { dispatchDryRun, type DispatcherResult } from './dispatchers.ts';
 
+// Model + reasoning effort the headless worker spawns claude with. Opus 4.7+ uses
+// adaptive thinking and ignores MAX_THINKING_TOKENS; the live lever is the
+// `--effort` flag (low|medium|high|xhigh|max). "max" is the top tier.
+const CLAUDE_MODEL = 'claude-opus-4-8';
+const CLAUDE_EFFORT = 'max';
+
 export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
   if (WORKER_RUNNER !== 'claude') {
     await emitScribe({ job_id: job.id, level: 'thinking', text: `dry-run dispatcher handling ${job.skill}` });
@@ -20,7 +26,7 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
   await emitScribe({ job_id: job.id, level: 'system', text: `spawning claude worker for ${job.skill}` });
 
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', '--output-format', 'stream-json', '--dangerously-skip-permissions', prompt], {
+    const child = spawn('claude', ['-p', '--output-format', 'stream-json', '--dangerously-skip-permissions', '--model', CLAUDE_MODEL, '--effort', CLAUDE_EFFORT, prompt], {
       cwd: job.repo || process.cwd(),
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],

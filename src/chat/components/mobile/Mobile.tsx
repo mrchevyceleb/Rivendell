@@ -911,6 +911,7 @@ export function MobileConversation({
                 result={b.result}
                 running={b.running}
                 status={b.running ? 'running' : 'done'}
+                startedAt={b.ts}
               />
             </SamMessage>
           );
@@ -945,6 +946,8 @@ export function MobileConversation({
         <div ref={bottomRef} aria-hidden style={{ height: 1 }} />
        </div>
       </div>
+
+      <MobileActiveToolBanner blocks={blocks} streaming={status === 'streaming'} />
 
       {/* Composer */}
       <div
@@ -1647,3 +1650,69 @@ function PChronicleRow({
 
 // Re-export for convenience
 export { CHRONICLE };
+
+function MobileActiveToolBanner({
+  blocks,
+  streaming,
+}: {
+  blocks: import('../../data/types').ChatBlock[];
+  streaming: boolean;
+}) {
+  const last = blocks.length ? blocks[blocks.length - 1] : null;
+  const activeTool =
+    last && last.kind === 'tool' && last.running
+      ? { tool: last.tool, startedAt: last.ts }
+      : null;
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!activeTool) return;
+    const id = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [activeTool?.tool, activeTool?.startedAt]);
+  if (!streaming) return null;
+  const elapsed = activeTool ? Math.max(0, Math.floor((Date.now() - activeTool.startedAt) / 1000)) : null;
+  const label = activeTool ? `running ${activeTool.tool}` : 'thinking';
+  const elapsedLabel = elapsed === null ? '' : ` · ${formatMobileElapsed(elapsed)}`;
+  const isSlow = elapsed !== null && elapsed >= 8;
+  return (
+    <div
+      style={{
+        padding: '5px 12px',
+        background: isSlow
+          ? 'color-mix(in srgb, var(--ember) 10%, var(--vellum))'
+          : 'color-mix(in srgb, var(--ember) 5%, var(--vellum))',
+        borderTop: '1px solid color-mix(in srgb, var(--ember) 25%, transparent)',
+        textAlign: 'center',
+        transition: 'background 200ms ease',
+      }}
+      aria-live="polite"
+    >
+      <span
+        className="sw-smallcaps"
+        style={{
+          fontSize: 10.5,
+          color: isSlow ? 'var(--ember)' : 'var(--ink-soft)',
+          letterSpacing: '0.1em',
+          fontWeight: isSlow ? 600 : 500,
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {label}{elapsedLabel}
+      </span>
+      <span className="sw-thinking" style={{ marginLeft: 8, verticalAlign: 'middle' }}>
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+    </div>
+  );
+}
+
+function formatMobileElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return `${m}m ${s.toString().padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${(m % 60).toString().padStart(2, '0')}m`;
+}

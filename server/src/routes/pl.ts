@@ -11,11 +11,24 @@ async function listTransactions(): Promise<any[]> {
   return data?.transactions ?? [];
 }
 
+function toPlEntry(row: any) {
+  return {
+    id: row.id,
+    label: row.name ?? row.label ?? '(unnamed)',
+    type: row.type,
+    amount: row.amount,
+    account: row.categories?.name ?? row.account ?? '',
+    date: row.date,
+  };
+}
+
 plRouter.get('/', asyncHandler(async (_req, res) => {
   // assistant-mcp's plTracker router uses prefixed action names
   // (plt_list_transactions etc.) and returns { transactions: [...] }.
+  // Map to the frontend PlEntry shape so the Reckoning room renders labels.
   try {
-    res.json(await listTransactions());
+    const rows = await listTransactions();
+    res.json(rows.map(toPlEntry));
   } catch (err: any) {
     res.status(502).json({ error: `pl upstream failed: ${err?.message || 'unknown error'}` });
   }

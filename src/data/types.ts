@@ -3,7 +3,7 @@ export type RoomKey =
   | '/dashboard'
   | '/council'
   | '/tidings'
-  | '/hearth'
+  | '/calendar'
   | '/library'
   | '/pins'
   | '/reckoning'
@@ -68,6 +68,60 @@ export type FamilyItem = {
   amount?: string;
   completed?: boolean;
   updatedAt?: string;
+};
+
+export type CalendarSource = 'primary' | 'workspace2' | string;
+
+export type CalendarEventDate = {
+  date?: string;
+  dateTime?: string;
+  timeZone?: string;
+};
+
+export type CalendarEvent = {
+  id: string;
+  summary?: string;
+  description?: string;
+  location?: string;
+  htmlLink?: string;
+  calendarId?: string;
+  calendarName?: string;
+  account?: string;
+  accountLabel?: string;
+  source?: CalendarSource;
+  color?: string;
+  status?: string;
+  start?: CalendarEventDate;
+  end?: CalendarEventDate;
+  attendees?: Array<{
+    email?: string;
+    displayName?: string;
+    self?: boolean;
+    organizer?: boolean;
+    responseStatus?: string;
+  }>;
+  organizer?: {
+    email?: string;
+    displayName?: string;
+    self?: boolean;
+  };
+  hangoutLink?: string;
+  conferenceData?: {
+    entryPoints?: Array<{
+      entryPointType?: string;
+      uri?: string;
+    }>;
+  };
+};
+
+export type CalendarEventsResponse = {
+  events: CalendarEvent[];
+  range?: {
+    timeMin: string;
+    timeMax: string;
+  };
+  maxResults?: number;
+  truncated?: boolean;
 };
 
 export type LibraryDoc = {

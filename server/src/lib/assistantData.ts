@@ -129,7 +129,7 @@ type AdminCron = {
   updated_at?: string | null;
 };
 
-const DEFAULT_NO_REPO_CWD = '/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB';
+const DEFAULT_NO_REPO_CWD = '/Users/mjohnst/ASSISTANT-HUB';
 const AUTOSAM_SETTINGS_PATH = join(homedir(), 'Library/Application Support/com.mattjohnston.agent-one/settings.json');
 const KIM_PR_REVIEW_REPO_PATH = '/Users/mjohnst/samwise/KG-Apps/r-link-studio-rebuild';
 

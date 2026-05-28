@@ -33,7 +33,7 @@ export function Hearth() {
         subtitle="Todos, bills, debts, budget notes, and meal plans."
         actions={
           <>
-            <Button tone="ghost">
+            <Button tone="ghost" onClick={() => window.location.assign('/?prompt=Add%20a%20bill%20to%20the%20Hearth%20and%20ask%20me%20for%20amount%2C%20due%20date%2C%20and%20owner.')}>
               <WalletCards size={15} />
               Add bill
             </Button>

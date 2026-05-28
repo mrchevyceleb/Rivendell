@@ -73,12 +73,19 @@ server.listen(PORT, HOST, () => {
   console.log(`rivendell listening on http://${HOST}:${PORT}`);
 });
 
-const tearDown = () => {
+const tearDown = (signal: NodeJS.Signals) => {
+  console.warn(`[rivendell] received ${signal}, shutting down (pid=${process.pid}, uptime=${Math.round(process.uptime())}s)`);
   stopWorkerQueue();
   stopChat();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();
 };
 
-process.on('SIGINT', tearDown);
-process.on('SIGTERM', tearDown);
+process.on('SIGINT', () => tearDown('SIGINT'));
+process.on('SIGTERM', () => tearDown('SIGTERM'));
+process.on('uncaughtException', (err) => {
+  console.error('[rivendell] uncaughtException:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[rivendell] unhandledRejection:', reason);
+});

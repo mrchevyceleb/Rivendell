@@ -1,4 +1,5 @@
 import type {
+  CalendarEventsResponse,
   ChronicleEntry,
   CronJob,
   EmailItem,
@@ -19,7 +20,7 @@ export const rooms: Room[] = [
   { key: '/dashboard', name: 'Dashboard', role: 'Today at a glance', icon: 'dashboard' },
   { key: '/council', name: 'The Council', role: 'Task board', icon: 'council' },
   { key: '/tidings', name: 'Tidings', role: 'Unified email inbox', icon: 'tidings' },
-  { key: '/hearth', name: 'Hearth', role: 'Family ops', icon: 'hearth' },
+  { key: '/calendar', name: 'Calendar', role: 'Matt + YPP schedule', icon: 'calendar' },
   { key: '/library', name: 'Library', role: 'Docs and references', icon: 'library' },
   { key: '/pins', name: 'Pins', role: 'Quick notes', icon: 'pins' },
   { key: '/reckoning', name: 'Reckoning', role: 'P&L tracker', icon: 'reckoning' },
@@ -37,6 +38,7 @@ export const tasks: Task[] = [];
 export const emails: EmailItem[] = [];
 export const messages: MessageItem[] = [];
 export const family: FamilyItem[] = [];
+export const calendarEvents: CalendarEventsResponse = { events: [] };
 export const docs: LibraryDoc[] = [];
 export const pins: PinItem[] = [];
 export const plEntries: PlEntry[] = [];

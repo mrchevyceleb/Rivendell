@@ -717,6 +717,15 @@ function Composer({
             type="button"
             className="composer-commands-hint"
             title={`Tool command prefix, type ${commandPrefix} for ${agentName}, $ for Codex`}
+            onClick={() => {
+              const ta = textareaRef.current;
+              if (!ta) return;
+              if (!value.startsWith(commandPrefix)) {
+                setValue(commandPrefix + value);
+              }
+              ta.focus();
+              requestAnimationFrame(() => ta.setSelectionRange(commandPrefix.length, commandPrefix.length));
+            }}
           >
             <TerminalSquare size={14} />
             {commandPrefix} commands

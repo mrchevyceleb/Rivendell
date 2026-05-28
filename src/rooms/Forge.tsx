@@ -55,7 +55,7 @@ const modelLabels: Record<CronAiModel, string> = {
   mandrill: 'Mandrill',
 };
 
-const defaultNoRepoCwd = '/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB';
+const defaultNoRepoCwd = '/Users/mjohnst/ASSISTANT-HUB';
 
 export function Forge() {
   const { data: jobs = [], refetch } = useCronJobs();

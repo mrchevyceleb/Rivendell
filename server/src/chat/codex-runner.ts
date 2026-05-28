@@ -1,10 +1,109 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
+import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
+
+function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  const descendants = child.pid ? collectDescendantPids(child.pid) : [];
+  try { child.kill(signal); } catch {}
+  if (child.pid) {
+    try { process.kill(-child.pid, signal); } catch {}
+  }
+  for (const pid of descendants.reverse()) {
+    try { process.kill(pid, signal); } catch {}
+  }
+}
+
+/** Resolve once the child has fully exited. SIGTERM first; SIGKILL after 3s
+ *  if still alive. Returns immediately if the child is already dead.
+ *  Used by shutdown() so the next `codex exec resume` only starts after the
+ *  prior child has released the rollout JSONL. Without this, steer races
+ *  against the dying child's final writes and the resume reads partial state. */
+async function waitForTreeExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null) return;
+  const exited = new Promise<void>((resolve) => {
+    const done = () => resolve();
+    child.once('exit', done);
+    child.once('error', done);
+  });
+  terminateProcessTree(child, 'SIGTERM');
+  const sigkill = setTimeout(() => {
+    if (child.exitCode === null) terminateProcessTree(child, 'SIGKILL');
+  }, 3000);
+  sigkill.unref();
+  await exited;
+  clearTimeout(sigkill);
+}
+
+function collectDescendantPids(pid: number): number[] {
+  try {
+    const out = execFileSync('/usr/bin/pgrep', ['-P', String(pid)], { encoding: 'utf8', timeout: 1000 });
+    const children = out
+      .split(/\s+/)
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    return children.flatMap((childPid) => [childPid, ...collectDescendantPids(childPid)]);
+  } catch {
+    return [];
+  }
+}
+
+// OneDrive's fileproviderd daemon intermittently holds an exclusive lock on
+// `.codex/config.toml` while syncing, which surfaces in Codex as
+// "Resource deadlock avoided (os error 11)" at startup and kills the turn.
+// We probe the file before spawning so the sync window can clear; reading it
+// from Node also tends to "warm" the placeholder so Codex's own read on the
+// heels of ours succeeds.
+const PROJECT_CONFIG_PROBE_RETRIES = 8;
+const PROJECT_CONFIG_PROBE_DELAY_MS = 250;
+type ProjectConfigProbeResult =
+  | { ok: true }
+  | { ok: false; message: string };
+
+async function probeProjectConfigFile(path: string): Promise<ProjectConfigProbeResult> {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt <= PROJECT_CONFIG_PROBE_RETRIES; attempt += 1) {
+    try {
+      await readFile(path, 'utf8');
+      return { ok: true };
+    } catch (err) {
+      lastErr = err;
+      const code = (err as NodeJS.ErrnoException).code;
+      // ENOENT: no project config — nothing to probe, codex will skip it.
+      if (code === 'ENOENT') return { ok: true };
+      if (!isTransientFileProviderError(err)) {
+        // Any other read failure: log and let codex try anyway.
+        console.warn(`[chat codex] project config probe failed: ${fileProviderErrorMessage(err)}`);
+        return { ok: true };
+      }
+      if (attempt === PROJECT_CONFIG_PROBE_RETRIES) break;
+      await new Promise((r) => setTimeout(
+        r,
+        Math.min(1500, PROJECT_CONFIG_PROBE_DELAY_MS * (attempt + 1)),
+      ));
+    }
+  }
+
+  return {
+    ok: false,
+    message:
+      `OneDrive is still locking ${path} after ${PROJECT_CONFIG_PROBE_RETRIES + 1} read attempts. ` +
+      `Retry in a moment, or move ASSISTANT-HUB off OneDrive. Last error: ${fileProviderErrorMessage(lastErr)}`,
+  };
+}
+
+async function probeProjectConfig(cwd: string): Promise<ProjectConfigProbeResult> {
+  for (const path of [join(cwd, '.codex', 'config.toml'), join(cwd, '.codex', 'hooks.json')]) {
+    const result = await probeProjectConfigFile(path);
+    if (!result.ok) return result;
+  }
+  return { ok: true };
+}
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -20,6 +119,7 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
+type CodexSessionOptions = { recoverContextOnNextTurn?: boolean };
 type ToolUseBlock = { index: number; toolUseId: string };
 type CodexUsage = {
   input_tokens: number;
@@ -38,6 +138,8 @@ const CODEX_TURN_PREAMBLE = [
   '<samwise-codex-runtime>',
   'When you run shell commands that may take more than a few seconds or need polling, use exec_command with tty=true. This includes gh run watch, dev servers, test watchers, and other watch or follow commands.',
   'If you see "stdin is closed for this session", rerun the command with tty=true.',
+  'When searching files, use `rg` or `rg --files` with scoped paths and exclusions for `node_modules`, `.git`, build output, and CloudStorage sync trees. Do not run broad recursive `grep` or `find` over `/Users/mjohnst`, `~/samwise`, or ASSISTANT-HUB.',
+  'Give spawned subagents the same search constraint before asking them to inspect code.',
   '</samwise-codex-runtime>',
 ].join('\n');
 
@@ -51,12 +153,39 @@ const imageExtension = (mediaType: string): string => {
 };
 
 const CODEX_TRACING_LINE = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+(ERROR|WARN|INFO|DEBUG|TRACE)\s+[\w_]+(?:::[\w_]+)*:/;
+const CODEX_PROJECT_CONFIG_ERROR = /(config\.toml|hooks\.json|project config|error loading config)/i;
 
 function isIgnorableCodexStderr(line: string): boolean {
   if (/Reading additional input from stdin/i.test(line)) return true;
   if (/failed to record rollout items/i.test(line)) return true;
   if (/write_stdin failed: stdin is closed for this session/i.test(line)) return true;
   return CODEX_TRACING_LINE.test(line);
+}
+
+function recapSnippet(text: string, max = 700): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  return `${flat.slice(0, max - 32)} ... [truncated ${flat.length - max + 32} chars]`;
+}
+
+function stringifyToolResultContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item: any) => {
+        if (item?.type === 'text' && typeof item.text === 'string') return item.text;
+        if (typeof item === 'string') return item;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (content == null) return '';
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
 }
 
 export class CodexSession {
@@ -70,17 +199,25 @@ export class CodexSession {
   private busy = false;
   private dead = false;
   private currentChild: ChildProcess | null = null;
+  /** Set by shutdown() before the SIGTERM so the in-flight send()'s exit
+   *  handler knows not to emit a stray result/turnEnd — the steer/stop
+   *  caller is driving the next state itself. */
+  private intentionalKill = false;
   private eventLog: SeqEvent[] = [];
   private nextSeq = 1;
   private lastActivityAtMs = Date.now();
+  private recoverContextOnNextTurn = false;
+  private threadIdWrite: Promise<void> = Promise.resolve();
+  private cancellationEmitted = false;
   /** Codex doesn't need a warmup turn — ready immediately. */
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
-  constructor(cwd: string, chatId: string, threadId: string | null) {
+  constructor(cwd: string, chatId: string, threadId: string | null, opts: CodexSessionOptions = {}) {
     this.cwd = cwd;
     this.chatId = chatId;
     this.key = keyOf(cwd, chatId);
     this.threadId = threadId;
+    this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
 
     // Mirror the claude path: rehydrate eventLog from disk so a server
     // restart between turns doesn't strand a reconnecting client whose
@@ -96,6 +233,16 @@ export class CodexSession {
       }
     } catch (err) {
       console.warn(`[chat codex] event-log restore failed for ${this.key}:`, (err as Error).message);
+    }
+    if (!this.threadId) {
+      const restoredThreadId = latestThreadIdFromEvents(this.eventLog);
+      if (restoredThreadId) {
+        void this.persistThreadId(restoredThreadId);
+        console.warn(`[chat codex] restored missing thread id ${restoredThreadId} from event log for ${this.key}`);
+      } else if (this.eventLog.length > 0) {
+        this.recoverContextOnNextTurn = true;
+        console.warn(`[chat codex] no saved thread id for ${this.key}; will recover context from event log on next turn`);
+      }
     }
     void compactEventLog(this.key);
   }
@@ -144,11 +291,150 @@ export class CodexSession {
     return this.lastActivityAtMs;
   }
 
-  shutdown(): void {
+  /** Async so steering can await the child's full exit (SIGKILL fallback at
+   *  3s) before the next `codex exec resume` spawns. Without the await, the
+   *  dying child's final writes to the rollout JSONL race the resume read. */
+  async shutdown(): Promise<void> {
+    if (this.dead) return;
+    const shouldEmitCancellation = this.busy;
     this.dead = true;
-    if (this.currentChild) {
-      try { this.currentChild.kill('SIGTERM'); } catch {}
+    const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog);
+    if (latestThreadId) {
+      await this.persistThreadId(latestThreadId);
     }
+    const child = this.currentChild;
+    if (child && child.exitCode === null) {
+      this.intentionalKill = true;
+      await waitForTreeExit(child);
+    }
+    await this.threadIdWrite.catch(() => undefined);
+    if (shouldEmitCancellation) this.emitCancellationTurnEnd();
+  }
+
+  private persistThreadId(threadId: string): Promise<void> {
+    this.threadId = threadId;
+    this.threadIdWrite = this.threadIdWrite.then(
+      () => setSessionId('codex', this.cwd, threadId, this.chatId),
+      () => setSessionId('codex', this.cwd, threadId, this.chatId),
+    );
+    return this.threadIdWrite;
+  }
+
+  private emitCancellationTurnEnd(): void {
+    if (this.cancellationEmitted) return;
+    this.cancellationEmitted = true;
+    this.busy = false;
+    this.currentChild = null;
+    this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
+    this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+  }
+
+  private buildTranscriptRecap(): string {
+    type Turn = { role: 'user' | 'assistant'; text: string };
+    const turns: Turn[] = [];
+    const openText = new Map<number, string>();
+    const openTools = new Map<number, { name: string; input: string }>();
+    let pendingAssistant = '';
+
+    const flushAssistant = () => {
+      const finalChunks = Array.from(openText.values());
+      openText.clear();
+      const trailing = finalChunks.join('').trim();
+      const body = (pendingAssistant + (trailing ? `\n${trailing}` : '')).trim();
+      pendingAssistant = '';
+      if (body) turns.push({ role: 'assistant', text: body });
+    };
+
+    for (const se of this.eventLog) {
+      const wrapper = se.ev;
+      if (wrapper.type !== 'event') continue;
+      const ev = (wrapper as { type: 'event'; event: any }).event;
+      if (!ev || typeof ev !== 'object') continue;
+
+      if (ev.type === '_user_echo' && typeof ev.text === 'string') {
+        flushAssistant();
+        const trimmed = ev.text.trim();
+        if (trimmed) turns.push({ role: 'user', text: trimmed });
+        continue;
+      }
+
+      if (ev.type === 'stream_event' && ev.event && typeof ev.event === 'object') {
+        const inner = ev.event as { type?: unknown; index?: unknown; delta?: any; content_block?: any };
+        if (inner.type === 'message_start') {
+          flushAssistant();
+          continue;
+        }
+        if (inner.type === 'content_block_start' && typeof inner.index === 'number') {
+          if (inner.content_block?.type === 'text') {
+            openText.set(inner.index, '');
+          } else if (inner.content_block?.type === 'tool_use') {
+            const name = typeof inner.content_block.name === 'string' ? inner.content_block.name : 'tool';
+            openTools.set(inner.index, { name, input: '' });
+          }
+          continue;
+        }
+        if (inner.type === 'content_block_delta' && typeof inner.index === 'number') {
+          if (inner.delta?.type === 'text_delta' && typeof inner.delta.text === 'string') {
+            if (openText.has(inner.index)) {
+              openText.set(inner.index, (openText.get(inner.index) ?? '') + inner.delta.text);
+            }
+          } else if (
+            inner.delta?.type === 'input_json_delta' &&
+            typeof inner.delta.partial_json === 'string' &&
+            openTools.has(inner.index)
+          ) {
+            const tool = openTools.get(inner.index);
+            if (tool) tool.input += inner.delta.partial_json;
+          }
+          continue;
+        }
+        if (inner.type === 'content_block_stop' && typeof inner.index === 'number') {
+          const text = openText.get(inner.index);
+          if (text != null) {
+            pendingAssistant += text ? `${text}\n` : '';
+            openText.delete(inner.index);
+            continue;
+          }
+          const tool = openTools.get(inner.index);
+          if (tool) {
+            pendingAssistant += `[tool ${tool.name}${tool.input ? `: ${recapSnippet(tool.input, 300)}` : ''}]\n`;
+            openTools.delete(inner.index);
+          }
+        }
+        continue;
+      }
+
+      if (ev.type === 'user' && Array.isArray(ev.message?.content)) {
+        for (const item of ev.message.content as Array<any>) {
+          if (item?.type !== 'tool_result') continue;
+          const content = recapSnippet(stringifyToolResultContent(item.content), 700);
+          if (content) pendingAssistant += `[tool result: ${content}]\n`;
+        }
+      }
+    }
+    flushAssistant();
+
+    const kept: Turn[] = [];
+    let budget = 12_000;
+    const perTurnOverhead = 48;
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i];
+      const cost = turn.text.length + perTurnOverhead;
+      if (cost > budget) {
+        const keepChars = Math.max(0, budget - perTurnOverhead);
+        if (keepChars > 0) kept.unshift({ role: turn.role, text: turn.text.slice(-keepChars) });
+        break;
+      }
+      budget -= cost;
+      kept.unshift(turn);
+    }
+
+    if (kept.length === 0) return '';
+    return [
+      'Rivendell had to continue a Codex chat without a saved Codex thread id.',
+      'The JSON array below contains visible prior turns plus summarized tool activity. Treat it as partial working memory, then answer the user message that follows.',
+      JSON.stringify(kept, null, 2),
+    ].join('\n');
   }
 
   async send(text: string, images?: ChatImage[]): Promise<void> {
@@ -160,11 +446,28 @@ export class CodexSession {
       return;
     }
     this.busy = true;
+    this.cancellationEmitted = false;
+    const recoverContextThisTurn = this.recoverContextOnNextTurn;
+    const preTurnRecap = recoverContextThisTurn ? this.buildTranscriptRecap() : '';
     // Echo for reconnect replay (codex's events don't re-emit the user prompt).
     this.emit({
       type: 'event',
       event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
     });
+
+    try {
+      assertMemoryAvailableForSpawn('codex');
+    } catch (error) {
+      this.busy = false;
+      this.emit({
+        type: 'error',
+        code: error instanceof MemoryPressureSpawnError ? error.code : undefined,
+        retryable: true,
+        message: (error as Error).message,
+      });
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
 
     let imageTempDir: string | null = null;
     const cleanupImages = () => {
@@ -192,7 +495,17 @@ export class CodexSession {
       return;
     }
 
-    const prompt = `${CODEX_TURN_PREAMBLE}\n\n${text}`;
+    const effectiveText = preTurnRecap ? `${preTurnRecap}\n\n${text}` : text;
+    if (preTurnRecap) {
+      this.recoverContextOnNextTurn = false;
+      this.emit({
+        type: 'event',
+        event: { type: '_context_recovered', chars: preTurnRecap.length, ts: Date.now() },
+      });
+    } else if (recoverContextThisTurn) {
+      this.recoverContextOnNextTurn = false;
+    }
+    const prompt = `${CODEX_TURN_PREAMBLE}\n\n${effectiveText}`;
     const args: string[] = this.threadId
       ? [
           'exec',
@@ -211,9 +524,31 @@ export class CodexSession {
           prompt,
         ];
 
+    // Wait for OneDrive to release its sync lock on .codex/config.toml so
+    // codex's own read at startup doesn't fail with EDEADLK and kill the turn.
+    const configProbe = await probeProjectConfig(this.cwd);
+    if (!configProbe.ok) {
+      cleanupImages();
+      this.busy = false;
+      this.emit({
+        type: 'error',
+        code: 'CODEX_PROJECT_CONFIG_LOCKED',
+        retryable: true,
+        message: configProbe.message,
+      });
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
+    if (this.dead) {
+      cleanupImages();
+      this.emitCancellationTurnEnd();
+      return;
+    }
+
     const child = spawn('codex', args, {
       cwd: this.cwd,
       env: process.env,
+      detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.currentChild = child;
@@ -227,6 +562,21 @@ export class CodexSession {
       usage: null,
     };
     const stderrChunks: string[] = [];
+    let transientProjectConfigError: string | null = null;
+
+    const rememberTransientProjectConfigError = (text: string) => {
+      if (!isTransientFileProviderError(text) || !CODEX_PROJECT_CONFIG_ERROR.test(text)) return false;
+      transientProjectConfigError =
+        'OneDrive locked Codex project config while Codex was starting. ' +
+        `Retry in a moment, or move ASSISTANT-HUB off OneDrive. Last error: ${text}`;
+      this.emit({
+        type: 'error',
+        code: 'CODEX_PROJECT_CONFIG_LOCKED',
+        retryable: true,
+        message: transientProjectConfigError,
+      });
+      return true;
+    };
 
     let buf = '';
     child.stdout.setEncoding('utf8');
@@ -257,6 +607,7 @@ export class CodexSession {
         const text = raw.trim();
         if (!text) continue;
         if (isIgnorableCodexStderr(text)) continue;
+        if (rememberTransientProjectConfigError(text)) continue;
         stderrChunks.push(text);
         this.emit({ type: 'error', message: text });
       }
@@ -269,7 +620,16 @@ export class CodexSession {
       this.busy = false;
       this.currentChild = null;
       cleanupImages();
-      this.closeDanglingToolBlocks(turnState, code, stderrChunks.join('\n').trim());
+      // Intentional kill (shutdown driven by steer/stop): the WS register
+      // layer is already binding a new session and emitting its own turnStart.
+      // A result/turnEnd from this dying turn would race that and dirty the
+      // transcript.
+      if (this.intentionalKill) return;
+      const stderrText = stderrChunks.join('\n').trim();
+      if (code !== 0 && !transientProjectConfigError && rememberTransientProjectConfigError(stderrText)) {
+        stderrChunks.length = 0;
+      }
+      this.closeDanglingToolBlocks(turnState, code, transientProjectConfigError ?? stderrText);
       // Emit a result event so the front-end flips status back to 'ready'.
       // Forward codex's per-turn token usage (captured from `turn.completed`)
       // mapped to claude's field names so the same client-side meter works.
@@ -281,7 +641,7 @@ export class CodexSession {
         usage: turnState.usage ?? undefined,
       });
       if (this.threadId) {
-        await setSessionId('codex', this.cwd, this.threadId, this.chatId);
+        await this.persistThreadId(this.threadId);
       }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
@@ -322,7 +682,7 @@ export class CodexSession {
 
     // Capture the thread id for resume on later turns.
     if (ev.type === 'thread.started' && typeof ev.thread_id === 'string') {
-      this.threadId = ev.thread_id;
+      void this.persistThreadId(ev.thread_id);
       this.emitClaudeEvent({
         type: 'system',
         subtype: 'init',
@@ -489,6 +849,28 @@ function keyOf(cwd: string, chatId = 'main'): string {
   return normalized === 'main' ? `codex|${cwd}` : `codex|${cwd}|${normalized}`;
 }
 
+function latestThreadIdFromEvents(events: SeqEvent[]): string | null {
+  let threadId: string | null = null;
+  for (const se of events) {
+    const ev = se.ev;
+    if (ev.type === 'turnEnd' && typeof ev.sessionId === 'string') {
+      threadId = ev.sessionId;
+      continue;
+    }
+    if (ev.type !== 'event') continue;
+    const inner = ev.event;
+    if (!inner || typeof inner !== 'object') continue;
+    if (inner.type === 'system' && inner.subtype === 'init' && typeof inner.session_id === 'string') {
+      threadId = inner.session_id;
+      continue;
+    }
+    if (inner.type === 'result' && typeof inner.session_id === 'string') {
+      threadId = inner.session_id;
+    }
+  }
+  return threadId;
+}
+
 /** Manager keyed by cwd + chat id, matching the claude session map. */
 const codexSessions = new Map<string, CodexSession>();
 
@@ -516,7 +898,10 @@ export function pruneIdleCodexSessions(ttlMs: number, now = Date.now()): number 
     if (session.isBusy()) continue;
     if (session.listenerCount() > 0) continue;
     if (now - session.lastActivityAt() < ttlMs) continue;
-    session.shutdown();
+    // Idle reaper: no listeners, not busy, so we can fire-and-forget the
+    // SIGTERM. We don't need to await the child exit here — there's no
+    // racing resume to worry about.
+    void session.shutdown();
     codexSessions.delete(key);
     pruned += 1;
   }
@@ -537,18 +922,22 @@ export async function getOrCreateCodexSession(opts: { repoPath: string; chatId?:
 }
 
 export function shutdownAllCodexSessions(): void {
-  for (const s of codexSessions.values()) s.shutdown();
+  // Process-exit path: fire-and-forget the SIGTERM. Node will reap children
+  // as the event loop drains.
+  for (const s of codexSessions.values()) void s.shutdown();
   codexSessions.clear();
 }
 
-/** Kill the in-flight codex child but keep the thread id saved for resume. */
-export function interruptCodex(opts: { repoPath: string; chatId?: string }): void {
+/** Kill the in-flight codex child and wait for it to fully exit before
+ *  returning. Caller (steer/stop) needs the await so the next `codex exec
+ *  resume` doesn't race the dying child's writes to the rollout JSONL. */
+export async function interruptCodex(opts: { repoPath: string; chatId?: string }): Promise<void> {
   const cwd = opts.repoPath;
   const key = keyOf(cwd, opts.chatId || 'main');
   const s = codexSessions.get(key);
   if (s) {
-    s.shutdown();
     codexSessions.delete(key);
+    await s.shutdown();
   }
 }
 
@@ -559,8 +948,8 @@ export async function freshStartCodex(opts: { repoPath: string; chatId?: string 
   const key = keyOf(cwd, chatId);
   const existing = codexSessions.get(key);
   if (existing) {
-    existing.shutdown();
     codexSessions.delete(key);
+    await existing.shutdown();
   }
   await setSessionId('codex', cwd, '', chatId);
   const session = new CodexSession(cwd, chatId, null);

@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, parse } from 'node:path';
-import { BANANA_COMMANDS_DIR, CLAUDE_COMMANDS_DIR, CODEX_SKILLS_DIR } from './config.ts';
+import { ASSISTANT_HUB_PATH, BANANA_COMMANDS_DIR, CLAUDE_COMMANDS_DIR, CODEX_SKILLS_DIR } from './config.ts';
 
 export type CommandEntry = {
   name: string;
@@ -14,24 +14,27 @@ export type CommandCatalog = {
   banana: CommandEntry[];
 };
 
-async function markdownCommands(dir: string): Promise<CommandEntry[]> {
-  let files: string[] = [];
+async function markdownCommands(dir: string, prefix: string[] = []): Promise<CommandEntry[]> {
+  let files: Array<{ name: string; isFile(): boolean; isDirectory(): boolean }> = [];
   try {
-    files = await readdir(dir);
+    files = await readdir(dir, { withFileTypes: true });
   } catch {
     return [];
   }
 
   const entries = await Promise.all(
     files
-      .filter((file) => file.endsWith('.md'))
+      .filter((file) => !file.name.startsWith('.'))
       .map(async (file) => {
-        const name = parse(file).name;
-        const body = await readFile(join(dir, file), 'utf8').catch(() => '');
-        return commandEntry(name, body);
+        const path = join(dir, file.name);
+        if (file.isDirectory()) return markdownCommands(path, [...prefix, file.name]);
+        if (!file.isFile() || !file.name.endsWith('.md')) return [];
+        const name = [...prefix, parse(file.name).name].join(':');
+        const body = await readFile(path, 'utf8').catch(() => '');
+        return [commandEntry(name, body)];
       }),
   );
-  return entries.sort(sortCommands);
+  return entries.flat().sort(sortCommands);
 }
 
 async function skillCommands(dir: string): Promise<CommandEntry[]> {
@@ -51,6 +54,17 @@ async function skillCommands(dir: string): Promise<CommandEntry[]> {
       }),
   );
   return entries.sort(sortCommands);
+}
+
+function mergeCommandEntries(...groups: CommandEntry[][]): CommandEntry[] {
+  const byName = new Map<string, CommandEntry>();
+  for (const group of groups) {
+    for (const command of group) {
+      const key = command.name.toLowerCase();
+      if (!byName.has(key)) byName.set(key, command);
+    }
+  }
+  return Array.from(byName.values()).sort(sortCommands);
 }
 
 function commandEntry(name: string, body: string): CommandEntry {
@@ -89,10 +103,15 @@ function sortCommands(a: CommandEntry, b: CommandEntry): number {
 }
 
 export async function readCommands(): Promise<CommandCatalog> {
-  const [claude, codex, banana] = await Promise.all([
+  const [claude, codex, banana, assistantHubProject] = await Promise.all([
     markdownCommands(CLAUDE_COMMANDS_DIR),
     skillCommands(CODEX_SKILLS_DIR),
     markdownCommands(BANANA_COMMANDS_DIR),
+    markdownCommands(join(ASSISTANT_HUB_PATH, '.claude', 'commands')),
   ]);
-  return { claude, codex, banana };
+  return {
+    claude,
+    codex,
+    banana: mergeCommandEntries(assistantHubProject, claude, banana),
+  };
 }

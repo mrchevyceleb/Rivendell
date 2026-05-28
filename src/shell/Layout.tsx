@@ -19,7 +19,7 @@ type LayoutProps = {
   children: React.ReactNode;
 };
 
-const primaryMobile = ['/', '/dashboard', '/council', '/pins'] as RoomKey[];
+const primaryMobile = ['/', '/dashboard', '/calendar', '/council'] as RoomKey[];
 const roomByKey: Record<RoomKey, Room> = rooms.reduce((map, room) => {
   map[room.key] = room;
   return map;

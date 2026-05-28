@@ -73,11 +73,18 @@ export function Reckoning() {
         subtitle="A thin view over the existing plTracker tools."
         actions={
           <>
-            <Button tone="ghost">
+            <Button tone="ghost" onClick={() => window.open('/api/pl/export.csv', '_blank')}>
               <Download size={15} />
               Export
             </Button>
-            <Button tone="gold">
+            <Button
+              tone="gold"
+              onClick={() =>
+                window.location.assign(
+                  '/?prompt=Add%20a%20P%26L%20entry%20to%20the%20Reckoning%20and%20ask%20me%20for%20date%2C%20type%2C%20amount%2C%20and%20category.',
+                )
+              }
+            >
               <Plus size={15} />
               Add entry
             </Button>

@@ -11,6 +11,7 @@ import {
   freshStart,
   getOrCreateSession,
   interruptSession,
+  MemoryPressureSpawnError,
   pruneIdleClaudeSessions,
   shutdownAllSessions,
   type AnySession,
@@ -86,6 +87,37 @@ function normalizeChatId(value: unknown): string {
   return safe || DEFAULT_CHAT_ID;
 }
 
+type DispatchSeqEvent = { seq: number; ev: any };
+
+function isBananaTaggedError(se: DispatchSeqEvent): boolean {
+  if (se.ev?.type !== 'error') return false;
+  return typeof se.ev.code === 'string' && se.ev.code.startsWith('BANANA_');
+}
+
+function isSuccessfulResult(se: DispatchSeqEvent): boolean {
+  const event = se.ev?.type === 'event' ? se.ev.event : null;
+  return event?.type === 'result' && event.is_error === false;
+}
+
+function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
+  let lastSuccessSeq = -1;
+  for (const se of events) {
+    if (isSuccessfulResult(se)) lastSuccessSeq = se.seq;
+  }
+
+  let latestUnresolvedBananaErrorSeq = -1;
+  for (const se of events) {
+    if (se.seq > lastSuccessSeq && isBananaTaggedError(se)) {
+      latestUnresolvedBananaErrorSeq = se.seq;
+    }
+  }
+
+  return events.filter((se) => {
+    if (!isBananaTaggedError(se)) return true;
+    return se.seq === latestUnresolvedBananaErrorSeq;
+  });
+}
+
 export async function registerChat(app: express.Express, server: Server): Promise<() => void> {
   await ensureStateDir();
 
@@ -132,6 +164,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
       return;
     }
     const chatId = normalizeChatId(body.chatId);
+    const peer = (req.headers['x-forwarded-for'] as string | undefined)
+      ?? req.socket?.remoteAddress ?? '?';
+    console.warn(`[chat http] interrupt from ${peer} cli=${cli} repo=${body.repo} chatId=${chatId}`);
     await interruptSession({ cli, repoPath: body.repo, chatId });
     res.json({ ok: true, chatId });
   });
@@ -206,19 +241,30 @@ export async function registerChat(app: express.Express, server: Server): Promis
       unsubscribe = null;
     };
 
-    const dispatch = (se: { seq: number; ev: any }) => {
+    const dispatch = (se: DispatchSeqEvent) => {
       const sev = se.ev;
       if (sev.type === 'event') {
         safeSend({ type: 'stream', event: sev.event, seq: se.seq });
+      } else if (sev.type === 'turnStart') {
+        busy = true;
+        safeSend({ type: 'turnStart', seq: se.seq });
       } else if (sev.type === 'turnEnd') {
         busy = false;
         safeSend({ type: 'turnEnd', sessionId: sev.sessionId, seq: se.seq });
       } else if (sev.type === 'error') {
-        // Only surface stderr/spawn errors during an active turn. Idle CLI
-        // chatter (death-rattle warnings, harmless deprecation notices) used
-        // to flash a red banner in the chat for no good reason.
-        if (busy) {
-          safeSend({ type: 'error', message: sev.message, seq: se.seq });
+        // Only surface stderr/spawn errors during an active turn. Banana turn
+        // failures are tagged so a reconnect can replay them even after the
+        // backend already marked the turn ended; plain idle chatter stays
+        // suppressed.
+        const code = typeof sev.code === 'string' ? sev.code : '';
+        if (busy || code.startsWith('BANANA_')) {
+          safeSend({
+            type: 'error',
+            message: sev.message,
+            code: sev.code,
+            retryable: sev.retryable,
+            seq: se.seq,
+          });
         } else {
           console.log(`[chat ws#${wsId}] swallowed idle stderr: ${String(sev.message).slice(0, 200)}`);
         }
@@ -244,7 +290,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
       sessionPromise = promise;
       const session = await promise;
       unsubscribe?.();
-      unsubscribe = session.subscribe(dispatch, sinceSeq);
+      const replay: DispatchSeqEvent[] = [];
+      let replaying = sinceSeq >= 0;
+      const listener = (se: DispatchSeqEvent) => {
+        if (replaying) {
+          replay.push(se);
+          return;
+        }
+        dispatch(se);
+      };
+      unsubscribe = session.subscribe(listener, sinceSeq);
+      if (replaying) {
+        replaying = false;
+        for (const se of filterReplayEvents(replay)) dispatch(se);
+      }
       return session;
     };
 
@@ -313,6 +372,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'freshStart') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          console.warn(`[chat ws#${wsId}] freshStart from ${peer} cli=${msg.cli} repo=${msg.repo} chatId=${chatId}`);
           detachCurrentSession();
           const session = await bindSession(freshStart({ cli: msg.cli, repoPath: msg.repo, chatId }));
           cliKind = msg.cli;
@@ -325,6 +385,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'stop') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          console.warn(`[chat ws#${wsId}] stop from ${peer} cli=${msg.cli} repo=${msg.repo} chatId=${chatId}`);
           detachCurrentSession();
           await interruptSession({ cli: msg.cli, repoPath: msg.repo, chatId });
           safeSend({ type: 'turnEnd' });
@@ -334,6 +395,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'steer') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          console.warn(`[chat ws#${wsId}] steer from ${peer} cli=${msg.cli} repo=${msg.repo} chatId=${chatId}`);
           detachCurrentSession();
           await interruptSession({ cli: msg.cli, repoPath: msg.repo, chatId });
           const session = await bindSession(getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId }));
@@ -383,7 +445,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
         }
       } catch (error) {
         busy = false;
-        safeSend({ type: 'error', message: (error as Error).message });
+        if (error instanceof MemoryPressureSpawnError) {
+          console.warn(`[chat ws#${wsId}] memory-pressure spawn refused: ${error.message}`);
+          safeSend({
+            type: 'error',
+            code: error.code,
+            retryable: true,
+            message: error.message,
+          });
+        } else {
+          safeSend({ type: 'error', message: (error as Error).message });
+        }
         safeSend({ type: 'turnEnd' });
       }
     });

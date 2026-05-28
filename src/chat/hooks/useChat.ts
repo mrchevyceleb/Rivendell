@@ -118,13 +118,13 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
   if (ev.type === 'content_block_stop') {
     const idx: number = ev.index;
     const turnId = turnIdRef.current;
-    return blocks.map((b) => {
+    return blocks.flatMap((b) => {
       if (b.kind !== 'text' && b.kind !== 'tool') return b;
       if (b.cbIndex !== idx || b.turnId !== turnId) return b;
       if (b.kind === 'tool') {
-        return { ...b, args: prettifyJson(b.args), open: false };
+        return [{ ...b, args: prettifyJson(b.args), open: false }];
       }
-      return { ...b, open: false };
+      return [{ ...b, open: false }];
     });
   }
 
@@ -190,6 +190,19 @@ function summarize(s: string): string {
   return `${firstLine.slice(0, 80)}…`;
 }
 
+function isLegacyCompactionSummaryText(text: string): boolean {
+  const lower = text.trimStart().toLowerCase();
+  if (!lower.startsWith('<summary>')) return false;
+  return (
+    lower.includes('primary request and intent') ||
+    lower.includes('key technical concepts') ||
+    lower.includes('files and code sections') ||
+    lower.includes('current work') ||
+    lower.includes('pending tasks') ||
+    lower.includes('optional next step')
+  );
+}
+
 function conversationKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   const normalized = chatId || 'main';
   return normalized === 'main'
@@ -213,11 +226,14 @@ function readStoredBlocks(cli: CompanionId, repoPath: string, chatId = 'main'): 
 }
 
 function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
-  return blocks.slice(-200).map((block) => {
-    if (block.kind !== 'user' || !block.images?.length) return block;
-    const { images: _images, ...rest } = block;
-    return { ...rest, imageCount: block.imageCount ?? block.images.length };
-  });
+  return blocks
+    .filter((block) => !(block.kind === 'text' && isLegacyCompactionSummaryText(block.text)))
+    .slice(-200)
+    .map((block) => {
+      if (block.kind !== 'user' || !block.images?.length) return block;
+      const { images: _images, ...rest } = block;
+      return { ...rest, imageCount: block.imageCount ?? block.images.length };
+    });
 }
 
 function writeStoredState(cli: CompanionId, repoPath: string, chatId: string, blocks: ChatBlock[], seq: number): void {
@@ -248,7 +264,8 @@ function readStoredSeq(cli: CompanionId, repoPath: string, chatId = 'main'): num
 
 function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
   let maxSeen = 0;
-  for (const block of blocks) {
+  const visibleBlocks = blocks.filter((block) => !(block.kind === 'text' && isLegacyCompactionSummaryText(block.text)));
+  for (const block of visibleBlocks) {
     const blockMatch = /^b(\d+)$/.exec(block.id);
     if (blockMatch) maxSeen = Math.max(maxSeen, Number(blockMatch[1]));
     if ('turnId' in block && block.turnId) {
@@ -259,7 +276,7 @@ function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
   if (maxSeen >= nextId) nextId = maxSeen + 1;
 
   const seen = new Set<string>();
-  return blocks.map((block) => {
+  return visibleBlocks.map((block) => {
     if (!seen.has(block.id)) {
       seen.add(block.id);
       return block;

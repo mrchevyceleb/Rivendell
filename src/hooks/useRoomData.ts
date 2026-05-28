@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
-import { hallSummary } from '../data/mock';
+import { calendarEvents, hallSummary } from '../data/mock';
 import type {
+  CalendarEventsResponse,
   ChronicleEntry,
   CronJob,
   EmailItem,
@@ -31,6 +32,7 @@ const emptyTasks: Task[] = [];
 const emptyEmails: EmailItem[] = [];
 const emptyMessages: MessageItem[] = [];
 const emptyFamily: FamilyItem[] = [];
+const emptyCalendarEvents: CalendarEventsResponse = calendarEvents;
 const emptyDocs: LibraryDoc[] = [];
 const emptyPins: PinItem[] = [];
 const emptyPlEntries: PlEntry[] = [];
@@ -48,11 +50,17 @@ const emptyScribeEvents: ScribeEvent[] = [];
  * errored, so consumers using `data ?? empty` get a clean shape without any
  * fake content.
  */
-function roomQuery<T>(key: string[], path: string, empty: T) {
+function roomQuery<T>(
+  key: string[],
+  path: string,
+  empty: T,
+  options?: { retry?: number | boolean },
+) {
   const result = useQuery({
     queryKey: key,
     queryFn: () => apiJson<T>(path),
     staleTime,
+    ...(options?.retry !== undefined ? { retry: options.retry } : {}),
   });
   return { ...result, data: result.data ?? empty };
 }
@@ -72,11 +80,17 @@ export function useEmails() {
 }
 
 export function useMessages() {
-  return roomQuery<MessageItem[]>(['messages'], '/api/messages', emptyMessages);
+  // Upstream MCP `messages` tool isn't built yet — the route returns 502 by
+  // design. Skip retries so the failure surfaces once instead of 4×.
+  return roomQuery<MessageItem[]>(['messages'], '/api/messages', emptyMessages, { retry: false });
 }
 
 export function useFamily() {
   return roomQuery<FamilyItem[]>(['family'], '/api/family', emptyFamily);
+}
+
+export function useCalendarEvents() {
+  return roomQuery<CalendarEventsResponse>(['calendar'], '/api/calendar', emptyCalendarEvents);
 }
 
 export function useDocs() {

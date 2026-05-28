@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Annals } from './rooms/Annals';
+import { Calendar } from './rooms/Calendar';
 import { Council } from './rooms/Council';
 import { Dashboard } from './rooms/Dashboard';
 import { Forge } from './rooms/Forge';
 import { Hall } from './rooms/Hall';
-import { Hearth } from './rooms/Hearth';
 import { Library } from './rooms/Library';
 import { Pins } from './rooms/Pins';
 import { Reckoning } from './rooms/Reckoning';
@@ -19,12 +19,15 @@ import type { RoomKey } from './data/types';
 
 const queryClient = new QueryClient();
 const roomKeys = new Set(rooms.map((room) => room.key));
+const removedRoomRedirects: Partial<Record<string, RoomKey>> = {
+  '/hearth': '/calendar',
+};
 const TABS_KEY = 'rivendell:room-tabs';
 const ACTIVE_TAB_KEY = 'rivendell:room-active-tab';
 
-function readPath(): RoomKey {
-  const path = window.location.pathname as RoomKey;
-  return roomKeys.has(path) ? path : '/';
+function resolvePath(path: string): { room: RoomKey; canonical: boolean } {
+  if (roomKeys.has(path as RoomKey)) return { room: path as RoomKey, canonical: true };
+  return { room: removedRoomRedirects[path] ?? '/', canonical: false };
 }
 
 function readTabs(initial: RoomKey): RoomKey[] {
@@ -63,14 +66,13 @@ function readStoredActiveTab(tabs: RoomKey[]): RoomKey | null {
 // landed on a typo'd URL or `/` after a deep-link reset).
 function readInitial(): { tabs: RoomKey[]; active: RoomKey; urlValid: boolean } {
   const rawPath = window.location.pathname;
-  const urlValid = roomKeys.has(rawPath as RoomKey);
-  if (urlValid) {
-    const validPath = rawPath as RoomKey;
-    return { tabs: readTabs(validPath), active: validPath, urlValid: true };
+  const resolved = resolvePath(rawPath);
+  if (resolved.canonical) {
+    return { tabs: readTabs(resolved.room), active: resolved.room, urlValid: true };
   }
-  const tabs = readTabs('/');
+  const tabs = readTabs(resolved.room);
   const stored = readStoredActiveTab(tabs);
-  const active = stored ?? tabs[0] ?? '/';
+  const active = removedRoomRedirects[rawPath] ?? stored ?? tabs[0] ?? '/';
   return { tabs, active, urlValid: false };
 }
 
@@ -82,8 +84,8 @@ function RoomSwitch({ active }: { active: RoomKey }) {
       return <Dashboard />;
     case '/tidings':
       return <Tidings />;
-    case '/hearth':
-      return <Hearth />;
+    case '/calendar':
+      return <Calendar />;
     case '/library':
       return <Library />;
     case '/pins':
@@ -144,9 +146,13 @@ export default function App() {
 
   useEffect(() => {
     const onPop = () => {
-      const next = readPath();
+      const resolved = resolvePath(window.location.pathname);
+      const next = resolved.room;
       setTabs((prev) => (prev.includes(next) ? prev : [...prev, next]));
       setActive(next);
+      if (!resolved.canonical && window.location.pathname !== next) {
+        window.history.replaceState({}, '', next);
+      }
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);

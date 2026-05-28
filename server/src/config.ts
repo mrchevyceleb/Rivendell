@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fileProviderErrorMessage, isTransientFileProviderError } from './lib/fileProvider.ts';
 
 export const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -11,15 +12,39 @@ export const STATE_DIR = process.env.RIVENDELL_STATE_DIR || join(homedir(), '.ri
 export const STATIC_DIR = process.env.RIVENDELL_STATIC_DIR || resolve(APP_ROOT, 'dist');
 export const ELROND_WORKSPACE_PATH =
   process.env.ELROND_WORKSPACE_PATH ||
-  join(homedir(), 'Library', 'CloudStorage', 'OneDrive-Personal', 'Documents', 'ASSISTANT-HUB');
+  join(homedir(), 'ASSISTANT-HUB');
 
 export const ASSISTANT_MCP_ENV_PATH =
   process.env.ASSISTANT_MCP_ENV_PATH ||
   join(ELROND_WORKSPACE_PATH, 'assistant-mcp', 'server', '.env');
 
+// OneDrive's fileproviderd intermittently locks files under
+// ~/Library/CloudStorage/OneDrive-Personal/* — readFileSync then throws
+// EAGAIN / EDEADLK / EBUSY and crashes the whole server before it even gets
+// to bind a port. KeepAlive then restarts us into the same crash. Retry the
+// read with a short backoff so a sync race doesn't kill the startup.
+function readFileWithLockRetry(path: string): string | null {
+  if (!existsSync(path)) return null;
+  let lastErr: NodeJS.ErrnoException | null = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      return readFileSync(path, 'utf8');
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      lastErr = e;
+      if (!isTransientFileProviderError(err)) throw err;
+      const wait = 100 * (attempt + 1);
+      const end = Date.now() + wait;
+      while (Date.now() < end) { /* busy-wait — startup, no event loop yet */ }
+    }
+  }
+  console.warn(`[config] readFileWithLockRetry gave up on ${path}: ${fileProviderErrorMessage(lastErr)}`);
+  return null;
+}
+
 function dotenvValue(key: string): string {
-  if (!existsSync(ASSISTANT_MCP_ENV_PATH)) return '';
-  const text = readFileSync(ASSISTANT_MCP_ENV_PATH, 'utf8');
+  const text = readFileWithLockRetry(ASSISTANT_MCP_ENV_PATH);
+  if (!text) return '';
   const match = text.match(new RegExp(`^${key}=([^\\n\\r]*)`, 'm'));
   if (!match) return '';
   return match[1].trim().replace(/^["']|["']$/g, '');
@@ -27,9 +52,10 @@ function dotenvValue(key: string): string {
 
 function railwayCliToken(): string {
   const path = join(homedir(), '.railway', 'config.json');
-  if (!existsSync(path)) return '';
+  const raw = readFileWithLockRetry(path);
+  if (!raw) return '';
   try {
-    const data = JSON.parse(readFileSync(path, 'utf8'));
+    const data = JSON.parse(raw);
     return data?.user?.token || '';
   } catch {
     return '';

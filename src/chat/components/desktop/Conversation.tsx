@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { SamPortrait, Dinkus, Chip } from '../primitives/atoms';
 import {
   SamMessage,
@@ -249,6 +250,8 @@ export function Conversation({
         </div>
       </div>
 
+      <ActiveToolBanner blocks={blocks} streaming={status === 'streaming'} />
+
       <div
         style={{
           padding: '18px 0 26px',
@@ -321,10 +324,74 @@ function renderBlocks(blocks: ChatBlock[]) {
           result={b.result}
           running={b.running}
           status={b.running ? 'running' : 'done'}
+          startedAt={b.ts}
         />
       </SamMessage>
     );
   });
+}
+
+function ActiveToolBanner({ blocks, streaming }: { blocks: ChatBlock[]; streaming: boolean }) {
+  // Find the most recent block. If it's a still-running tool, show it. We
+  // intentionally don't search the whole history — a closed tool followed by
+  // new text means the agent is back to talking, and the banner should fade.
+  const last = blocks.length ? blocks[blocks.length - 1] : null;
+  const activeTool =
+    last && last.kind === 'tool' && last.running
+      ? { tool: last.tool, startedAt: last.ts }
+      : null;
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!activeTool) return;
+    const id = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [activeTool?.tool, activeTool?.startedAt]);
+  if (!streaming) return null;
+  const elapsed = activeTool ? Math.max(0, Math.floor((Date.now() - activeTool.startedAt) / 1000)) : null;
+  const label = activeTool ? `running ${activeTool.tool}` : 'thinking';
+  const elapsedLabel = elapsed === null ? '' : ` · ${formatElapsedShort(elapsed)}`;
+  const isSlow = elapsed !== null && elapsed >= 8;
+  return (
+    <div
+      style={{
+        padding: '6px 0',
+        background: isSlow
+          ? 'color-mix(in srgb, var(--ember) 10%, var(--vellum))'
+          : 'color-mix(in srgb, var(--ember) 5%, var(--vellum))',
+        borderTop: '1px solid color-mix(in srgb, var(--ember) 25%, transparent)',
+        textAlign: 'center',
+        transition: 'background 200ms ease',
+      }}
+      aria-live="polite"
+    >
+      <span
+        className="sw-smallcaps"
+        style={{
+          fontSize: 11,
+          color: isSlow ? 'var(--ember)' : 'var(--ink-soft)',
+          letterSpacing: '0.1em',
+          fontWeight: isSlow ? 600 : 500,
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {label}{elapsedLabel}
+      </span>
+      <span className="sw-thinking" style={{ marginLeft: 10, verticalAlign: 'middle' }}>
+        <span></span>
+        <span></span>
+        <span></span>
+      </span>
+    </div>
+  );
+}
+
+function formatElapsedShort(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return `${m}m ${s.toString().padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${(m % 60).toString().padStart(2, '0')}m`;
 }
 
 function ContextMeter({

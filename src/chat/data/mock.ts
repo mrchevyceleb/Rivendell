@@ -19,7 +19,7 @@ export const COMPANIONS: Companion[] = [
 
 // Used as a placeholder before /api/repos resolves, and for the mobile SETUP fallback.
 export const ASSISTANT_HUB: Repo = {
-  path: '/Users/mjohnst/Library/CloudStorage/OneDrive-Personal/Documents/ASSISTANT-HUB',
+  path: '/Users/mjohnst/ASSISTANT-HUB',
   name: 'ASSISTANT-HUB',
   branch: 'master',
   hub: 'The Hub',

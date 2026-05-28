@@ -1,16 +1,22 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readdir, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { createOpencodeClient } from '@opencode-ai/sdk/v2';
-import type { Event, PermissionRuleset } from '@opencode-ai/sdk/v2';
+import type { Event, PermissionRequest, PermissionRuleset } from '@opencode-ai/sdk/v2';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
-import { BANANA_COMMANDS_DIR, BANANA_GLOBAL_INSTRUCTIONS_HTML } from './config.ts';
+import {
+  ASSISTANT_HUB_PATH,
+  BANANA_COMMANDS_DIR,
+  BANANA_DIR,
+  BANANA_GLOBAL_INSTRUCTIONS_FILE,
+  CLAUDE_COMMANDS_DIR,
+} from './config.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -35,6 +41,27 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
+type BananaSessionOptions = { recoverContextOnNextTurn?: boolean };
+type BananaSendOptions = {
+  model?: string;
+  hidden?: boolean;
+  autoContinueDepth?: number;
+  blockedSearchContinueDepth?: number;
+};
+type GmailSideEffectAction = 'gmail_send' | 'gmail_reply';
+type ApprovedGmailDraft = {
+  from: string;
+  to: string[];
+  subject: string;
+  body: string;
+};
+type GmailSideEffectCall = {
+  action: GmailSideEffectAction;
+  account?: string;
+  to?: string[];
+  subject?: string;
+  body?: string;
+};
 type BananaUsage = {
   input_tokens: number;
   cache_read_input_tokens: number;
@@ -59,6 +86,16 @@ type PartRecord = {
    *  repeated/replayed final snapshot for the same partID cannot recreate it
    *  with emittedLen 0 and re-emit the whole answer as a duplicate block. */
   closed: boolean;
+  /** Text blocks start pending so we can classify and hide opencode compact
+   *  summaries before a literal `<summary>` block leaks into the UI. */
+  hidden?: boolean;
+  pendingText?: string;
+  /** Tool-only metadata. `emittedLen` tracks emitted input_json_delta length for tools. */
+  toolUseId?: string;
+  toolName?: string;
+  approvedGmailSideEffect?: boolean;
+  /** Redacted JSON string used only for UI/log display, never model context. */
+  inputText?: string;
 };
 type BananaTurnState = {
   messageId: string;
@@ -79,8 +116,22 @@ type BananaTurnState = {
    *  the window between this turn's state being created and its prompt being
    *  accepted, and would fake-complete the turn before the real answer streams. */
   promptAccepted: boolean;
+  /** True when this prompt was prepended with an event-log recovery recap. */
+  recoveryRecapUsed: boolean;
   /** True once this turn has actually emitted or observed a tool_use part. */
   sawToolUse: boolean;
+  /** True if the current opencode assistant message emitted visible text/tool content. */
+  currentMessageVisibleContent: boolean;
+  /** True if the current opencode assistant message was just an internal compact summary. */
+  currentMessageHiddenCompactionSummary: boolean;
+  /** Model id to reuse if an internal compact summary consumes the turn. */
+  model?: string;
+  /** Prevent runaway auto-continue loops if a model keeps compacting. */
+  autoContinueDepth: number;
+  /** Prevent retry loops if a model keeps launching the same broad search. */
+  blockedSearchContinueDepth: number;
+  /** Single-use approval for a recently displayed email draft. */
+  gmailApprovedDraft: ApprovedGmailDraft | null;
   usage: BananaUsage | null;
   done: boolean;
   /** Tear-down for this turn's image temp dir. Carried on the turn (not the
@@ -134,7 +185,8 @@ function resolveBananaBin(): string {
 }
 
 const BANANA_GLOBAL_COMMANDS_LINK = join(homedir(), '.config', 'banana', 'commands');
-const BANANA_GLOBAL_INSTRUCTIONS_LINK = join(homedir(), '.bananacode', '.banana.md');
+const BANANA_HOME_LINK = join(homedir(), '.bananacode');
+const BANANA_GLOBAL_INSTRUCTIONS_LINK = join(BANANA_HOME_LINK, '.banana.md');
 
 async function ensureSymlink(linkPath: string, targetPath: string, label: string): Promise<void> {
   const target = await lstat(targetPath).catch(() => null);
@@ -182,7 +234,16 @@ async function ensureSymlink(linkPath: string, targetPath: string, label: string
 
 async function ensureBananaGlobalInstructionsLinked(): Promise<void> {
   try {
-    await ensureSymlink(BANANA_GLOBAL_INSTRUCTIONS_LINK, BANANA_GLOBAL_INSTRUCTIONS_HTML, 'Banana global instructions');
+    await ensureSymlink(BANANA_HOME_LINK, BANANA_DIR, 'Banana home');
+    const target = await lstat(BANANA_GLOBAL_INSTRUCTIONS_FILE).catch(() => null);
+    if (!target) {
+      console.warn(`[banana-runner] Banana global instructions missing at ${BANANA_GLOBAL_INSTRUCTIONS_FILE}`);
+      return;
+    }
+    const visible = await lstat(BANANA_GLOBAL_INSTRUCTIONS_LINK).catch(() => null);
+    if (!visible) {
+      await ensureSymlink(BANANA_GLOBAL_INSTRUCTIONS_LINK, BANANA_GLOBAL_INSTRUCTIONS_FILE, 'Banana global instructions');
+    }
   } catch (err) {
     console.warn(`[banana-runner] could not link Banana global instructions: ${(err as Error).message}`);
   }
@@ -199,30 +260,279 @@ async function ensureBananaCommandsLinked(): Promise<void> {
 type BananaSlashCommand = {
   command: string;
   arguments: string;
+  body: string;
+  sourcePath: string;
 };
 
-async function findBananaCommandName(input: string): Promise<string | null> {
+type SlashCommandSource = {
+  name: string;
+  path: string;
+  label: string;
+};
+
+function slashCommandDirs(cwd: string): Array<{ dir: string; label: string }> {
+  const dirs = [
+    { dir: join(cwd, '.claude', 'commands'), label: 'project Claude command' },
+    { dir: join(ASSISTANT_HUB_PATH, '.claude', 'commands'), label: 'ASSISTANT-HUB Claude command' },
+    { dir: CLAUDE_COMMANDS_DIR, label: 'shared Claude command' },
+    { dir: BANANA_COMMANDS_DIR, label: 'Banana command' },
+  ];
+  const seen = new Set<string>();
+  return dirs.filter(({ dir }) => {
+    const normalized = resolve(dir);
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+async function listMarkdownCommandSources(dir: string, label: string, prefix: string[] = []): Promise<SlashCommandSource[]> {
+  let files: Array<{ name: string; isFile(): boolean; isDirectory(): boolean }> = [];
   try {
-    const files = await readdir(BANANA_COMMANDS_DIR, { withFileTypes: true });
-    const lower = input.toLowerCase();
-    for (const file of files) {
-      if (!file.isFile() || !file.name.endsWith('.md')) continue;
-      const command = file.name.slice(0, -3);
-      if (command.toLowerCase() === lower) return command;
+    files = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const out: SlashCommandSource[] = [];
+  for (const file of files) {
+    if (file.name.startsWith('.')) continue;
+    const path = join(dir, file.name);
+    if (file.isDirectory()) {
+      out.push(...await listMarkdownCommandSources(path, label, [...prefix, file.name]));
+      continue;
     }
-  } catch {}
+    if (!file.isFile() || !file.name.endsWith('.md')) continue;
+    out.push({
+      name: [...prefix, file.name.slice(0, -3)].join(':'),
+      path,
+      label,
+    });
+  }
+  return out;
+}
+
+function commandNameMatches(input: string, command: string): boolean {
+  const lowerInput = input.toLowerCase();
+  const lowerCommand = command.toLowerCase();
+  return lowerInput === lowerCommand || lowerInput === lowerCommand.replace(/:/g, '/');
+}
+
+async function findMarkdownCommand(input: string, cwd: string): Promise<SlashCommandSource | null> {
+  for (const { dir, label } of slashCommandDirs(cwd)) {
+    const commands = await listMarkdownCommandSources(dir, label);
+    for (const command of commands) {
+      if (commandNameMatches(input, command.name)) {
+        return command;
+      }
+    }
+  }
   return null;
 }
 
-async function parseBananaSlashCommand(text: string): Promise<BananaSlashCommand | null> {
-  const match = text.trimStart().match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)(?:\s+([\s\S]*))?$/);
+async function readSlashCommand(input: string, cwd: string): Promise<SlashCommandSource & { body: string } | null> {
+  const found = await findMarkdownCommand(input, cwd);
+  if (!found) return null;
+  try {
+    return { ...found, body: await readFile(found.path, 'utf8') };
+  } catch (err) {
+    console.warn(`[chat banana] failed to read slash command ${found.path}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+async function parseBananaSlashCommand(text: string, cwd: string): Promise<BananaSlashCommand | null> {
+  const match = text.trimStart().match(/^\/([A-Za-z0-9][A-Za-z0-9_:/-]*)(?:\s+([\s\S]*))?$/);
   if (!match) return null;
-  const command = await findBananaCommandName(match[1]);
+  const command = await readSlashCommand(match[1], cwd);
   if (!command) return null;
   return {
-    command,
+    command: command.name,
     arguments: match[2] ?? '',
+    body: command.body,
+    sourcePath: command.path,
   };
+}
+
+function expandBananaSlashCommand(command: BananaSlashCommand): string {
+  const args = command.arguments.trim();
+  return [
+    `Matt invoked /${command.command}. Execute the slash command instructions below as the active task.`,
+    `Command source: ${command.sourcePath}`,
+    '',
+    '<slash-command>',
+    command.body.trim(),
+    '</slash-command>',
+    '',
+    '<command-args>',
+    args || '(none)',
+    '</command-args>',
+    '',
+    'Important: external side effects remain draft/review-first. For email, show the full draft with From, To, Subject, and Body, then wait for Matt to explicitly approve in a later message before sending.',
+  ].join('\n');
+}
+
+function normalizeActionName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function toolInputRecord(input: unknown): Record<string, unknown> {
+  if (isRecord(input)) return input;
+  if (typeof input !== 'string') return {};
+  try {
+    const parsed = JSON.parse(input);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function emailAddressesFrom(value: unknown): string[] | undefined {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[;,]/) : [];
+  const addresses = raw
+    .flatMap((item) => {
+      const text = String(item).trim();
+      const angle = text.match(/<([^>]+)>/);
+      const candidate = (angle ? angle[1] : text).trim();
+      const email = candidate.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? candidate;
+      return email ? [email] : [];
+    })
+    .map((item) => item.toLowerCase())
+    .filter(Boolean)
+    .sort();
+  return addresses.length ? Array.from(new Set(addresses)) : undefined;
+}
+
+function normalizeDraftBody(text: string): string {
+  return text.replace(/\r\n/g, '\n').trim();
+}
+
+function sameString(a: string | undefined, b: string | undefined): boolean {
+  return typeof a === 'string' && typeof b === 'string' && a.trim() === b.trim();
+}
+
+function sameEmailList(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (!a?.length || !b?.length || a.length !== b.length) return false;
+  return a.every((item, index) => item === b[index]);
+}
+
+function sameBody(a: string | undefined, b: string | undefined): boolean {
+  return typeof a === 'string' && typeof b === 'string' && normalizeDraftBody(a) === normalizeDraftBody(b);
+}
+
+function extractEmailDraft(text: string): ApprovedGmailDraft | null {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const fields: Partial<ApprovedGmailDraft & { toRaw: string }> = {};
+  let bodyLine = -1;
+  let bodyPrefix = '';
+
+  for (const [index, line] of lines.entries()) {
+    const match = line.match(/^\s*(?:[-*]\s*)?\*{0,2}(from|to|subject|body)\s*:\*{0,2}\s*(.*)$/i);
+    if (!match) continue;
+    const field = match[1].toLowerCase();
+    const value = match[2] ?? '';
+    if (field === 'body') {
+      bodyLine = index;
+      bodyPrefix = value;
+      break;
+    }
+    if (field === 'from' && !fields.from) fields.from = value.trim().toLowerCase();
+    if (field === 'to' && !fields.toRaw) fields.toRaw = value.trim();
+    if (field === 'subject' && !fields.subject) fields.subject = value.trim();
+  }
+
+  if (bodyLine < 0) return null;
+  const from = emailAddressesFrom(fields.from)?.[0];
+  const to = emailAddressesFrom(fields.toRaw);
+  const body = normalizeDraftBody([bodyPrefix, ...lines.slice(bodyLine + 1)].join('\n'));
+  if (!from || !to?.length || !fields.subject || !body) return null;
+  return { from, to, subject: fields.subject, body };
+}
+
+function gmailSideEffectAction(toolName: string, input: unknown): GmailSideEffectAction | null {
+  const tool = normalizeActionName(toolName);
+  if (tool.endsWith('gmailsend')) return 'gmail_send';
+  if (tool.endsWith('gmailreply')) return 'gmail_reply';
+
+  const inputRecord = toolInputRecord(input);
+  const action = typeof inputRecord.action === 'string' ? normalizeActionName(inputRecord.action) : '';
+  if (tool.includes('gmail') || tool.includes('mail')) {
+    if (action === 'gmailsend' || action === 'send') return 'gmail_send';
+    if (action === 'gmailreply' || action === 'reply') return 'gmail_reply';
+  }
+
+  return null;
+}
+
+function gmailSideEffectCall(toolName: string, input: unknown): GmailSideEffectCall | null {
+  const action = gmailSideEffectAction(toolName, input);
+  if (!action) return null;
+  const inputRecord = toolInputRecord(input);
+  const params = isRecord(inputRecord.params) ? inputRecord.params : inputRecord;
+  return {
+    action,
+    account: stringValue(params.account ?? params.from_account ?? params.from)?.toLowerCase(),
+    to: emailAddressesFrom(params.to),
+    subject: stringValue(params.subject),
+    body: stringValue(params.body),
+  };
+}
+
+function approvedDraftMatchesCall(draft: ApprovedGmailDraft, call: GmailSideEffectCall): boolean {
+  if (!sameString(draft.from, call.account)) return false;
+  if (!sameBody(draft.body, call.body)) return false;
+  if (call.action === 'gmail_reply') {
+    return call.subject === undefined || sameString(draft.subject, call.subject);
+  }
+  return sameEmailList(draft.to, call.to) && sameString(draft.subject, call.subject);
+}
+
+function gmailSideEffectBlockMessage(toolName: string, input: unknown, approvedDraft: ApprovedGmailDraft | null): string | null {
+  const call = gmailSideEffectCall(toolName, input);
+  if (!call) return null;
+  if (approvedDraft && approvedDraftMatchesCall(approvedDraft, call)) return null;
+  const label = call.action === 'gmail_reply' ? 'reply' : 'send';
+  const mismatch = approvedDraft
+    ? 'The attempted Gmail payload does not match the approved draft.'
+    : 'No matching approved draft was found for this Gmail payload.';
+  return [
+    `Banana blocked a Gmail ${label}.`,
+    'Email sends/replies require a previously displayed full draft with From, To, Subject, and Body, plus Matt\'s explicit approval in a later message.',
+    mismatch,
+    'Draft it for review instead.',
+  ].join(' ');
+}
+
+function gmailSideEffectPermissionMessage(request: PermissionRequest, approvedDraft: ApprovedGmailDraft | null): string | null {
+  const permission = String(request.permission ?? '');
+  const direct = gmailSideEffectBlockMessage(permission, request.metadata, approvedDraft);
+  if (direct) return direct;
+  for (const pattern of request.patterns ?? []) {
+    const fromPattern = gmailSideEffectBlockMessage(pattern, request.metadata, approvedDraft);
+    if (fromPattern) return fromPattern;
+  }
+  return null;
+}
+
+function isExplicitEmailApprovalText(text: string): boolean {
+  if (/\b(?:don't|do not|dont|not yet|wait|hold|stop|cancel|no)\b/i.test(text)) return false;
+  return /\b(?:send it|send this|send that|send the (?:email|draft)|send email|please send|approved|approve|looks good|go ahead|yes|yep|ok|okay|ship it)\b/i.test(text);
+}
+
+function hasEmailDraftField(text: string, field: string, valuePattern = ''): boolean {
+  const re = new RegExp(`(^|\\n)\\s*(?:[-*]\\s*)?\\*{0,2}${field}\\s*:\\*{0,2}\\s*${valuePattern}`, 'i');
+  return re.test(text);
+}
+
+function looksLikeEmailDraftText(text: string): boolean {
+  return hasEmailDraftField(text, 'from', '.*@')
+    && hasEmailDraftField(text, 'to', '.*@')
+    && hasEmailDraftField(text, 'subject', '\\S')
+    && hasEmailDraftField(text, 'body');
 }
 
 const CONFIGURED_SERVE_PORT = configuredServePort();
@@ -699,6 +1009,39 @@ function readClaudeMcpServers(projectPathHint?: string): Record<string, BananaMc
   return merged;
 }
 
+/** Stable signature for an inline Banana config. The actual config passed to
+ *  `banana serve` is left untouched — only the comparison key is canonicalized
+ *  so semantically identical configs with shuffled key order (Claude rewriting
+ *  ~/.claude.json, OpenRouter returning models in a new order) don't trigger
+ *  a serve restart and wipe every chat's context. */
+function canonicalConfigSignature(inlineConfig: string | null): string {
+  if (!inlineConfig) return '';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inlineConfig);
+  } catch {
+    // Unparseable input falls back to the raw string — better to over-restart
+    // than to silently treat two genuinely different blobs as equal.
+    return inlineConfig;
+  }
+  return canonicalJson(parsed);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return '[' + value.map((item) => canonicalJson(item)).join(',') + ']';
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJson(obj[k])).join(',') + '}';
+  }
+  return JSON.stringify(String(value));
+}
+
 /** Inline JSON config that overrides Banana's `openrouter` provider to route
  *  through the monkey-models proxy. Passed to `banana serve` as
  *  BANANA_CONFIG_CONTENT.
@@ -826,6 +1169,321 @@ export function parseModel(modelId: string | undefined): { providerID: string; m
   };
 }
 
+function isSecretLikeKey(key: string): boolean {
+  return /(?:key|token|secret|password|pass|authorization|bearer|credential|cookie|session)/i.test(key);
+}
+
+function looksLikeOpaqueToken(value: string): boolean {
+  if (value.length < 48) return false;
+  if (/^https?:\/\//i.test(value)) return false;
+  return /^[A-Za-z0-9._~+=-]+$/.test(value);
+}
+
+function redactToolText(text: string): string {
+  return text
+    .replace(/([A-Z_][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASS)[A-Z0-9_]*=)(?:"[^"]*"|'[^']*'|[^"'`\s]+)/gi, '$1<redacted>')
+    .replace(/((?:--|-)(?:api-?)?key|(?:--|-)?token|(?:--|-)?secret|(?:--|-)?password)(=|\s+)(?:"[^"]*"|'[^']*'|[^"'`\s]+)/gi, '$1$2<redacted>')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1<redacted>')
+    .replace(/("(?:api[_-]?key|token|secret|password|authorization|bearer|cookie)"\s*:\s*")([^"]+)(")/gi, '$1<redacted>$3')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<redacted-jwt>')
+    .replace(/\b(?:sk|ghp|github_pat|glpat|dop|dpl|rk)_[A-Za-z0-9_=-]{20,}\b/g, '<redacted-token>')
+    .replace(/\b[A-Za-z0-9+/=_-]{64,}\b/g, '<redacted-token>');
+}
+
+function redactToolValue(value: unknown, keyHint = ''): unknown {
+  if (typeof value === 'string') {
+    if (isSecretLikeKey(keyHint) || looksLikeOpaqueToken(value)) return '<redacted>';
+    return redactToolText(value);
+  }
+  if (Array.isArray(value)) return value.map((item) => redactToolValue(item, keyHint));
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactToolValue(child, key);
+    }
+    return out;
+  }
+  return value;
+}
+
+function stringifyToolInput(input: unknown): string {
+  if (input === undefined) return '';
+  try {
+    return JSON.stringify(redactToolValue(input));
+  } catch {
+    return JSON.stringify(redactToolText(String(input)));
+  }
+}
+
+function isMeaningfulToolInput(inputText: string): boolean {
+  return inputText !== '' && inputText !== '{}' && inputText !== 'null';
+}
+
+function normalizeGuardPath(value: string, baseCwd = process.cwd()): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  const expanded = trimmed
+    .replace(/^~(?=$|[\\/])/, homedir())
+    .replace(/^\$HOME(?=$|[\\/])/, homedir());
+  return stripTrailingPathSlash(isAbsolute(expanded) ? resolve(expanded) : resolve(baseCwd, expanded));
+}
+
+function stripTrailingPathSlash(value: string): string {
+  if (value === '/') return value;
+  return value.replace(/[\\/]+$/, '');
+}
+
+function sameGuardPath(a: string, b: string, baseCwd = process.cwd()): boolean {
+  return normalizeGuardPath(a, baseCwd).toLowerCase() === normalizeGuardPath(b).toLowerCase();
+}
+
+function guardedSearchRoots(): Array<{ path: string; label: string }> {
+  return [
+    { path: homedir(), label: 'home directory' },
+    { path: join(homedir(), 'samwise'), label: '~/samwise workspace hub' },
+    { path: ASSISTANT_HUB_PATH, label: 'ASSISTANT-HUB root' },
+  ];
+}
+
+function guardedSearchRulePatterns(): string[] {
+  const raw = guardedSearchRoots().flatMap((root) => [
+    root.path,
+    stripTrailingPathSlash(root.path) + '/',
+  ]);
+  raw.push('~', '~/', '$HOME', '$HOME/');
+  return Array.from(new Set(raw));
+}
+
+function looksPathLikeSearchToken(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed === '*'
+    || trimmed === '.*'
+    || trimmed === '.'
+    || trimmed === '..'
+    || trimmed.includes('/')
+    || trimmed.includes('\\')
+    || trimmed.startsWith('~')
+    || trimmed.startsWith('$HOME');
+}
+
+function guardPathCandidates(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  const candidates = [trimmed];
+  if (/[*?[{]/.test(trimmed) && looksPathLikeSearchToken(trimmed)) {
+    candidates.push(globRootCandidate(trimmed));
+  }
+  return Array.from(new Set(candidates.filter(Boolean)));
+}
+
+function broadSearchPathReason(value: string, baseCwd = process.cwd()): string | null {
+  for (const candidate of guardPathCandidates(value)) {
+    const normalized = normalizeGuardPath(candidate, baseCwd);
+    if (!normalized) continue;
+    for (const root of guardedSearchRoots()) {
+      if (sameGuardPath(normalized, root.path)) {
+        return `${value} resolves to the ${root.label}`;
+      }
+    }
+  }
+  return null;
+}
+
+function collectPathLikeValues(value: unknown, keyHint = ''): string[] {
+  if (typeof value === 'string') {
+    if (/(?:^|_)(?:path|paths|dir|directory|cwd|root)(?:$|_)/i.test(keyHint)) return [value];
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectPathLikeValues(item, keyHint));
+  }
+  if (!value || typeof value !== 'object') return [];
+  const out: string[] = [];
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    out.push(...collectPathLikeValues(child, key));
+  }
+  return out;
+}
+
+function collectStringValuesForKey(value: unknown, targetKey: string): string[] {
+  if (!value || typeof value !== 'object') return [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectStringValuesForKey(item, targetKey));
+  const out: string[] = [];
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key.toLowerCase() === targetKey.toLowerCase() && typeof child === 'string') out.push(child);
+    out.push(...collectStringValuesForKey(child, targetKey));
+  }
+  return out;
+}
+
+function globRootCandidate(pattern: string): string {
+  const trimmed = pattern.trim();
+  if (!trimmed) return '';
+  const globIndex = trimmed.search(/[*?[{]/);
+  if (globIndex < 0) return trimmed;
+  const prefix = trimmed.slice(0, globIndex);
+  const slashIndex = Math.max(prefix.lastIndexOf('/'), prefix.lastIndexOf('\\'));
+  if (slashIndex < 0) return '.';
+  return prefix.slice(0, slashIndex + 1) || '/';
+}
+
+function shellishTokens(command: string): string[] {
+  const tokens: string[] = [];
+  const re = /"((?:\\"|[^"])*)"|'([^']*)'|([^\s;&|()<>]+)/g;
+  for (const match of command.matchAll(re)) {
+    tokens.push((match[1] ?? match[2] ?? match[3] ?? '').replace(/\\"/g, '"'));
+  }
+  return tokens;
+}
+
+function commandUsesRecursiveSearch(command: string): boolean {
+  return /\b(?:grep|egrep|fgrep|find)\b/i.test(command);
+}
+
+function toolCwd(input: unknown, fallbackCwd: string): string {
+  if (!input || typeof input !== 'object') return fallbackCwd;
+  const cwd = (input as Record<string, unknown>).cwd;
+  return typeof cwd === 'string' && cwd.trim() ? normalizeGuardPath(cwd, fallbackCwd) : fallbackCwd;
+}
+
+function unsafeShellSearchReason(command: string, baseCwd: string): string | null {
+  if (!commandUsesRecursiveSearch(command)) return null;
+  for (const token of shellishTokens(command)) {
+    const reason = broadSearchPathReason(token, baseCwd);
+    if (reason) return `shell search command targets ${reason}`;
+  }
+  return null;
+}
+
+function commandFromToolInput(input: unknown): string {
+  if (!input || typeof input !== 'object') return '';
+  const command = (input as Record<string, unknown>).command;
+  return typeof command === 'string' ? command : '';
+}
+
+function unsafeBananaToolReason(toolName: string, input: unknown, fallbackCwd: string): string | null {
+  const tool = toolName.toLowerCase();
+  const baseCwd = toolCwd(input, fallbackCwd);
+  if (tool === 'bash') {
+    const command = commandFromToolInput(input);
+    const cwdReason = broadSearchPathReason(baseCwd);
+    if (cwdReason && commandUsesRecursiveSearch(command)) return `shell search command runs from ${cwdReason}`;
+    return command ? unsafeShellSearchReason(command, baseCwd) : null;
+  }
+  if (!['grep', 'glob', 'list'].includes(tool)) return null;
+  const paths = collectPathLikeValues(input);
+  for (const path of paths) {
+    const reason = broadSearchPathReason(path, baseCwd);
+    if (reason) return `${toolName} tool targets ${reason}`;
+  }
+  let hasExplicitSearchScope = paths.length > 0;
+  if (tool === 'glob') {
+    const patterns = collectStringValuesForKey(input, 'pattern');
+    hasExplicitSearchScope = hasExplicitSearchScope || patterns.length > 0;
+    for (const pattern of patterns) {
+      const reason = broadSearchPathReason(globRootCandidate(pattern), baseCwd);
+      if (reason) return `${toolName} tool pattern targets ${reason}`;
+    }
+  }
+  if (!hasExplicitSearchScope) {
+    const cwdReason = broadSearchPathReason('.', baseCwd);
+    if (cwdReason) return `${toolName} tool runs from ${cwdReason}`;
+  }
+  return null;
+}
+
+function unsafeBananaToolMessage(toolName: string, input: unknown, fallbackCwd: string): string | null {
+  const reason = unsafeBananaToolReason(toolName, input, fallbackCwd);
+  if (!reason) return null;
+  return [
+    `Banana blocked an unsafe broad search before it could stall: ${reason}.`,
+    'Narrow the path to the current repo or a specific subdirectory, or use `rg`/`rg --files` with explicit exclusions.',
+  ].join(' ');
+}
+
+function unsafePermissionRequestMessage(request: PermissionRequest, fallbackCwd: string): string | null {
+  const permission = String(request.permission ?? '').toLowerCase();
+  const baseCwd = toolCwd(request.metadata, fallbackCwd);
+  if (permission === 'bash') {
+    for (const pattern of request.patterns ?? []) {
+      const cwdReason = broadSearchPathReason(baseCwd);
+      if (cwdReason && commandUsesRecursiveSearch(pattern)) {
+        return `Banana rejected an unsafe permission request: shell search command runs from ${cwdReason}.`;
+      }
+      const reason = unsafeShellSearchReason(pattern, baseCwd);
+      if (reason) return `Banana rejected an unsafe permission request: ${reason}.`;
+    }
+  }
+  if (['grep', 'glob', 'list'].includes(permission)) {
+    const candidates = [
+      ...(request.patterns ?? []),
+      ...collectPathLikeValues(request.metadata),
+    ];
+    for (const candidate of candidates) {
+      const reason = broadSearchPathReason(candidate, baseCwd);
+      if (reason) return `Banana rejected an unsafe ${permission} permission request: ${reason}.`;
+    }
+    if (permission === 'glob') {
+      for (const pattern of request.patterns ?? []) {
+        const reason = broadSearchPathReason(globRootCandidate(pattern), baseCwd);
+        if (reason) return `Banana rejected an unsafe glob permission request: ${reason}.`;
+      }
+      for (const pattern of collectStringValuesForKey(request.metadata, 'pattern')) {
+        const reason = broadSearchPathReason(globRootCandidate(pattern), baseCwd);
+        if (reason) return `Banana rejected an unsafe glob permission request: ${reason}.`;
+      }
+    }
+  }
+  const reason = unsafeBananaToolReason(permission, request.metadata, fallbackCwd);
+  return reason ? `Banana rejected an unsafe permission request: ${reason}.` : null;
+}
+
+function truncateToolText(text: string, max = 1200): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 32)}\n... [truncated ${text.length - max + 32} chars]`;
+}
+
+function normalizedCompactionCandidate(text: string): string {
+  return text.trimStart().toLowerCase();
+}
+
+const COMPACTION_SUMMARY_OPEN = '<summary>';
+const COMPACTION_SUMMARY_CLOSE = '</summary>';
+
+type SummaryPrefix =
+  | { status: 'open' }
+  | { status: 'closed'; endIndex: number; trailing: string };
+
+function parseSummaryPrefix(text: string): SummaryPrefix | null {
+  const leading = text.length - text.trimStart().length;
+  const lower = text.slice(leading).toLowerCase();
+  if (!lower.startsWith(COMPACTION_SUMMARY_OPEN)) return null;
+  const closeIndex = lower.indexOf(COMPACTION_SUMMARY_CLOSE, COMPACTION_SUMMARY_OPEN.length);
+  if (closeIndex < 0) return { status: 'open' };
+  const endIndex = leading + closeIndex + COMPACTION_SUMMARY_CLOSE.length;
+  return { status: 'closed', endIndex, trailing: text.slice(endIndex) };
+}
+
+function looksLikeCompactionSummary(text: string): boolean {
+  const summary = parseSummaryPrefix(text);
+  return summary?.status === 'closed' && summary.trailing.trim() === '';
+}
+
+function reconcileTextSnapshot(snapshot: string, observed: string): string {
+  if (!snapshot) return observed;
+  if (!observed) return snapshot;
+  if (snapshot === observed) return snapshot;
+  if (snapshot.startsWith(observed)) return snapshot;
+  if (observed.startsWith(snapshot)) return observed;
+  const max = Math.min(snapshot.length, observed.length);
+  for (let overlap = max; overlap > 0; overlap -= 1) {
+    if (snapshot.endsWith(observed.slice(0, overlap))) {
+      return snapshot + observed.slice(overlap);
+    }
+  }
+  return snapshot + observed;
+}
+
 // ── BananaServer: the module-level singleton ─────────────────────────────
 //
 // Owns the persistent `banana serve` child, the shared SDK client, and the
@@ -864,7 +1522,10 @@ class BananaServer {
   /** Lazily start (or restart) the serve process. Resolves when reachable. */
   async ensure(projectPathHint?: string): Promise<void> {
     const inlineConfig = await bananaConfigContent(projectPathHint);
-    const configSignature = inlineConfig ?? '';
+    // Compare on a canonical signature: ~/.claude.json and OpenRouter's catalog
+    // can return semantically identical content with shuffled key/row order,
+    // which would otherwise restart the serve and wipe every chat's context.
+    const configSignature = canonicalConfigSignature(inlineConfig);
     if (this.readyPromise && !this.dead) {
       if (configSignature !== this.configSignature) {
         this.restartForConfigChange();
@@ -966,8 +1627,12 @@ class BananaServer {
   shutdown(): void {
     this.dead = true;
     this.readyPromise = null;
-    if (this.child) {
-      terminateProcessTree(this.child, 'SIGTERM');
+    const child = this.child;
+    if (child) {
+      terminateProcessTree(child, 'SIGTERM');
+      setTimeout(() => {
+        terminateProcessTree(child, 'SIGKILL');
+      }, 3000).unref();
       this.child = null;
     }
   }
@@ -1210,12 +1875,15 @@ function extractSessionId(event: Event): string | null {
   const props = (event as { properties?: Record<string, unknown> }).properties;
   if (!props) return null;
   if (typeof props.sessionID === 'string') return props.sessionID;
+  if (typeof props.sessionId === 'string') return props.sessionId;
   // message.part.* carry it on the nested part.
-  const part = props.part as { sessionID?: unknown } | undefined;
+  const part = props.part as { sessionID?: unknown; sessionId?: unknown } | undefined;
   if (part && typeof part.sessionID === 'string') return part.sessionID;
+  if (part && typeof part.sessionId === 'string') return part.sessionId;
   // message.updated carries it on info.
-  const info = props.info as { sessionID?: unknown } | undefined;
+  const info = props.info as { sessionID?: unknown; sessionId?: unknown } | undefined;
   if (info && typeof info.sessionID === 'string') return info.sessionID;
+  if (info && typeof info.sessionId === 'string') return info.sessionId;
   return null;
 }
 
@@ -1250,14 +1918,23 @@ export class BananaSession {
   /** Cleanup for the current turn's image temp dir — runs once the turn ends
    *  (success, failure, or shutdown). Null when the turn sent no images. */
   private turnCleanup: (() => void) | null = null;
+  /** Set true the moment this turn wiped its threadId (serve restart / stale
+   *  session). The send path uses it to decide whether to inject a transcript
+   *  recap so the brand-new opencode session inherits the prior chat's context
+   *  instead of starting cold and asking "who's her?" half-way through. */
+  private wipedThisTurn = false;
+  /** Set when this Rivendell process rebuilt a BananaSession from the persisted
+   *  event log but intentionally discarded the old opencode session id. */
+  private recoverContextOnNextTurn = false;
   /** Persistent serve means readiness is per-server, not per-session. */
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
-  constructor(cwd: string, chatId: string, threadId: string | null) {
+  constructor(cwd: string, chatId: string, threadId: string | null, opts: BananaSessionOptions = {}) {
     this.cwd = cwd;
     this.chatId = chatId;
     this.key = keyOf(cwd, chatId);
     this.threadId = threadId;
+    this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
 
     // Mirror the claude/codex path: rehydrate eventLog from disk so a server
     // restart between turns doesn't strand a reconnecting client.
@@ -1362,10 +2039,176 @@ export class BananaSession {
     bananaServer.unregisterRoute(old);
     this.threadId = null;
     this.threadServeGeneration = null;
+    this.wipedThisTurn = true;
     await setSessionId('banana', this.cwd, '', this.chatId);
   }
 
-  async send(text: string, images?: ChatImage[], opts?: { model?: string }): Promise<void> {
+  private quarantineThread(reason: string): void {
+    const old = this.threadId;
+    if (!old) return;
+    console.warn(`[chat banana] quarantining session ${old}: ${reason}`);
+    bananaServer.unregisterRoute(old);
+    this.threadId = null;
+    this.threadServeGeneration = null;
+    this.recoverContextOnNextTurn = true;
+    void setSessionId('banana', this.cwd, '', this.chatId).catch((err) => {
+      console.warn(`[chat banana] failed to persist quarantined session: ${(err as Error).message}`);
+    });
+  }
+
+  /** Build a compact transcript of the prior conversation from the persistent
+   *  event log so a session wipe can rehydrate context on the new opencode
+   *  session. Walks user echoes and reconstructed assistant text from the
+   *  stream events; budgeted to the most recent ~12k chars so it never blows
+   *  out the new session's context window. Returns '' when there is no prior
+   *  conversation to recap. */
+  private buildTranscriptRecap(): string {
+    type Turn = { role: 'user' | 'assistant'; text: string };
+    const turns: Turn[] = [];
+    const openText = new Map<number, string>();
+    let pendingAssistant = '';
+
+    const flushAssistant = () => {
+      const finalChunks: string[] = [];
+      for (const chunk of openText.values()) finalChunks.push(chunk);
+      openText.clear();
+      const trailing = finalChunks.join('').trim();
+      const body = (pendingAssistant + (trailing ? `\n${trailing}` : '')).trim();
+      pendingAssistant = '';
+      if (body && !looksLikeCompactionSummary(body)) turns.push({ role: 'assistant', text: body });
+    };
+
+    for (const se of this.eventLog) {
+      const wrapper = se.ev;
+      if (wrapper.type !== 'event') continue;
+      const ev = (wrapper as { type: 'event'; event: any }).event;
+      if (!ev || typeof ev !== 'object') continue;
+
+      if (ev.type === '_user_echo' && typeof ev.text === 'string') {
+        flushAssistant();
+        const trimmed = ev.text.trim();
+        if (trimmed) turns.push({ role: 'user', text: trimmed });
+        continue;
+      }
+
+      if (ev.type === 'stream_event' && ev.event && typeof ev.event === 'object') {
+        const inner = ev.event as { type?: unknown; index?: unknown; delta?: any; content_block?: any };
+        if (inner.type === 'content_block_start' && typeof inner.index === 'number') {
+          if (inner.content_block?.type === 'text') {
+            openText.set(inner.index, '');
+          }
+          continue;
+        }
+        if (inner.type === 'content_block_delta' && typeof inner.index === 'number') {
+          if (inner.delta?.type === 'text_delta' && typeof inner.delta.text === 'string') {
+            if (openText.has(inner.index)) {
+              openText.set(inner.index, (openText.get(inner.index) ?? '') + inner.delta.text);
+            }
+          }
+          continue;
+        }
+        if (inner.type === 'content_block_stop' && typeof inner.index === 'number') {
+          const finished = openText.get(inner.index);
+          if (finished !== undefined) {
+            openText.delete(inner.index);
+            const trimmed = finished.trim();
+            if (trimmed) pendingAssistant = pendingAssistant ? `${pendingAssistant}\n${trimmed}` : trimmed;
+          }
+          continue;
+        }
+      }
+    }
+    flushAssistant();
+
+    if (turns.length === 0) return '';
+
+    const MAX_RECAP_CHARS = 12_000;
+    const PER_TURN_OVERHEAD = 24;
+    let budget = MAX_RECAP_CHARS;
+    const kept: Turn[] = [];
+    for (let i = turns.length - 1; i >= 0; i -= 1) {
+      const turn = turns[i];
+      const cost = turn.text.length + PER_TURN_OVERHEAD;
+      if (cost > budget) {
+        if (kept.length === 0) {
+          // Always keep at least the most recent turn, even if it's huge —
+          // we'll trim it to fit.
+          kept.unshift({ role: turn.role, text: turn.text.slice(-budget + PER_TURN_OVERHEAD) });
+        }
+        break;
+      }
+      budget -= cost;
+      kept.unshift(turn);
+    }
+
+    const body = JSON.stringify(kept, null, 2);
+    return [
+      'The local Banana serve process was restarted, so the live opencode session this chat was attached to was lost.',
+      'The JSON array below contains the real prior turns of this conversation. Treat them as your own memory of what was said, then respond to the user\'s next message that follows this recovery block.',
+      body,
+    ].join('\n');
+  }
+
+  private latestAssistantTextFromLog(): string {
+    const openText = new Map<number, string>();
+    let pendingAssistant = '';
+    let latestAssistant = '';
+
+    const flushAssistant = () => {
+      const finalChunks: string[] = [];
+      for (const chunk of openText.values()) finalChunks.push(chunk);
+      openText.clear();
+      const trailing = finalChunks.join('').trim();
+      const body = (pendingAssistant + (trailing ? `\n${trailing}` : '')).trim();
+      pendingAssistant = '';
+      if (body && !looksLikeCompactionSummary(body)) latestAssistant = body;
+    };
+
+    for (const se of this.eventLog) {
+      const wrapper = se.ev;
+      if (wrapper.type !== 'event') continue;
+      const ev = (wrapper as { type: 'event'; event: any }).event;
+      if (!ev || typeof ev !== 'object') continue;
+
+      if (ev.type === '_user_echo') {
+        flushAssistant();
+        latestAssistant = '';
+        continue;
+      }
+
+      if (ev.type !== 'stream_event' || !ev.event || typeof ev.event !== 'object') continue;
+      const inner = ev.event as { type?: unknown; index?: unknown; delta?: any; content_block?: any };
+      if (inner.type === 'content_block_start' && typeof inner.index === 'number') {
+        if (inner.content_block?.type === 'text') openText.set(inner.index, '');
+        continue;
+      }
+      if (inner.type === 'content_block_delta' && typeof inner.index === 'number') {
+        if (inner.delta?.type === 'text_delta' && typeof inner.delta.text === 'string' && openText.has(inner.index)) {
+          openText.set(inner.index, (openText.get(inner.index) ?? '') + inner.delta.text);
+        }
+        continue;
+      }
+      if (inner.type === 'content_block_stop' && typeof inner.index === 'number') {
+        const finished = openText.get(inner.index);
+        if (finished !== undefined) {
+          openText.delete(inner.index);
+          const trimmed = finished.trim();
+          if (trimmed) pendingAssistant = pendingAssistant ? `${pendingAssistant}\n${trimmed}` : trimmed;
+        }
+      }
+    }
+    flushAssistant();
+    return latestAssistant;
+  }
+
+  private approvedGmailDraftForText(text: string): ApprovedGmailDraft | null {
+    if (!isExplicitEmailApprovalText(text)) return null;
+    const latestAssistant = this.latestAssistantTextFromLog();
+    if (!looksLikeEmailDraftText(latestAssistant)) return null;
+    return extractEmailDraft(latestAssistant);
+  }
+
+  async send(text: string, images?: ChatImage[], opts: BananaSendOptions = {}): Promise<void> {
     if (this.busy) {
       this.emit({
         type: 'error',
@@ -1374,11 +2217,24 @@ export class BananaSession {
       return;
     }
     this.busy = true;
+    this.wipedThisTurn = false;
+    if (opts.hidden) this.emit({ type: 'turnStart' });
+    const recoverContextThisTurn = this.recoverContextOnNextTurn;
+    // Snapshot the prior transcript BEFORE emitting this turn's user echo. If
+    // the upcoming send wipes the opencode session (serve restart, stale id),
+    // we'll prepend this recap to the new session's first message so context
+    // carries across the wipe instead of vanishing mid-conversation.
+    const preTurnRecap = this.buildTranscriptRecap();
+    const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(text);
     // Echo for reconnect replay (banana's events don't re-emit the user prompt).
-    this.emit({
-      type: 'event',
-      event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
-    });
+    // Internal auto-continues are intentionally hidden; they are just Rivendell
+    // nudging Banana past an opencode compaction summary.
+    if (!opts.hidden) {
+      this.emit({
+        type: 'event',
+        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
+      });
+    }
 
     // Write image attachments to temp files; banana's prompt parts reference
     // them by file:// URL (the same mechanism the run path uses). The temp dir
@@ -1452,13 +2308,13 @@ export class BananaSession {
     const client = bananaServer.clientFor(this.cwd);
     const serveGeneration = bananaServer.currentGeneration();
 
-    // 2. Reuse the saved sessionID only if this banana serve process can see
-    //    it. A persisted id can outlive the serve instance that owned it;
-    //    prompting that stale id hangs silently with no SSE events.
+    // 2. Reuse the saved sessionID only while this exact `banana serve`
+    //    generation owns it. `session.get()` can report old ids after a restart
+    //    even though prompting them hangs with no SSE events, so a generation
+    //    mismatch is treated as unsafe and recovered via transcript recap.
     if (this.threadId && this.threadServeGeneration !== serveGeneration) {
       await this.clearSavedThreadId('banana serve restarted');
-    }
-    if (this.threadId) {
+    } else if (this.threadId) {
       const staleReason = await validateSessionExists(client, this.threadId);
       if (staleReason) await this.clearSavedThreadId(staleReason);
     }
@@ -1484,6 +2340,7 @@ export class BananaSession {
         return;
       }
     }
+    await this.refreshPermissionRules(client);
     if (this.dead) {
       this.turnCleanup?.();
       this.turnCleanup = null;
@@ -1506,7 +2363,14 @@ export class BananaSession {
       bufferedDeltas: new Map(),
       assistantMessageId: null,
       promptAccepted: false,
+      recoveryRecapUsed: false,
       sawToolUse: false,
+      currentMessageVisibleContent: false,
+      currentMessageHiddenCompactionSummary: false,
+      model: opts.model,
+      autoContinueDepth: opts.autoContinueDepth ?? 0,
+      blockedSearchContinueDepth: opts.blockedSearchContinueDepth ?? 0,
+      gmailApprovedDraft,
       usage: null,
       done: false,
       cleanup: cleanupImages,
@@ -1518,52 +2382,75 @@ export class BananaSession {
     //    side, but we drive the UI off the streamed events; the turn formally
     //    ends on the `session.status: idle` event. We still await to surface a
     //    request-level failure (auth, model not found, etc.).
+    //
+    //    If this turn had to wipe the opencode session (serve restart, stale
+    //    id), prepend the recap of the prior conversation to the prompt text
+    //    so the brand-new session inherits context. Slash commands are expanded
+    //    into prompt text here so Banana sees Claude/project commands too.
     const model = parseModel(opts?.model);
-    const slashCommand = await parseBananaSlashCommand(text);
+    const slashCommand = await parseBananaSlashCommand(text, this.cwd);
+    const needsContextRecovery = this.wipedThisTurn || recoverContextThisTurn;
+    const commandExpandedText = slashCommand ? expandBananaSlashCommand(slashCommand) : text;
+    const recap = needsContextRecovery && preTurnRecap ? preTurnRecap : '';
+    const effectiveText = recap ? `${recap}\n\n${commandExpandedText}` : commandExpandedText;
+    if (recap) {
+      this.turn.recoveryRecapUsed = true;
+      this.emit({
+        type: 'event',
+        event: { type: '_context_recovered', chars: recap.length, ts: Date.now() },
+      });
+    } else if (recoverContextThisTurn && !preTurnRecap) {
+      this.recoverContextOnNextTurn = false;
+    }
     const thisTurn = this.turn;
+    const promptKind = slashCommand ? 'command' : 'prompt';
     try {
-      const res = slashCommand
-        ? await client.session.command({
-          sessionID: this.threadId,
-          ...(opts?.model ? { model: opts.model } : {}),
-          command: slashCommand.command,
-          arguments: slashCommand.arguments,
-          ...(fileParts.length ? { parts: fileParts } : {}),
-        })
-        : await client.session.prompt({
-          sessionID: this.threadId,
-          ...(model ? { model } : {}),
-          parts: [...fileParts, { type: 'text' as const, text }],
-        });
-      // The prompt was accepted by the server. Mark THIS turn so a
-      // `session.status idle` is now honored as completion (guarded against
-      // the turn having already settled and been replaced).
-      if (this.turn === thisTurn && !thisTurn.done) {
-        thisTurn.promptAccepted = true;
-      }
+      const res = await client.session.prompt({
+        sessionID: this.threadId,
+        ...(model ? { model } : {}),
+        parts: [...fileParts, { type: 'text' as const, text: effectiveText }],
+      });
       if (res.error) {
         const message = errorText(res.error);
-        // If the stream already finished the turn, don't double-end it.
-        if (this.turn && !this.turn.done) {
-          this.failTurn(`banana ${slashCommand ? 'command' : 'prompt'} failed: ${message}`);
+        if (this.turn === thisTurn && !thisTurn.done) {
+          if (isPromptTransportFailure(message) && this.turnHasServerActivity(thisTurn)) {
+            console.warn(
+              `[chat banana] ${promptKind} transport returned error after stream activity; keeping turn alive (${message})`,
+            );
+            return;
+          }
+          this.failTurn(isPromptTransportFailure(message)
+            ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
+            : `banana ${promptKind} failed: ${message}`);
+          if (isPromptTransportFailure(message)) {
+            bananaServer.notePromptTransportFailure(message);
+          }
         }
       }
+      // The prompt was accepted by the server. Mark THIS turn so a
+      // `session.status idle` is now honored as completion (guarded against
+      // the turn having already settled and been replaced). This must happen
+      // after `res.error` handling so a failed response with no streamed
+      // activity does not count as activity merely because the response came
+      // back.
+      if (this.turn === thisTurn && !thisTurn.done) {
+        this.markPromptAccepted(thisTurn);
+      }
     } catch (err) {
-      if (this.turn && !this.turn.done) {
+      if (this.turn === thisTurn && !thisTurn.done) {
         const message = errorText(err);
         if (
           isPromptTransportFailure(message) &&
-          this.turn === thisTurn &&
           this.turnHasServerActivity(thisTurn)
         ) {
           console.warn(
-            `[chat banana] ${slashCommand ? 'command' : 'prompt'} transport ended after stream activity; keeping turn alive (${message})`,
+            `[chat banana] ${promptKind} transport ended after stream activity; keeping turn alive (${message})`,
           );
           return;
         }
         this.failTurn(isPromptTransportFailure(message)
-          ? `banana ${slashCommand ? 'command' : 'prompt'} failed: local Banana server connection failed, restarting for the next turn (${message})`
-          : `banana ${slashCommand ? 'command' : 'prompt'} failed: ${message}`);
+          ? `banana ${promptKind} failed: local Banana server connection failed, restarting for the next turn (${message})`
+          : `banana ${promptKind} failed: ${message}`);
         if (isPromptTransportFailure(message)) {
           bananaServer.notePromptTransportFailure(message);
         }
@@ -1596,7 +2483,7 @@ export class BananaSession {
           if (!this.tryAnchorAssistantMessage(info.id, state)) return;
         }
         // The turn has a real assistant message — a later idle is now its own.
-        state.promptAccepted = true;
+        this.markPromptAccepted(state);
         this.armWatchdog();
         this.ensureMessageStart(state);
         return;
@@ -1627,7 +2514,7 @@ export class BananaSession {
       case 'session.error': {
         if (event.properties.sessionID && event.properties.sessionID !== this.threadId) return;
         this.armWatchdog();
-        this.emit({ type: 'error', message: errorText(event.properties.error) });
+        this.failTurn(`banana session error: ${errorText(event.properties.error)}`);
         return;
       }
       case 'session.status': {
@@ -1643,10 +2530,21 @@ export class BananaSession {
         }
         return;
       }
+      case 'session.idle': {
+        const props = event.properties as { sessionID?: unknown; sessionId?: unknown };
+        const sessionID = typeof props.sessionID === 'string'
+          ? props.sessionID
+          : (typeof props.sessionId === 'string' ? props.sessionId : undefined);
+        if (sessionID && sessionID !== this.threadId) return;
+        this.armWatchdog();
+        if (!state.promptAccepted) return;
+        this.completeTurn(state);
+        return;
+      }
       case 'permission.asked': {
         if (event.properties.sessionID !== this.threadId) return;
         this.armWatchdog();
-        void this.replyToPermission(event.properties.id);
+        void this.replyToPermission(event.properties);
         return;
       }
       default:
@@ -1688,7 +2586,7 @@ export class BananaSession {
     if (typeof messageID !== 'string' || !messageID) return false;
     if (this.seenMessageIds.has(messageID)) return false;
     state.assistantMessageId = messageID;
-    state.promptAccepted = true;
+    this.markPromptAccepted(state);
     this.rememberSeenMessageId(messageID);
     this.ensureMessageStart(state);
     return true;
@@ -1710,9 +2608,11 @@ export class BananaSession {
     state.messageId = synth('msg');
     state.nextBlockIndex = 0;
     state.messageStarted = false;
+    state.currentMessageVisibleContent = false;
+    state.currentMessageHiddenCompactionSummary = false;
     state.parts.clear();
     state.bufferedDeltas.clear();
-    state.promptAccepted = true;
+    this.markPromptAccepted(state);
     this.rememberSeenMessageId(messageID);
     this.ensureMessageStart(state);
     return true;
@@ -1746,7 +2646,87 @@ export class BananaSession {
     );
   }
 
+  private markPromptAccepted(state: BananaTurnState): void {
+    state.promptAccepted = true;
+    if (state.recoveryRecapUsed) this.recoverContextOnNextTurn = false;
+  }
+
   // ── streaming normalization ────────────────────────────────
+
+  private visibleTextStart(rec: PartRecord, state: BananaTurnState): void {
+    if (rec.started) return;
+    rec.index = state.nextBlockIndex++;
+    rec.started = true;
+    state.currentMessageVisibleContent = true;
+    this.emitStream({
+      type: 'content_block_start',
+      index: rec.index,
+      content_block: { type: 'text', text: '' },
+    });
+  }
+
+  private flushPendingText(rec: PartRecord, state: BananaTurnState, sourceLength?: number): void {
+    const pending = rec.pendingText ?? '';
+    this.visibleTextStart(rec, state);
+    if (pending) {
+      rec.emittedLen = sourceLength ?? pending.length;
+      rec.pendingText = '';
+      this.emitStream({
+        type: 'content_block_delta',
+        index: rec.index,
+        delta: { type: 'text_delta', text: pending },
+      });
+    }
+  }
+
+  private maybeHideOrHoldText(
+    rec: PartRecord,
+    text: string,
+    state: BananaTurnState,
+    ended = false,
+  ): 'empty' | 'hidden' | 'held' | 'visible' {
+    rec.pendingText = text;
+
+    if (!text) {
+      if (!ended) return 'held';
+      rec.pendingText = '';
+      rec.emittedLen = 0;
+      return 'empty';
+    }
+
+    const lower = normalizedCompactionCandidate(text);
+    const summary = parseSummaryPrefix(text);
+    if (summary?.status === 'open') {
+      if (!ended) return 'held';
+      this.flushPendingText(rec, state, text.length);
+      return 'visible';
+    }
+    if (summary?.status === 'closed') {
+      const trailing = summary.trailing.trimStart();
+      if (trailing) {
+        rec.pendingText = trailing;
+        this.flushPendingText(rec, state, text.length);
+        return 'visible';
+      }
+      if (!ended) return 'held';
+      rec.hidden = true;
+      rec.pendingText = '';
+      rec.emittedLen = text.length;
+      state.currentMessageHiddenCompactionSummary = true;
+      console.warn(`[chat banana] hiding internal opencode compact summary for ${this.key}`);
+      return 'hidden';
+    }
+
+    if (
+      lower.length <= COMPACTION_SUMMARY_OPEN.length &&
+      COMPACTION_SUMMARY_OPEN.startsWith(lower) &&
+      !ended
+    ) {
+      return 'held';
+    }
+    this.flushPendingText(rec, state, text.length);
+    return 'visible';
+  }
 
   /** message.part.updated — a part was created or progressed. Open answer text
    *  blocks on first sight, suppress reasoning scratchpad parts, flush any
@@ -1795,34 +2775,31 @@ export class BananaSession {
       // as a duplicate block.
       if (rec && rec.closed) return;
       if (!rec) {
-        // First sight of this part — open a fresh claude text block.
-        const index = state.nextBlockIndex++;
-        rec = { index, kind: 'text', started: true, emittedLen: 0, closed: false };
+        rec = { index: -1, kind: 'text', started: false, emittedLen: 0, closed: false };
         state.parts.set(partID, rec);
-        this.emitStream({
-          type: 'content_block_start',
-          index,
-          content_block: { type: 'text', text: '' },
-        });
-        // Flush deltas that raced ahead of this part-created event.
-        const buffered = state.bufferedDeltas.get(partID);
-        if (buffered?.length) {
-          for (const d of buffered) {
-            rec.emittedLen += d.length;
-            this.emitStream({
-              type: 'content_block_delta',
-              index,
-              delta: { type: 'text_delta', text: d },
-            });
-          }
-          state.bufferedDeltas.delete(partID);
-        }
+      }
+
+      const buffered = state.bufferedDeltas.get(partID);
+      const bufferedText = buffered?.length ? buffered.join('') : '';
+      if (buffered?.length) {
+        state.bufferedDeltas.delete(partID);
+      }
+      const ended = part.time && typeof part.time === 'object' && part.time.end != null;
+
+      if (rec.hidden) {
+        if (typeof part.text === 'string') rec.emittedLen = Math.max(rec.emittedLen, part.text.length);
+      } else if (!rec.started) {
+        const snapshotText = typeof part.text === 'string' ? part.text : '';
+        const observedText = `${rec.pendingText ?? ''}${bufferedText}`;
+        const text = reconcileTextSnapshot(snapshotText, observedText);
+        const decision = this.maybeHideOrHoldText(rec, text, state, Boolean(ended));
+        if (decision === 'held') return;
       }
       // Reconcile against the snapshot. `part.text` is the full accumulated
       // text of this block; streaming deltas are an optimization layered on
       // top. Emitting only the un-emitted remainder here means a dropped or
       // pre-anchor delta can never lose text — every snapshot backfills it.
-      if (typeof part.text === 'string' && part.text.length > rec.emittedLen) {
+      if (!rec.hidden && rec.started && typeof part.text === 'string' && part.text.length > rec.emittedLen) {
         const remainder = part.text.slice(rec.emittedLen);
         rec.emittedLen = part.text.length;
         this.emitStream({
@@ -1834,10 +2811,11 @@ export class BananaSession {
       // A text/reasoning part with time.end is finished — close its block
       // once. The record is kept (not deleted) with `closed = true` so a
       // later duplicate snapshot for this partID cannot recreate it.
-      const ended = part.time && typeof part.time === 'object' && part.time.end != null;
       if (ended) {
         rec.closed = true;
-        this.emitStream({ type: 'content_block_stop', index: rec.index });
+        if (!rec.hidden && rec.started) {
+          this.emitStream({ type: 'content_block_stop', index: rec.index });
+        }
       }
       return;
     }
@@ -1871,6 +2849,16 @@ export class BananaSession {
     // The block was already closed (a late delta after content_block_stop).
     // Dropping it keeps the closed block immutable on the frontend.
     if (rec.closed) return;
+    if (rec.hidden) {
+      rec.emittedLen += delta.length;
+      return;
+    }
+    if (!rec.started) {
+      const text = (rec.pendingText ?? '') + delta;
+      const decision = this.maybeHideOrHoldText(rec, text, state);
+      if (decision !== 'visible') return;
+      return;
+    }
     // Advance emittedLen so the part.updated snapshot reconciler emits only
     // the remainder past what these deltas already streamed.
     rec.emittedLen += delta.length;
@@ -1892,28 +2880,63 @@ export class BananaSession {
     const partID: string = typeof part.id === 'string' ? part.id : callID;
 
     let rec = state.parts.get(partID);
-    if (!rec && (status === 'running' || status === 'pending')) {
+    if (rec?.closed) return;
+    if (!rec && (status === 'running' || status === 'pending' || status === 'completed' || status === 'error')) {
       const index = state.nextBlockIndex++;
       rec = { index, kind: 'tool', started: true, emittedLen: 0, closed: false };
       state.parts.set(partID, rec);
+      state.currentMessageVisibleContent = true;
       const toolUseId = synth('tool');
-      // Stash the toolUseId on the record so completed can reference it.
-      (rec as any).toolUseId = toolUseId;
+      rec.toolUseId = toolUseId;
+      rec.toolName = toolName;
       this.emitStream({
         type: 'content_block_start',
         index,
         content_block: { type: 'tool_use', id: toolUseId, name: toolName },
       });
-      this.emitStream({
-        type: 'content_block_delta',
-        index,
-        delta: { type: 'input_json_delta', partial_json: JSON.stringify(stateBlock.input ?? {}) },
-      });
+    }
+
+    if (!rec) return;
+    rec.toolName = rec.toolName ?? toolName;
+    this.captureToolInput(rec, stateBlock);
+    if (status === 'running' || status === 'pending' || status === 'error') {
+      const gmailCall = gmailSideEffectCall(toolName, stateBlock.input);
+      if (gmailCall && !rec.approvedGmailSideEffect) {
+        if (state.gmailApprovedDraft && approvedDraftMatchesCall(state.gmailApprovedDraft, gmailCall)) {
+          rec.approvedGmailSideEffect = true;
+          state.gmailApprovedDraft = null;
+        } else {
+          const gmailMessage = gmailSideEffectBlockMessage(toolName, stateBlock.input, state.gmailApprovedDraft);
+          if (gmailMessage) {
+            this.emitStoredToolInput(rec);
+            console.warn(`[chat banana] ${gmailMessage}`);
+            this.abortServerTurn();
+            this.failTurn(gmailMessage, gmailMessage);
+            this.continueAfterBlockedSideEffect(gmailMessage, state);
+            return;
+          }
+        }
+      }
+      const unsafeMessage = unsafeBananaToolMessage(toolName, stateBlock.input, this.cwd);
+      if (unsafeMessage) {
+        this.emitStoredToolInput(rec);
+        console.warn(`[chat banana] ${unsafeMessage}`);
+        this.abortServerTurn();
+        this.quarantineThread('unsafe broad search was aborted');
+        this.failTurn(unsafeMessage, unsafeMessage);
+        this.continueAfterBlockedSearch(unsafeMessage, state);
+        return;
+      }
+    }
+
+    if (status === 'running' || status === 'pending') {
       return;
     }
 
     if (rec && (status === 'completed' || status === 'error')) {
-      const toolUseId: string = (rec as any).toolUseId ?? synth('tool');
+      const toolUseId: string = rec.toolUseId ?? synth('tool');
+      this.emitStoredToolInput(rec);
+      rec.closed = true;
       this.emitStream({ type: 'content_block_stop', index: rec.index });
       const output: string = status === 'completed'
         ? (typeof stateBlock.output === 'string' ? stateBlock.output : '')
@@ -1925,23 +2948,71 @@ export class BananaSession {
           message: {
             role: 'user',
             content: [
-              { type: 'tool_result', tool_use_id: toolUseId, content: [{ type: 'text', text: output }] },
+              { type: 'tool_result', tool_use_id: toolUseId, content: [{ type: 'text', text: redactToolText(output) }] },
             ],
           },
         },
       });
-      state.parts.delete(partID);
+    }
+  }
+
+  private captureToolInput(rec: PartRecord, stateBlock: any): void {
+    const inputText = stringifyToolInput(stateBlock?.input);
+    if (!isMeaningfulToolInput(inputText)) return;
+    rec.inputText = inputText;
+  }
+
+  private emitStoredToolInput(rec: PartRecord): void {
+    const inputText = rec.inputText;
+    if (!inputText || !isMeaningfulToolInput(inputText)) return;
+    if (rec.emittedLen === 0) {
+      rec.emittedLen = inputText.length;
+      this.emitStream({
+        type: 'content_block_delta',
+        index: rec.index,
+        delta: { type: 'input_json_delta', partial_json: inputText },
+      });
+      return;
+    }
+
+    if (inputText.length <= rec.emittedLen) {
+      return;
+    }
+    const delta = inputText.slice(rec.emittedLen);
+    rec.emittedLen = inputText.length;
+    this.emitStream({
+      type: 'content_block_delta',
+      index: rec.index,
+      delta: { type: 'input_json_delta', partial_json: delta },
+    });
+  }
+
+  private async refreshPermissionRules(client: any): Promise<void> {
+    if (!this.threadId) return;
+    try {
+      await client.session.update({ sessionID: this.threadId, permission: PLAN_RULESET });
+    } catch (err) {
+      console.warn(`[chat banana] session.permission update failed: ${(err as Error).message}`);
     }
   }
 
   /** Auto-reply to a permission request: 'once' normally, 'reject' in plan
-   *  mode. Banana chat runs unsandboxed (skip-permissions equivalent), so the
-   *  default reply is 'once'. */
-  private async replyToPermission(requestID: string): Promise<void> {
+   *  mode or when the request would launch a known broad search. Banana chat
+   *  runs unsandboxed (skip-permissions equivalent), so the default reply is
+   *  'once'. */
+  private async replyToPermission(request: PermissionRequest): Promise<void> {
     const planMode = process.env.RIVENDELL_BANANA_PLAN_MODE === 'true';
+    const unsafeMessage = unsafePermissionRequestMessage(request, this.cwd);
+    const gmailMessage = gmailSideEffectPermissionMessage(request, this.turn?.gmailApprovedDraft ?? null);
+    const rejectMessage = unsafeMessage ?? gmailMessage;
+    if (rejectMessage) console.warn(`[chat banana] ${rejectMessage}`);
     try {
       const client = bananaServer.clientFor(this.cwd);
-      await client.permission.reply({ requestID, reply: planMode ? 'reject' : 'once' });
+      await client.permission.reply({
+        requestID: request.id,
+        reply: planMode || rejectMessage ? 'reject' : 'once',
+        ...(rejectMessage ? { message: rejectMessage } : {}),
+      });
     } catch (err) {
       console.warn(`[chat banana] permission.reply failed: ${(err as Error).message}`);
     }
@@ -1960,14 +3031,24 @@ export class BananaSession {
   }
 
   /** Normal turn end: session.status went idle. Close any dangling blocks,
-   *  emit the synthetic result + turnEnd. Does NOT touch the shared server. */
+   *  then either auto-continue past an internal compaction summary or emit the
+   *  synthetic result + turnEnd. Does NOT touch the shared server. */
   private completeTurn(state: BananaTurnState): void {
     if (state.done) return;
     state.done = true;
+    this.finalizePendingTextBlocks(state);
+    const shouldAutoContinue =
+      state.currentMessageHiddenCompactionSummary &&
+      !state.currentMessageVisibleContent &&
+      state.autoContinueDepth < 1;
     this.clearWatchdog();
     // Tear down this turn's image temp dir now that the turn is over.
     state.cleanup();
     this.closeDanglingBlocks(state, 'Banana finished before this block closed.');
+    if (shouldAutoContinue) {
+      this.continueAfterHiddenCompaction(state);
+      return;
+    }
     this.emit({
       type: 'event',
       event: {
@@ -1983,14 +3064,72 @@ export class BananaSession {
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
   }
 
+  private continueAfterHiddenCompaction(state: BananaTurnState): void {
+    this.emit({
+      type: 'event',
+      event: { type: '_context_compacted', ts: Date.now(), autoContinue: true },
+    });
+    const model = state.model;
+    const autoContinueDepth = state.autoContinueDepth + 1;
+    this.turn = null;
+    this.busy = false;
+    if (this.dead) {
+      this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      return;
+    }
+    void this.send(
+      'Continue the previous task from where you left off. The last assistant message was an internal context summary; do not repeat it or output any <summary> block.',
+      undefined,
+      { model, hidden: true, autoContinueDepth },
+    ).catch((err) => {
+      if (!this.dead) this.failTurn(`banana hidden continue failed: ${(err as Error).message}`);
+    });
+  }
+
+  private continueAfterBlockedSearch(message: string, state: BananaTurnState): void {
+    if (this.dead || state.blockedSearchContinueDepth >= 1) return;
+    const model = state.model;
+    const blockedSearchContinueDepth = state.blockedSearchContinueDepth + 1;
+    void this.send(
+      [
+        'Continue the previous task from where you left off.',
+        message,
+        'Do not retry that broad built-in search. If you need files, use a scoped subdirectory or a bounded shell `rg` command with explicit exclusions such as `--glob "!node_modules/**"` and `--glob "!.git/**"`.',
+        'If the needed fact is still not findable quickly, ask Matt for it instead of searching the whole workspace.',
+      ].join(' '),
+      undefined,
+      { model, hidden: true, blockedSearchContinueDepth },
+    ).catch((err) => {
+      if (!this.dead) this.failTurn(`banana blocked-search continue failed: ${(err as Error).message}`);
+    });
+  }
+
+  private continueAfterBlockedSideEffect(message: string, state: BananaTurnState): void {
+    if (this.dead || state.blockedSearchContinueDepth >= 1) return;
+    const model = state.model;
+    const blockedSearchContinueDepth = state.blockedSearchContinueDepth + 1;
+    void this.send(
+      [
+        'Continue the previous task from where you left off.',
+        message,
+        'Do not retry that Gmail send/reply in this turn.',
+        'Show Matt the full email draft with From, To, Subject, and Body, then wait for explicit approval in a later message before sending.',
+      ].join(' '),
+      undefined,
+      { model, hidden: true, blockedSearchContinueDepth },
+    ).catch((err) => {
+      if (!this.dead) this.failTurn(`banana blocked-side-effect continue failed: ${(err as Error).message}`);
+    });
+  }
+
   /** Abnormal turn end: an error, a stall, or the server died. Emits an error,
    *  a synthetic result, and turnEnd so the UI recovers. */
-  private failTurn(message: string): void {
+  private failTurn(message: string, toolFallback?: string): void {
     const state = this.turn;
     if (state) {
       if (state.done) return;
       state.done = true;
-      this.closeDanglingBlocks(state, 'Banana stopped before this block closed.');
+      this.closeDanglingBlocks(state, toolFallback ?? 'Banana stopped before this block closed.');
     }
     this.clearWatchdog();
     // Tear down the failed turn's image temp dir. Once the turn object exists
@@ -2002,7 +3141,7 @@ export class BananaSession {
       this.turnCleanup?.();
     }
     this.turnCleanup = null;
-    this.emit({ type: 'error', message });
+    this.emit({ type: 'error', message, code: 'BANANA_TURN_FAILED', retryable: true });
     this.emit({
       type: 'event',
       event: {
@@ -2025,11 +3164,13 @@ export class BananaSession {
   private closeDanglingBlocks(state: BananaTurnState, toolFallback: string): void {
     for (const [, rec] of state.parts) {
       if (rec.kind === 'reasoning') continue;
+      if (rec.hidden || !rec.started) continue;
       if (rec.closed) continue;
       rec.closed = true;
+      if (rec.kind === 'tool') this.emitStoredToolInput(rec);
       this.emitStream({ type: 'content_block_stop', index: rec.index });
       if (rec.kind === 'tool') {
-        const toolUseId: string = (rec as any).toolUseId ?? synth('tool');
+        const toolUseId: string = rec.toolUseId ?? synth('tool');
         this.emit({
           type: 'event',
           event: {
@@ -2037,7 +3178,11 @@ export class BananaSession {
             message: {
               role: 'user',
               content: [
-                { type: 'tool_result', tool_use_id: toolUseId, content: [{ type: 'text', text: toolFallback }] },
+                {
+                  type: 'tool_result',
+                  tool_use_id: toolUseId,
+                  content: [{ type: 'text', text: this.danglingToolResultText(rec, toolFallback) }],
+                },
               ],
             },
           },
@@ -2048,6 +3193,50 @@ export class BananaSession {
     state.bufferedDeltas.clear();
   }
 
+  private danglingToolResultText(rec: PartRecord, fallback: string): string {
+    const lines = [fallback];
+    if (rec.toolName) lines.push(`Tool: ${rec.toolName}`);
+    const input = this.formatToolInputForDisplay(rec);
+    if (input) lines.push(`Input: ${input}`);
+    return lines.join('\n');
+  }
+
+  private finalizePendingTextBlocks(state: BananaTurnState): void {
+    for (const rec of state.parts.values()) {
+      if (rec.kind !== 'text' || rec.closed || rec.hidden || rec.started) continue;
+      const text = rec.pendingText ?? '';
+      this.maybeHideOrHoldText(rec, text, state, true);
+      rec.closed = true;
+      if (!rec.hidden && rec.started) {
+        this.emitStream({ type: 'content_block_stop', index: rec.index });
+      }
+    }
+  }
+
+  private formatToolInputForDisplay(rec: PartRecord): string {
+    if (!rec.inputText) return '';
+    let text = rec.inputText;
+    try {
+      const parsed = JSON.parse(rec.inputText) as Record<string, unknown>;
+      if (rec.toolName === 'bash' && typeof parsed.command === 'string') {
+        text = parsed.command;
+      }
+    } catch {}
+    return truncateToolText(redactToolText(text));
+  }
+
+  private describeOpenTools(state: BananaTurnState): string {
+    const tools: string[] = [];
+    for (const rec of state.parts.values()) {
+      if (rec.kind !== 'tool' || rec.closed) continue;
+      const name = rec.toolName ?? 'tool';
+      const input = this.formatToolInputForDisplay(rec);
+      tools.push(input ? `${name}: ${input}` : name);
+    }
+    if (tools.length === 0) return '';
+    return tools.length === 1 ? `Stuck tool: ${tools[0]}` : `Stuck tools: ${tools.join('; ')}`;
+  }
+
   // ── stall watchdog ─────────────────────────────────────────
 
   private armWatchdog(): void {
@@ -2055,14 +3244,23 @@ export class BananaSession {
     const timeoutMs = stallTimeoutMs();
     this.watchdog = setTimeout(() => {
       if (!this.busy || !this.turn || this.turn.done) return;
+      const hadServerActivity = this.turnHasServerActivity(this.turn);
+      const detail = this.describeOpenTools(this.turn);
+      const message = [
+        `banana stalled - no output for ${Math.round(timeoutMs / 1000)}s, the turn was aborted`,
+        detail,
+      ].filter(Boolean).join('\n');
       console.warn(
-        `[chat banana] stall watchdog fired after ${timeoutMs}ms of silence cwd=${this.cwd}`,
+        `[chat banana] stall watchdog fired after ${timeoutMs}ms of silence cwd=${this.cwd}${detail ? ` (${detail})` : ''}`,
       );
       // Abort the stuck prompt on the server too so its late events can't leak
       // into the next turn, then end this turn locally. The shared serve
       // process is never killed — only this session's prompt.
       this.abortServerTurn();
-      this.failTurn(`banana stalled — no output for ${Math.round(timeoutMs / 1000)}s, the turn was aborted`);
+      if (!hadServerActivity) {
+        void this.clearSavedThreadId('banana stalled before server activity');
+      }
+      this.failTurn(message, 'Banana aborted this tool after the stall watchdog fired.');
     }, timeoutMs);
     this.watchdog.unref();
   }
@@ -2099,6 +3297,11 @@ const PLAN_RULESET: PermissionRuleset = [
   { permission: 'question', action: 'deny', pattern: '*' },
   { permission: 'plan_enter', action: 'deny', pattern: '*' },
   { permission: 'plan_exit', action: 'deny', pattern: '*' },
+  ...guardedSearchRulePatterns().flatMap((pattern) => [
+    { permission: 'grep', action: 'deny' as const, pattern },
+    { permission: 'glob', action: 'deny' as const, pattern },
+    { permission: 'list', action: 'deny' as const, pattern },
+  ]),
 ];
 
 /** Best-effort extraction of a human message from a banana error object. */
@@ -2172,10 +3375,15 @@ export async function getOrCreateBananaSession(opts: { repoPath: string; chatId?
   // but hang forever on session.prompt with no SSE events. Keep continuity
   // while the in-memory BananaSession is alive, but always start fresh after
   // a process restart / idle prune.
+  let recoverContextOnNextTurn = false;
   if (await getSessionId('banana', cwd, chatId)) {
+    recoverContextOnNextTurn = true;
     await setSessionId('banana', cwd, '', chatId);
+    console.warn(
+      `[chat banana] ignoring persisted opencode session after process restart for ${key}; will recover context from event log on next turn`,
+    );
   }
-  const session = new BananaSession(cwd, chatId, null);
+  const session = new BananaSession(cwd, chatId, null, { recoverContextOnNextTurn });
   bananaSessions.set(key, session);
   return session;
 }
