@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { assistantAdminJson } from './assistantAdmin.ts';
+import { ELROND_WORKSPACE_PATH } from '../config.ts';
 
 export type RivendellTask = {
   id: string;
@@ -129,9 +130,20 @@ type AdminCron = {
   updated_at?: string | null;
 };
 
-const DEFAULT_NO_REPO_CWD = '/Users/mjohnst/ASSISTANT-HUB';
-const AUTOSAM_SETTINGS_PATH = join(homedir(), 'Library/Application Support/com.mattjohnston.agent-one/settings.json');
-const KIM_PR_REVIEW_REPO_PATH = '/Users/mjohnst/samwise/KG-Apps/r-link-studio-rebuild';
+// Workspace + repo paths are env-driven so Rivendell runs on the Mac host today
+// and on Moria (Linux) after the cutover. On the Mini the env vars are unset, so
+// homedir()/ELROND_WORKSPACE_PATH resolve to the same /Users/mjohnst paths as before.
+const DEFAULT_NO_REPO_CWD = ELROND_WORKSPACE_PATH;
+const AUTOSAM_APP_ID = 'com.mattjohnston.agent-one';
+const AUTOSAM_DATA_DIR =
+  process.platform === 'darwin'
+    ? join(homedir(), 'Library/Application Support', AUTOSAM_APP_ID)
+    : join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), AUTOSAM_APP_ID);
+const AUTOSAM_SETTINGS_PATH =
+  process.env.AUTOSAM_SETTINGS_PATH || join(AUTOSAM_DATA_DIR, 'settings.json');
+const KIM_PR_REVIEW_REPO_PATH =
+  process.env.KIM_PR_REVIEW_REPO_PATH ||
+  join(homedir(), 'samwise/KG-Apps/r-link-studio-rebuild');
 
 type SamQueueTask = {
   id: string;

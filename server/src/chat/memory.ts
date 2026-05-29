@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { freemem, platform, totalmem } from 'node:os';
 
 // When available system memory drops below this, spawning another agent child
@@ -8,7 +9,7 @@ import { freemem, platform, totalmem } from 'node:os';
 const MIN_AVAILABLE_MEMORY_BYTES = 750 * 1024 * 1024; // 750 MB
 const MIN_AVAILABLE_MEMORY_RATIO = 0.05;
 
-type MemorySource = 'memory_pressure' | 'vm_stat' | 'os';
+type MemorySource = 'memory_pressure' | 'vm_stat' | 'meminfo' | 'os';
 type MemorySnapshot = { availableBytes: number; source: MemorySource };
 type MemoryGuardResult =
   | { ok: true }
@@ -40,6 +41,7 @@ function checkMemoryGuard(): MemoryGuardResult {
   const snapshot =
     readMacVmStatAvailableMemory() ??
     readMacMemoryPressure() ??
+    readLinuxMemAvailable() ??
     { availableBytes: freemem(), source: 'os' as const };
   const minimumBytes = Math.max(MIN_AVAILABLE_MEMORY_BYTES, totalmem() * MIN_AVAILABLE_MEMORY_RATIO);
   if (snapshot.availableBytes >= minimumBytes) return { ok: true };
@@ -49,6 +51,23 @@ function checkMemoryGuard(): MemoryGuardResult {
     totalMb: Math.round(totalmem() / (1024 * 1024)),
     source: snapshot.source,
   };
+}
+
+// Linux (Moria) equivalent of the macOS readers above: MemAvailable from
+// /proc/meminfo is the kernel's own estimate of allocatable memory, which is a
+// far better signal than `free` alone. Reports kB; convert to bytes.
+function readLinuxMemAvailable(): MemorySnapshot | null {
+  if (platform() !== 'linux') return null;
+  try {
+    const out = readFileSync('/proc/meminfo', 'utf8');
+    const match = out.match(/^MemAvailable:\s+(\d+)\s*kB/m);
+    if (!match) return null;
+    const kb = Number(match[1]);
+    if (!Number.isFinite(kb)) return null;
+    return { availableBytes: kb * 1024, source: 'meminfo' };
+  } catch {
+    return null;
+  }
 }
 
 function readMacMemoryPressure(): MemorySnapshot | null {
