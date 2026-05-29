@@ -53,21 +53,64 @@ function checkMemoryGuard(): MemoryGuardResult {
   };
 }
 
-// Linux (Moria) equivalent of the macOS readers above: MemAvailable from
-// /proc/meminfo is the kernel's own estimate of allocatable memory, which is a
-// far better signal than `free` alone. Reports kB; convert to bytes.
-function readLinuxMemAvailable(): MemorySnapshot | null {
-  if (platform() !== 'linux') return null;
+// Reads a cgroup numeric file. Returns null for missing files, blanks, or the
+// "max" / huge-sentinel values that mean "no limit".
+function readCgroupInt(path: string): number | null {
+  try {
+    const raw = readFileSync(path, 'utf8').trim();
+    if (raw === '' || raw === 'max') return null;
+    const n = Number(raw);
+    // cgroup v1 encodes "unlimited" as a value near 2^63, well past the safe
+    // integer range; treat anything that large as no limit.
+    if (!Number.isFinite(n) || n >= Number.MAX_SAFE_INTEGER) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+// Host-level allocatable memory from /proc/meminfo (kernel's own estimate, far
+// better than `free` alone). Reports kB; convert to bytes.
+function readProcMemAvailable(): number | null {
   try {
     const out = readFileSync('/proc/meminfo', 'utf8');
     const match = out.match(/^MemAvailable:\s+(\d+)\s*kB/m);
     if (!match) return null;
     const kb = Number(match[1]);
-    if (!Number.isFinite(kb)) return null;
-    return { availableBytes: kb * 1024, source: 'meminfo' };
+    return Number.isFinite(kb) ? kb * 1024 : null;
   } catch {
     return null;
   }
+}
+
+// If Rivendell runs under a cgroup memory limit (container or systemd
+// MemoryMax), the host MemAvailable can look healthy while this process's own
+// cgroup is near OOM. Return the cgroup's available bytes (limit - current)
+// when a finite limit is set, else null. cgroup v2 first, then v1.
+function readCgroupAvailableBytes(): number | null {
+  const v2Max = readCgroupInt('/sys/fs/cgroup/memory.max');
+  if (v2Max !== null) {
+    const v2Cur = readCgroupInt('/sys/fs/cgroup/memory.current') ?? 0;
+    return Math.max(0, v2Max - v2Cur);
+  }
+  const v1Max = readCgroupInt('/sys/fs/cgroup/memory/memory.limit_in_bytes');
+  if (v1Max !== null) {
+    const v1Cur = readCgroupInt('/sys/fs/cgroup/memory/memory.usage_in_bytes') ?? 0;
+    return Math.max(0, v1Max - v1Cur);
+  }
+  return null;
+}
+
+// Linux (Moria) equivalent of the macOS readers above. Take the tighter of host
+// MemAvailable and the process's cgroup headroom so a memory-capped service
+// can't green-light a spawn that the cgroup would immediately OOM-kill.
+function readLinuxMemAvailable(): MemorySnapshot | null {
+  if (platform() !== 'linux') return null;
+  const host = readProcMemAvailable();
+  if (host === null) return null;
+  const cgroup = readCgroupAvailableBytes();
+  const availableBytes = cgroup === null ? host : Math.min(host, cgroup);
+  return { availableBytes, source: 'meminfo' };
 }
 
 function readMacMemoryPressure(): MemorySnapshot | null {

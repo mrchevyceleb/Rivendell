@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { assistantAdminJson } from './assistantAdmin.ts';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 
@@ -133,16 +133,26 @@ type AdminCron = {
 // Workspace + repo paths are env-driven so Rivendell runs on the Mac host today
 // and on Moria (Linux) after the cutover. On the Mini the env vars are unset, so
 // homedir()/ELROND_WORKSPACE_PATH resolve to the same /Users/mjohnst paths as before.
+// Env overrides are normalized (trim, expand a leading ~) and only honored when
+// they resolve to an absolute path, so a stray, relative, or whitespace-padded
+// value falls back to the platform default instead of silently resolving against cwd.
+function envPath(value: string | undefined): string | null {
+  if (!value) return null;
+  let v = value.trim();
+  if (v === '') return null;
+  if (v === '~' || v.startsWith('~/')) v = join(homedir(), v.slice(1));
+  return isAbsolute(v) ? v : null;
+}
 const DEFAULT_NO_REPO_CWD = ELROND_WORKSPACE_PATH;
 const AUTOSAM_APP_ID = 'com.mattjohnston.agent-one';
 const AUTOSAM_DATA_DIR =
   process.platform === 'darwin'
     ? join(homedir(), 'Library/Application Support', AUTOSAM_APP_ID)
-    : join(process.env.XDG_DATA_HOME || join(homedir(), '.local/share'), AUTOSAM_APP_ID);
+    : join(envPath(process.env.XDG_DATA_HOME) || join(homedir(), '.local/share'), AUTOSAM_APP_ID);
 const AUTOSAM_SETTINGS_PATH =
-  process.env.AUTOSAM_SETTINGS_PATH || join(AUTOSAM_DATA_DIR, 'settings.json');
+  envPath(process.env.AUTOSAM_SETTINGS_PATH) || join(AUTOSAM_DATA_DIR, 'settings.json');
 const KIM_PR_REVIEW_REPO_PATH =
-  process.env.KIM_PR_REVIEW_REPO_PATH ||
+  envPath(process.env.KIM_PR_REVIEW_REPO_PATH) ||
   join(homedir(), 'samwise/KG-Apps/r-link-studio-rebuild');
 
 type SamQueueTask = {
