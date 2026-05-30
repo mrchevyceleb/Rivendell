@@ -313,6 +313,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       generation: number,
       images?: Array<{ mediaType: string; base64: string }>,
       model?: string,
+      effort?: string,
     ): Promise<boolean> => {
       if (!cliKind || !repoPath || cliKind === 'codex') return false;
       const watchable = session as ResumeWatchableSession;
@@ -324,7 +325,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
       console.log(`[chat ws#${wsId}] stale resume closed before init, retrying fresh`);
       try {
-        const retrySession = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
+        const retrySession = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId, model, effort }));
         busy = true;
         safeSend({ type: 'sessionRebound' });
         safeSend({ type: 'turnStart' });
@@ -406,7 +407,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           logChatTurn(wsId, 'steer', msg.cli, msg.repo, chatId, msg.text);
           const generation = ++turnGeneration;
           await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort });
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model);
+          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort);
           return;
         }
 
@@ -427,13 +428,21 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'error', message: 'codex is on a turn - wait for the result' });
             return;
           }
+          const wasBusy = busy;
           const generation = ++turnGeneration;
           if (!busy) {
             busy = true;
             safeSend({ type: 'turnStart' });
           }
           let session: AnySession | null = await sessionPromise;
-          if (!session && cliKind && repoPath) {
+          // Persistent CLIs (claude/assistant): reconcile the spawned model/effort
+          // with the current pick before an idle turn. getOrCreateSession recycles
+          // an IDLE session whose model/effort differ (busy sessions left intact),
+          // preserving session_id so the replacement --resumes the conversation.
+          if (!wasBusy && (cliKind === 'claude' || cliKind === 'assistant') && repoPath) {
+            const reconciled = await getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort });
+            if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
+          } else if (!session && cliKind && repoPath) {
             // sessionPromise resolved to a dead/null session — rebind a fresh
             // one rather than crashing on `null.send`.
             session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
@@ -441,7 +450,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           if (!session) throw new Error('session unavailable, please retry');
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
           await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort });
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model);
+          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort);
         }
       } catch (error) {
         busy = false;

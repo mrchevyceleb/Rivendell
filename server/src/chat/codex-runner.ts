@@ -514,8 +514,12 @@ export class CodexSession {
       this.recoverContextOnNextTurn = false;
     }
     const prompt = `${CODEX_TURN_PREAMBLE}\n\n${effectiveText}`;
-    const codexModel = opts.model ?? CODEX_MODEL;
-    const codexReasoning = opts.effort ? `model_reasoning_effort="${opts.effort}"` : CODEX_REASONING_CONFIG;
+    // Validate WS-supplied values against an allow-list before they reach the
+    // codex CLI. effort is interpolated into a `-c model_reasoning_effort="..."`
+    // config fragment, so a crafted value (quotes/newlines) must be rejected.
+    const codexModel = opts.model && /^[A-Za-z0-9._/-]+$/.test(opts.model) ? opts.model : CODEX_MODEL;
+    const codexEffort = opts.effort && /^(minimal|low|medium|high|xhigh)$/.test(opts.effort) ? opts.effort : CODEX_EFFORT;
+    const codexReasoning = `model_reasoning_effort="${codexEffort}"`;
     const args: string[] = this.threadId
       ? [
           'exec',

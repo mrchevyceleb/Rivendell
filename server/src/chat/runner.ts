@@ -92,6 +92,14 @@ export function wrapSlashArgs(text: string): string {
 // truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
 const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-4-8', 'xhigh');
+// Validate WS-supplied model/effort against an allow-list; fall back to the
+// config default on anything unexpected. Used both for spawn args and for the
+// recycle comparison in getOrCreateSession (must resolve identically, or an
+// invalid value would loop: spawn falls back but the compare never matches).
+const VALID_CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const VALID_MODEL_ID = /^[A-Za-z0-9._-]+$/;
+const resolveClaudeModel = (m?: string): string => (m && VALID_MODEL_ID.test(m) ? m : CLAUDE_MODEL);
+const resolveClaudeEffort = (e?: string): string => (e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT);
 
 const ASSISTANT_AGENT_PROMPT =
   "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
@@ -492,6 +500,8 @@ export async function getOrCreateSession(opts: {
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
+  const wantModel = resolveClaudeModel(opts.model);
+  const wantEffort = resolveClaudeEffort(opts.effort);
 
   while (true) {
     const existing = sessions.get(key);
@@ -504,12 +514,13 @@ export async function getOrCreateSession(opts: {
     const ok = await existing.ready;
     if (sessions.get(key) !== existing) continue;
     if (ok && existing.isAlive()) {
-      // Recycle if the requested model/effort differs from what this process
-      // spawned with. session_id is preserved in storage, so the new process
-      // resumes the same conversation — just with different spawn args.
-      const wantModel = opts.model ?? CLAUDE_MODEL;
-      const wantEffort = opts.effort ?? CLAUDE_EFFORT;
-      if (existing.spawnModel === wantModel && existing.spawnEffort === wantEffort) return existing;
+      // Recycle only an IDLE session whose model/effort differs from the request;
+      // session_id is preserved so the replacement --resumes the same conversation.
+      // NEVER recycle a busy session — that would SIGTERM an in-flight turn and
+      // race the event-log/session-id writes. Leave it; the change applies on the
+      // next idle resolve.
+      const matches = existing.spawnModel === wantModel && existing.spawnEffort === wantEffort;
+      if (matches || existing.isBusy()) return existing;
       existing.shutdown('model/effort change');
       sessions.delete(key);
       continue;
@@ -518,7 +529,7 @@ export async function getOrCreateSession(opts: {
   }
 
   const resumeId = (await getSessionId(opts.cli, cwd, chatId)) ?? null;
-  const session = await spawnSession(opts.cli, cwd, chatId, resumeId, key, 0, opts.model, opts.effort);
+  const session = await spawnSession(opts.cli, cwd, chatId, resumeId, key, 0, wantModel, wantEffort);
   return session;
 }
 

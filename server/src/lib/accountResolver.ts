@@ -20,15 +20,18 @@ interface AccountMap {
 const HOME = homedir();
 const MAP_PATH = join(HOME, 'samwise', '.accounts', 'account-map.json');
 
-let cached: AccountMap | null | undefined;
+let cached: AccountMap | null = null;
 function loadMap(): AccountMap | null {
-  if (cached !== undefined) return cached;
+  if (cached) return cached;
   try {
     cached = JSON.parse(readFileSync(MAP_PATH, 'utf8')) as AccountMap;
-  } catch {
-    cached = null; // map missing/unreadable → callers fall back to inherited env
+    return cached;
+  } catch (err) {
+    // Not cached on failure → retried on the next call, so a transient read/parse
+    // error self-heals instead of being stuck (wrong account) until restart.
+    console.warn(`[accountResolver] could not load ${MAP_PATH}: ${(err as Error).message}`);
+    return null;
   }
-  return cached;
 }
 
 /** Which account ('kim' | 'personal' | ...) owns this path; null if no map. */
@@ -50,13 +53,23 @@ export function resolveAccount(cwd: string): string | null {
 export function accountEnv(cwd: string): NodeJS.ProcessEnv {
   const map = loadMap();
   const account = resolveAccount(cwd);
-  if (!map || !account) return process.env;
-  const a = map.accounts[account];
-  if (!a) return process.env;
-  return {
-    ...process.env,
-    SAMWISE_ACCOUNT: account,
-    CLAUDE_CONFIG_DIR: join(HOME, a.claude_config_dir),
-    CODEX_HOME: join(HOME, a.codex_home),
-  };
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const a = map && account ? map.accounts[account] : undefined;
+  if (a) {
+    env.SAMWISE_ACCOUNT = account!;
+    env.CLAUDE_CONFIG_DIR = join(HOME, a.claude_config_dir);
+    env.CODEX_HOME = join(HOME, a.codex_home);
+    return env;
+  }
+  // Unresolved account (map missing / unreadable / unknown). Fail CLOSED: do not
+  // inherit a stray CLAUDE_CONFIG_DIR / CODEX_HOME that could route work through
+  // the wrong account — scrub them so the CLIs use their own ~/.claude / ~/.codex
+  // default deterministically, and log it loudly.
+  console.warn(
+    `[accountResolver] unresolved account for cwd="${cwd}" (map ${map ? 'loaded' : 'MISSING'}); scrubbing CLAUDE_CONFIG_DIR/CODEX_HOME -> CLI default`,
+  );
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.CODEX_HOME;
+  env.SAMWISE_ACCOUNT = 'default';
+  return env;
 }
