@@ -72,6 +72,13 @@ export const ASSISTANT_ADMIN_TOKEN =
   process.env.MCP_AUTH_TOKEN ||
   dotenvValue('MCP_AUTH_TOKEN');
 
+// Loopback trigger for the local cron runner (cron-runner-local.ts) on Moria.
+// runtime=local cron jobs can only be run on demand by the local runner (the
+// Railway server refuses them with a runtime mismatch), so the Forge run-now
+// route posts local jobs here instead of to ASSISTANT_ADMIN_BASE_URL.
+export const CRON_LOCAL_TRIGGER_URL =
+  process.env.CRON_LOCAL_TRIGGER_URL || 'http://127.0.0.1:8771';
+
 export const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
 export const SUPABASE_SERVICE_ROLE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY ||

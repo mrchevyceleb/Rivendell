@@ -8,6 +8,7 @@ import {
 } from '../lib/assistantData.ts';
 import { emitScribe } from '../worker/scribe.ts';
 import { asyncHandler } from './helpers.ts';
+import { CRON_LOCAL_TRIGGER_URL } from '../config.ts';
 
 export const cronRouter = Router();
 
@@ -29,10 +30,34 @@ cronRouter.post('/', asyncHandler(async (req, res) => {
 }));
 
 cronRouter.post('/:id/run-now', asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
   try {
-    await runAdminCronJob(String(req.params.id));
-    await emitScribe({ level: 'system', text: `manual cron run requested: ${req.params.id}` });
-    res.status(202).json({ ok: true });
+    // runtime=local jobs can only be triggered on the local runner; the Railway
+    // server refuses them ("runtime is local but this process is railway").
+    // Look up the job's runtime and route accordingly.
+    let runtime = 'railway';
+    try {
+      const jobs = await fetchAdminCronJobs();
+      const job = jobs.find((j) => j.id === id);
+      if (job?.runtime) runtime = job.runtime;
+    } catch {
+      // Lookup failed — fall back to the Railway proxy below.
+    }
+
+    if (runtime === 'local') {
+      const resp = await fetch(`${CRON_LOCAL_TRIGGER_URL}/run/${encodeURIComponent(id)}`, {
+        method: 'POST',
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        throw new Error(`local runner ${resp.status}: ${body.slice(0, 200)}`);
+      }
+    } else {
+      await runAdminCronJob(id);
+    }
+
+    await emitScribe({ level: 'system', text: `manual cron run requested: ${id} (${runtime})` });
+    res.status(202).json({ ok: true, runtime });
   } catch (err: any) {
     res.status(502).json({ error: `cron run failed: ${err?.message || 'unknown error'}` });
   }
