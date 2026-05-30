@@ -33,10 +33,10 @@ import { emitScribe } from '../worker/scribe.ts';
 type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number };
 // `model` is the Banana model id (e.g. `monkey/silverback`). It rides on every
 // send/steer and is forwarded into BananaSession.send. Elrond and Codex ignore it.
-type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string };
+type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string };
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string };
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string };
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string };
 type ClientMsg = ClientHello | ClientSend | ClientFresh | ClientStop | ClientSteer;
 type ResumeWatchableSession = AnySession & {
   startedWithResume?: () => boolean;
@@ -405,7 +405,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           safeSend({ type: 'turnStart' });
           logChatTurn(wsId, 'steer', msg.cli, msg.repo, chatId, msg.text);
           const generation = ++turnGeneration;
-          await (session as any).send(msg.text, msg.images, { model: msg.model });
+          await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort });
           void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model);
           return;
         }
@@ -440,7 +440,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           if (!session) throw new Error('session unavailable, please retry');
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
-          await (session as any).send(msg.text, msg.images, { model: msg.model });
+          await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort });
           void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model);
         }
       } catch (error) {

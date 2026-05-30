@@ -445,7 +445,7 @@ export class CodexSession {
     ].join('\n');
   }
 
-  async send(text: string, images?: ChatImage[]): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { model?: string; effort?: string } = {}): Promise<void> {
     if (this.busy) {
       this.emit({
         type: 'error',
@@ -514,13 +514,15 @@ export class CodexSession {
       this.recoverContextOnNextTurn = false;
     }
     const prompt = `${CODEX_TURN_PREAMBLE}\n\n${effectiveText}`;
+    const codexModel = opts.model ?? CODEX_MODEL;
+    const codexReasoning = opts.effort ? `model_reasoning_effort="${opts.effort}"` : CODEX_REASONING_CONFIG;
     const args: string[] = this.threadId
       ? [
           'exec',
           'resume',
           '--json',
-          '-m', CODEX_MODEL,
-          '-c', CODEX_REASONING_CONFIG,
+          '-m', codexModel,
+          '-c', codexReasoning,
           '--dangerously-bypass-approvals-and-sandbox',
           ...imageArgs,
           this.threadId,
@@ -529,8 +531,8 @@ export class CodexSession {
       : [
           'exec',
           '--json',
-          '-m', CODEX_MODEL,
-          '-c', CODEX_REASONING_CONFIG,
+          '-m', codexModel,
+          '-c', codexReasoning,
           '--dangerously-bypass-approvals-and-sandbox',
           ...imageArgs,
           prompt,
