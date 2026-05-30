@@ -7,6 +7,8 @@ import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
+import { accountEnv } from '../lib/accountResolver.ts';
+import { engineDefault } from '../lib/engineConfig.ts';
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const descendants = child.pid ? collectDescendantPids(child.pid) : [];
@@ -137,8 +139,8 @@ type CodexTurnState = {
 // Model + reasoning effort every `codex exec` runs with. Single source of
 // truth, mirrors AutoSam's review.rs pins. Valid efforts: minimal|low|medium|
 // high|xhigh; xhigh is the top tier.
-const CODEX_MODEL = 'gpt-5.5';
-const CODEX_REASONING_CONFIG = 'model_reasoning_effort="xhigh"';
+const { model: CODEX_MODEL, effort: CODEX_EFFORT } = engineDefault('codex', 'gpt-5.5', 'xhigh');
+const CODEX_REASONING_CONFIG = `model_reasoning_effort="${CODEX_EFFORT}"`;
 
 const CODEX_TURN_PREAMBLE = [
   '<samwise-codex-runtime>',
@@ -557,7 +559,7 @@ export class CodexSession {
 
     const child = spawn('codex', args, {
       cwd: this.cwd,
-      env: process.env,
+      env: accountEnv(this.cwd),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

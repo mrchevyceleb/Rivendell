@@ -7,6 +7,8 @@ import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
+import { accountEnv } from '../lib/accountResolver.ts';
+import { engineDefault } from '../lib/engineConfig.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -89,8 +91,7 @@ export function wrapSlashArgs(text: string): string {
 // Model + reasoning effort every `claude` spawn runs with. Single source of
 // truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
-const CLAUDE_MODEL = 'claude-opus-4-8';
-const CLAUDE_EFFORT = 'max';
+const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-4-8', 'xhigh');
 
 const ASSISTANT_AGENT_PROMPT =
   "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
@@ -192,7 +193,7 @@ class ClaudeSession {
 
     this.child = spawn('claude', args, {
       cwd,
-      env: process.env,
+      env: accountEnv(cwd),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
