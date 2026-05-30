@@ -739,10 +739,12 @@ function toProviderModelConfig(model: unknown): [string, Record<string, unknown>
 // still route — they just aren't pre-registered in the provider config.
 const CONFIG_MODEL_CAP = 100;
 async function monkeyOpenRouterConfigModels(): Promise<Record<string, Record<string, unknown>>> {
-  const rows = await fetchMonkeyModelCatalog();
+  // Cap on catalog ROWS (deterministic) so the picker can advertise exactly this
+  // registered set. 100 entries is ~50KB — comfortably under the ~128KB per-arg
+  // limit that caused spawn E2BIG.
+  const rows = (await fetchMonkeyModelCatalog()).slice(0, CONFIG_MODEL_CAP);
   const out: Record<string, Record<string, unknown>> = {};
   for (const row of rows) {
-    if (Object.keys(out).length >= CONFIG_MODEL_CAP) break;
     const next = toProviderModelConfig(row);
     if (next) out[next[0]] = next[1];
   }
@@ -750,8 +752,13 @@ async function monkeyOpenRouterConfigModels(): Promise<Record<string, Record<str
 }
 
 export async function listBananaOpenRouterModels(): Promise<BananaPickerModel[]> {
-  const rows = await fetchMonkeyModelCatalog();
+  // Only advertise models that are actually REGISTERED in the spawned config
+  // (the first CONFIG_MODEL_CAP rows that yield a provider entry). Banana 2.1.20
+  // throws ProviderModelNotFoundError for any id missing from provider.models,
+  // so the picker must never offer an unregistered id.
+  const rows = (await fetchMonkeyModelCatalog()).slice(0, CONFIG_MODEL_CAP);
   return rows
+    .filter((row) => toProviderModelConfig(row) !== null)
     .map(toPickerModel)
     .filter((model): model is BananaPickerModel => model !== null)
     .sort((a, b) => a.name.localeCompare(b.name));
