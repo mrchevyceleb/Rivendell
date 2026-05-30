@@ -7,6 +7,12 @@ const CODEX_MODELS = [
   { id: 'gpt-5.3-codex-spark', label: 'Spark 5.3' },
 ];
 const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+export const CLAUDE_MODELS = [
+  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+];
+export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function CodexEnginePicker(props: {
   model: string;
@@ -14,7 +20,11 @@ export function CodexEnginePicker(props: {
   effort: string;
   onEffortChange: (e: string) => void;
   disabled?: boolean;
+  models?: { id: string; label: string }[];
+  efforts?: string[];
 }) {
+  const models = props.models ?? CODEX_MODELS;
+  const efforts = props.efforts ?? CODEX_EFFORTS;
   const base = {
     fontSize: 12.5,
     border: '1px solid var(--rule, currentColor)',
@@ -34,7 +44,7 @@ export function CodexEnginePicker(props: {
         value={props.model}
         onChange={(e) => props.onModelChange(e.target.value)}
       >
-        {CODEX_MODELS.map((m) => (
+        {models.map((m) => (
           <option key={m.id} value={m.id}>{m.label}</option>
         ))}
       </select>
@@ -45,7 +55,7 @@ export function CodexEnginePicker(props: {
         value={props.effort}
         onChange={(e) => props.onEffortChange(e.target.value)}
       >
-        {CODEX_EFFORTS.map((e) => (
+        {efforts.map((e) => (
           <option key={e} value={e}>{`effort · ${e}`}</option>
         ))}
       </select>

@@ -131,6 +131,9 @@ class ClaudeSession {
   /** session_id reported by the most recent init event. Persisted on every change. */
   private currentSessionId: string | null = null;
   private readonly startedResumeId: string | null = null;
+  /** Model + effort this process was spawned with (per-session, defaults from config). */
+  readonly spawnModel: string;
+  readonly spawnEffort: string;
   private resumeFailed = false;
   private spawnError: string | null = null;
   private initSeen = false;
@@ -140,13 +143,15 @@ class ClaudeSession {
   readonly ready: Promise<boolean>;
   private resolveReady!: (ok: boolean) => void;
 
-  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null) {
+  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string) {
     this.cli = cli;
     this.cwd = cwd;
     this.chatId = chatId;
     this.key = keyOf(cli, cwd, chatId);
     this.pendingResumeId = resumeId;
     this.startedResumeId = resumeId;
+    this.spawnModel = model ?? CLAUDE_MODEL;
+    this.spawnEffort = effort ?? CLAUDE_EFFORT;
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
 
     // Restore any prior emitted events from disk so a server restart (manual
@@ -185,8 +190,8 @@ class ClaudeSession {
       '--verbose',
       '--include-partial-messages',
       '--dangerously-skip-permissions',
-      '--model', CLAUDE_MODEL,
-      '--effort', CLAUDE_EFFORT,
+      '--model', this.spawnModel,
+      '--effort', this.spawnEffort,
     ];
     if (resumeId) args.push('--resume', resumeId);
     if (cli === 'assistant') args.push('--append-system-prompt', ASSISTANT_AGENT_PROMPT);
@@ -475,6 +480,8 @@ export async function getOrCreateSession(opts: {
   cli: CliKind;
   repoPath: string;
   chatId?: string;
+  model?: string;
+  effort?: string;
 }): Promise<AnySession> {
   const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex') {
@@ -496,12 +503,22 @@ export async function getOrCreateSession(opts: {
 
     const ok = await existing.ready;
     if (sessions.get(key) !== existing) continue;
-    if (ok && existing.isAlive()) return existing;
+    if (ok && existing.isAlive()) {
+      // Recycle if the requested model/effort differs from what this process
+      // spawned with. session_id is preserved in storage, so the new process
+      // resumes the same conversation — just with different spawn args.
+      const wantModel = opts.model ?? CLAUDE_MODEL;
+      const wantEffort = opts.effort ?? CLAUDE_EFFORT;
+      if (existing.spawnModel === wantModel && existing.spawnEffort === wantEffort) return existing;
+      existing.shutdown('model/effort change');
+      sessions.delete(key);
+      continue;
+    }
     sessions.delete(key);
   }
 
   const resumeId = (await getSessionId(opts.cli, cwd, chatId)) ?? null;
-  const session = await spawnSession(opts.cli, cwd, chatId, resumeId, key);
+  const session = await spawnSession(opts.cli, cwd, chatId, resumeId, key, 0, opts.model, opts.effort);
   return session;
 }
 
@@ -512,9 +529,11 @@ async function spawnSession(
   resumeId: string | null,
   key: string,
   attempt = 0,
+  model?: string,
+  effort?: string,
 ): Promise<ClaudeSession> {
   assertMemoryAvailableForSpawn(cli);
-  const session = new ClaudeSession(cli, cwd, chatId, resumeId);
+  const session = new ClaudeSession(cli, cwd, chatId, resumeId, model, effort);
   sessions.set(key, session);
 
   session.subscribe((se) => {
@@ -531,7 +550,7 @@ async function spawnSession(
     // something else is wrong.
     if (resumeId && attempt === 0) {
       await setSessionId(cli, cwd, '', chatId); // clear the bad id
-      return spawnSession(cli, cwd, chatId, null, key, attempt + 1);
+      return spawnSession(cli, cwd, chatId, null, key, attempt + 1, model, effort);
     }
     throw new Error('claude exited before initializing — check the CLI install or auth');
   }

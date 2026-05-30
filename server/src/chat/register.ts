@@ -30,7 +30,7 @@ import {
 } from './banana-runner.ts';
 import { emitScribe } from '../worker/scribe.ts';
 
-type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number };
+type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; model?: string; effort?: string };
 // `model` is the Banana model id (e.g. `monkey/silverback`). It rides on every
 // send/steer and is forwarded into BananaSession.send. Elrond and Codex ignore it.
 type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string };
@@ -359,7 +359,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const sinceSeq = typeof msg.sinceSeq === 'number' ? msg.sinceSeq : -1;
           console.log(`[chat ws#${wsId}] hello cli=${msg.cli} repo=${msg.repo} chatId=${chatId} sinceSeq=${sinceSeq}`);
           const session = await bindSession(
-            getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId }),
+            getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId, model: msg.model, effort: msg.effort }),
             sinceSeq,
           );
           const sessionBusy = (session as any).isBusy?.() === true;
@@ -398,7 +398,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           console.warn(`[chat ws#${wsId}] steer from ${peer} cli=${msg.cli} repo=${msg.repo} chatId=${chatId}`);
           detachCurrentSession();
           await interruptSession({ cli: msg.cli, repoPath: msg.repo, chatId });
-          const session = await bindSession(getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId }));
+          const session = await bindSession(getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId, model: msg.model, effort: msg.effort }));
           cliKind = msg.cli;
           repoPath = msg.repo;
           busy = true;

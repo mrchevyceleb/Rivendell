@@ -454,6 +454,8 @@ export function useChat(opts: {
           repo: repo.path,
           chatId,
           sinceSeq: lastSeqRef.current,
+          model: modelRef.current,
+          effort: effortRef.current,
         }));
       };
       ws.onmessage = (e) => {
@@ -642,6 +644,8 @@ export function useChat(opts: {
             repo: repo.path,
             chatId,
             sinceSeq: lastSeqRef.current,
+            model: modelRef.current,
+            effort: effortRef.current,
           }));
           return;
         } catch {

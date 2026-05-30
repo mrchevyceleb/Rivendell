@@ -24,7 +24,7 @@ import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
 import { useBananaModel } from '../chat/hooks/useBananaModel';
 import { ModelPicker } from '../chat/components/ModelPicker';
-import { CodexEnginePicker } from '../chat/components/CodexEnginePicker';
+import { CodexEnginePicker, CLAUDE_MODELS, CLAUDE_EFFORTS } from '../chat/components/CodexEnginePicker';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
 import { useRepos } from '../chat/hooks/useRepos';
@@ -163,6 +163,20 @@ export function Hall() {
     setCodexEffort(e);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-effort', e);
   };
+  const [claudeModel, setClaudeModel] = useState<string>(
+    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:claude-model')) || 'claude-opus-4-8',
+  );
+  const [claudeEffort, setClaudeEffort] = useState<string>(
+    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:claude-effort')) || 'xhigh',
+  );
+  const changeClaudeModel = (m: string) => {
+    setClaudeModel(m);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:claude-model', m);
+  };
+  const changeClaudeEffort = (e: string) => {
+    setClaudeEffort(e);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:claude-effort', e);
+  };
 
   const chat = useChat({
     repo,
@@ -171,8 +185,15 @@ export function Hall() {
     enabled: Boolean(repo),
     initialMessage: pendingPrompt,
     onInitialMessageSent: () => setPendingPrompt(null),
-    model: companion === 'banana' ? bananaModel.model : companion === 'codex' ? codexModel : undefined,
-    effort: companion === 'codex' ? codexEffort : undefined,
+    model:
+      companion === 'banana' ? bananaModel.model
+      : companion === 'codex' ? codexModel
+      : (companion === 'claude' || companion === 'assistant') ? claudeModel
+      : undefined,
+    effort:
+      companion === 'codex' ? codexEffort
+      : (companion === 'claude' || companion === 'assistant') ? claudeEffort
+      : undefined,
   });
 
   useEffect(() => {
@@ -425,6 +446,7 @@ export function Hall() {
             usage={chat.usage}
             modelPicker={companion === 'banana' ? bananaModel : null}
             codexPicker={companion === 'codex' ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
+            claudePicker={(companion === 'claude' || companion === 'assistant') ? { model: claudeModel, effort: claudeEffort, setModel: changeClaudeModel, setEffort: changeClaudeEffort } : null}
           />
         </main>
 
@@ -511,6 +533,7 @@ function Composer({
   usage,
   modelPicker,
   codexPicker,
+  claudePicker,
 }: {
   disabled: boolean;
   streaming: boolean;
@@ -528,6 +551,8 @@ function Composer({
   modelPicker: ReturnType<typeof useBananaModel> | null;
   /** Non-null only for Codex — renders the model+effort selector. */
   codexPicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
+  /** Non-null only for Claude/assistant — renders the model+effort selector. */
+  claudePicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
 }) {
   const [value, setValue] = useState('');
   const [images, setImages] = useState<StagedImage[]>([]);
@@ -735,6 +760,16 @@ function Composer({
               onModelChange={codexPicker.setModel}
               effort={codexPicker.effort}
               onEffortChange={codexPicker.setEffort}
+            />
+          ) : null}
+          {claudePicker ? (
+            <CodexEnginePicker
+              model={claudePicker.model}
+              onModelChange={claudePicker.setModel}
+              effort={claudePicker.effort}
+              onEffortChange={claudePicker.setEffort}
+              models={CLAUDE_MODELS}
+              efforts={CLAUDE_EFFORTS}
             />
           ) : null}
           <button type="button" onClick={onFreshStart} title="Start a fresh thread">
