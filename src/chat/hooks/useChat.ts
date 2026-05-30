@@ -308,15 +308,18 @@ export function useChat(opts: {
   enabled: boolean;
   initialMessage?: string | null;
   onInitialMessageSent?: () => void;
-  /** Banana model id (e.g. `monkey/silverback`). Rides on every send/steer.
-   *  Elrond and Codex ignore it server-side. */
+  /** Model id (Banana + Codex). Rides on every send/steer. */
   model?: string;
+  /** Reasoning effort (Codex; Claude uses its config default). */
+  effort?: string;
 }) {
-  const { repo, cli, chatId = 'main', enabled, initialMessage, onInitialMessageSent, model } = opts;
+  const { repo, cli, chatId = 'main', enabled, initialMessage, onInitialMessageSent, model, effort } = opts;
   // Mirror the model into a ref so the WS send path always reads the latest
   // pick without re-subscribing the connection effect on every change.
   const modelRef = useRef<string | undefined>(model);
   modelRef.current = model;
+  const effortRef = useRef<string | undefined>(effort);
+  effortRef.current = effort;
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [status, setStatus] = useState<Status>('idle');
   // Mirror status into a ref so WS handlers can read the latest value
@@ -380,7 +383,7 @@ export function useChat(opts: {
             { kind: 'user', id: id(), text: initialMessage, ts: Date.now() },
           ];
         });
-        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage, model: modelRef.current }));
+        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage, model: modelRef.current, effort: effortRef.current }));
       }
     } else if (!initialSendInFlightRef.current) {
       initialMessageRef.current = null;
@@ -486,7 +489,7 @@ export function useChat(opts: {
                 { kind: 'user', id: id(), text: pending, ts: Date.now() },
               ];
             });
-            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, model: modelRef.current }));
+            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, model: modelRef.current, effort: effortRef.current }));
           }
         }
         else if (msg.type === 'sessionRebound') {
@@ -716,7 +719,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'send', chatId, text, images: payloadImages(images), model: modelRef.current }));
+    ws.send(JSON.stringify({ type: 'send', chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));
   };
 
   const freshStart = () => {
@@ -755,7 +758,7 @@ export function useChat(opts: {
     }
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), model: modelRef.current }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));
   };
 
   const reconnect = () => forceReconnectRef.current();

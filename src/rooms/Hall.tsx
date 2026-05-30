@@ -24,6 +24,7 @@ import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
 import { useBananaModel } from '../chat/hooks/useBananaModel';
 import { ModelPicker } from '../chat/components/ModelPicker';
+import { CodexEnginePicker } from '../chat/components/CodexEnginePicker';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
 import { useRepos } from '../chat/hooks/useRepos';
@@ -148,6 +149,20 @@ export function Hall() {
   // Banana model picker — only the Banana companion threads a model id into
   // its sends. Elrond and Codex ignore the field server-side.
   const bananaModel = useBananaModel();
+  const [codexModel, setCodexModel] = useState<string>(
+    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:codex-model')) || 'gpt-5.5',
+  );
+  const [codexEffort, setCodexEffort] = useState<string>(
+    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:codex-effort')) || 'xhigh',
+  );
+  const changeCodexModel = (m: string) => {
+    setCodexModel(m);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-model', m);
+  };
+  const changeCodexEffort = (e: string) => {
+    setCodexEffort(e);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-effort', e);
+  };
 
   const chat = useChat({
     repo,
@@ -156,7 +171,8 @@ export function Hall() {
     enabled: Boolean(repo),
     initialMessage: pendingPrompt,
     onInitialMessageSent: () => setPendingPrompt(null),
-    model: companion === 'banana' ? bananaModel.model : undefined,
+    model: companion === 'banana' ? bananaModel.model : companion === 'codex' ? codexModel : undefined,
+    effort: companion === 'codex' ? codexEffort : undefined,
   });
 
   useEffect(() => {
@@ -408,6 +424,7 @@ export function Hall() {
             agentName={companionLabel[companion]}
             usage={chat.usage}
             modelPicker={companion === 'banana' ? bananaModel : null}
+            codexPicker={companion === 'codex' ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
           />
         </main>
 
@@ -493,6 +510,7 @@ function Composer({
   agentName,
   usage,
   modelPicker,
+  codexPicker,
 }: {
   disabled: boolean;
   streaming: boolean;
@@ -508,6 +526,8 @@ function Composer({
   usage: ContextUsage | null;
   /** Non-null only for the Banana companion — renders the model selector. */
   modelPicker: ReturnType<typeof useBananaModel> | null;
+  /** Non-null only for Codex — renders the model+effort selector. */
+  codexPicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
 }) {
   const [value, setValue] = useState('');
   const [images, setImages] = useState<StagedImage[]>([]);
@@ -709,6 +729,14 @@ function Composer({
       <div className="composer-footer">
         <div className={modelPicker ? 'has-model-picker' : undefined}>
           {modelPicker ? <ModelPicker state={modelPicker} /> : null}
+          {codexPicker ? (
+            <CodexEnginePicker
+              model={codexPicker.model}
+              onModelChange={codexPicker.setModel}
+              effort={codexPicker.effort}
+              onEffortChange={codexPicker.setEffort}
+            />
+          ) : null}
           <button type="button" onClick={onFreshStart} title="Start a fresh thread">
             <SquarePen size={14} />
             fresh
