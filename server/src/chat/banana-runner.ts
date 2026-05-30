@@ -732,10 +732,17 @@ function toProviderModelConfig(model: unknown): [string, Record<string, unknown>
   return [id, config];
 }
 
+// Cap how many models we embed into the Banana config. The whole catalog (300+
+// models) serialized into the BANANA_CONFIG_CONTENT *env var* exceeds Linux's
+// ~128KB per-arg limit and makes `spawn` fail with E2BIG. The baseURL+apiKey
+// override forwards ANY model id to the monkey proxy, so models past the cap
+// still route — they just aren't pre-registered in the provider config.
+const CONFIG_MODEL_CAP = 100;
 async function monkeyOpenRouterConfigModels(): Promise<Record<string, Record<string, unknown>>> {
   const rows = await fetchMonkeyModelCatalog();
   const out: Record<string, Record<string, unknown>> = {};
   for (const row of rows) {
+    if (Object.keys(out).length >= CONFIG_MODEL_CAP) break;
     const next = toProviderModelConfig(row);
     if (next) out[next[0]] = next[1];
   }
