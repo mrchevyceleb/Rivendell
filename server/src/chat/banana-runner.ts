@@ -1054,7 +1054,11 @@ function canonicalJson(value: unknown): string {
  *  used — better than crashing the spawn. */
 async function bananaConfigContent(projectPathHint?: string): Promise<string | null> {
   const includeOpenrouterProxy = openrouterViaMonkeyEnabled();
-  const mirroredMcp = readClaudeMcpServers(projectPathHint);
+  // De-bloat: do NOT mirror Claude's MCP servers into Banana by default — that
+  // stuffs every assistant-mcp/playwright/etc. tool schema into the context of
+  // every chat turn (the bloat that slows token gen). Opt back in with
+  // BANANA_MIRROR_MCP=1 if a Banana agent genuinely needs those tools.
+  const mirroredMcp = process.env.BANANA_MIRROR_MCP === '1' ? readClaudeMcpServers(projectPathHint) : {};
   const override: any = {
     $schema: 'https://banana-code.dev/config.json',
   };
