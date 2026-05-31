@@ -730,6 +730,18 @@ function toProviderModelConfig(model: unknown): [string, Record<string, unknown>
   }
   if (reasoning) {
     config.interleaved = { field: 'reasoning_details' };
+    // Expose low/medium/high reasoning-effort variants so the effort picker works
+    // on EVERY reasoning-capable OpenRouter model — including ones Banana's
+    // transform.ts deliberately omits (glm/kimi/qwen/deepseek). Banana mergeDeep's
+    // these config variants into the model (provider.ts), then the prompt `variant`
+    // selects one -> {reasoning:{effort}} in the OpenRouter request body. OpenRouter
+    // normalizes effort per-model (mapping to a thinking-token budget where a model
+    // has no native effort tiers), so this degrades gracefully.
+    config.variants = {
+      low: { reasoning: { effort: 'low' } },
+      medium: { reasoning: { effort: 'medium' } },
+      high: { reasoning: { effort: 'high' } },
+    };
   }
   return [id, config];
 }
