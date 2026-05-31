@@ -1080,13 +1080,38 @@ function canonicalJson(value: unknown): string {
  *  so operator-supplied providers/agents/permissions survive. A non-JSON or
  *  unparseable existing value is ignored (logged) and only the override is
  *  used — better than crashing the spawn. */
+/** Which MCP servers (if any) to mirror into Banana for a given project. Banana
+ *  stays MCP-free by default; a full mirror is an explicit opt-in (BANANA_MIRROR_MCP=1).
+ *  The one standing exception is ASSISTANT-HUB, whose persona (AGENTS.md) boots by
+ *  calling assistant-mcp tools (session_start_context, memory). There we mirror ONLY
+ *  that one server, so the persona works without re-stuffing every other repo's chats
+ *  with the full MCP tool surface (the bloat the default suppresses). */
+function resolveMirroredMcp(projectPathHint?: string): Record<string, BananaMcpConfig> {
+  if (process.env.BANANA_MIRROR_MCP === '1') return readClaudeMcpServers(projectPathHint);
+  if (isAssistantHubProject(projectPathHint)) {
+    const servers = readClaudeMcpServers(projectPathHint);
+    return servers['assistant-mcp'] ? { 'assistant-mcp': servers['assistant-mcp'] } : {};
+  }
+  return {};
+}
+
+function isAssistantHubProject(projectPathHint?: string): boolean {
+  if (!projectPathHint) return false;
+  try {
+    const norm = (value: string) => resolve(value).replace(/[\\/]+$/, '');
+    return norm(projectPathHint) === norm(ASSISTANT_HUB_PATH);
+  } catch {
+    return false;
+  }
+}
+
 async function bananaConfigContent(projectPathHint?: string): Promise<string | null> {
   const includeOpenrouterProxy = openrouterViaMonkeyEnabled();
   // De-bloat: do NOT mirror Claude's MCP servers into Banana by default — that
   // stuffs every assistant-mcp/playwright/etc. tool schema into the context of
-  // every chat turn (the bloat that slows token gen). Opt back in with
-  // BANANA_MIRROR_MCP=1 if a Banana agent genuinely needs those tools.
-  const mirroredMcp = process.env.BANANA_MIRROR_MCP === '1' ? readClaudeMcpServers(projectPathHint) : {};
+  // every chat turn (the bloat that slows token gen). Full mirror is opt-in via
+  // BANANA_MIRROR_MCP=1; ASSISTANT-HUB gets just assistant-mcp (see resolveMirroredMcp).
+  const mirroredMcp = resolveMirroredMcp(projectPathHint);
   const override: any = {
     $schema: 'https://banana-code.dev/config.json',
   };
