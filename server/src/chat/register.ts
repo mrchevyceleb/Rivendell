@@ -25,6 +25,7 @@ import {
 import {
   activeBananaSessions,
   listBananaOpenRouterModels,
+  listLocalModels,
   pruneIdleBananaSessions,
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
@@ -147,6 +148,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
   app.get('/api/banana/models', async (_req, res) => {
     try {
       res.json({ data: await listBananaOpenRouterModels() });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Local (vLLM) catalog for the Banana → Local engine. Ids are `local/<model>`.
+  app.get('/api/local/models', async (_req, res) => {
+    try {
+      res.json({ data: await listLocalModels() });
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }

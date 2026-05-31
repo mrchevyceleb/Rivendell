@@ -1080,6 +1080,70 @@ function canonicalJson(value: unknown): string {
  *  so operator-supplied providers/agents/permissions survive. A non-JSON or
  *  unparseable existing value is ignored (logged) and only the override is
  *  used — better than crashing the spawn. */
+// ── Local LLM (vLLM on the Spark) ─────────────────────────────────────────
+// The "Local" Banana engine talks DIRECTLY to the on-box vLLM OpenAI endpoint
+// (no monkey-models hop) — vLLM is what exploits the GB10 Blackwell FP8 path.
+// We register whatever model vLLM currently has loaded as a custom
+// openai-compatible provider `local`; model ids are `local/<vllm-model-id>`.
+const LOCAL_VLLM_BASE_URL =
+  process.env.RIVENDELL_VLLM_BASE_URL?.trim() || 'http://localhost:8000/v1';
+
+type LocalVllmModel = { id: string; maxLen: number };
+
+async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
+  try {
+    const response = await fetch(`${LOCAL_VLLM_BASE_URL}/models`, {
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!response.ok) return [];
+    const json = (await response.json()) as {
+      data?: Array<{ id?: unknown; max_model_len?: unknown }>;
+    };
+    return (json.data ?? [])
+      .map((m) => ({
+        id: typeof m.id === 'string' ? m.id : '',
+        maxLen: typeof m.max_model_len === 'number' && m.max_model_len > 0 ? m.max_model_len : 32768,
+      }))
+      .filter((m): m is LocalVllmModel => m.id.length > 0);
+  } catch {
+    // vLLM not running / unreachable: no local models registered (the Local
+    // engine simply has nothing to offer until vLLM is up + the serve rebuilds).
+    return [];
+  }
+}
+
+function toLocalModelConfig(model: LocalVllmModel): [string, Record<string, unknown>] {
+  const context = model.maxLen;
+  // Cap requested output so input + output fits the (small) local context window.
+  // Banana's system prompt + built-in tool schemas run ~13k tokens, so leave
+  // generous input headroom rather than letting it request the whole window.
+  const output = Math.min(8192, Math.max(1024, Math.floor(context / 4)));
+  return [
+    model.id,
+    {
+      id: model.id,
+      name: model.id.split('/').pop() || model.id,
+      attachment: false,
+      reasoning: true,
+      temperature: true,
+      tool_call: true,
+      modalities: { input: ['text'], output: ['text'] },
+      limit: { context, input: context, output },
+    },
+  ];
+}
+
+async function localConfigModels(): Promise<Record<string, Record<string, unknown>>> {
+  const models = await fetchLocalVllmModels();
+  return Object.fromEntries(models.map(toLocalModelConfig));
+}
+
+/** Picker catalog for the Local (vLLM) engine — ids are `local/<vllm-model-id>`. */
+export async function listLocalModels(): Promise<{ id: string; name: string }[]> {
+  const models = await fetchLocalVllmModels();
+  return models.map((m) => ({ id: `local/${m.id}`, name: m.id.split('/').pop() || m.id }));
+}
+
 /** Which MCP servers (if any) to mirror into Banana for a given project. Banana
  *  stays MCP-free by default; a full mirror is an explicit opt-in (BANANA_MIRROR_MCP=1).
  *  The one standing exception is ASSISTANT-HUB, whose persona (AGENTS.md) boots by
@@ -1127,8 +1191,21 @@ async function bananaConfigContent(projectPathHint?: string): Promise<string | n
       },
     };
   }
+  // Local (vLLM) provider — DIRECT to the on-box OpenAI endpoint, no monkey hop.
+  // Registered models are whatever vLLM currently has loaded; swapping the vLLM
+  // model + restarting the banana serve repopulates this list.
+  const localModels = await localConfigModels();
+  if (Object.keys(localModels).length) {
+    override.provider = override.provider || {};
+    override.provider.local = {
+      name: 'Local (vLLM)',
+      options: { baseURL: LOCAL_VLLM_BASE_URL, apiKey: 'local' },
+      models: localModels,
+    };
+  }
   if (Object.keys(mirroredMcp).length) override.mcp = mirroredMcp;
-  const hasOverride = includeOpenrouterProxy || Object.keys(mirroredMcp).length > 0;
+  const hasOverride =
+    includeOpenrouterProxy || Object.keys(localModels).length > 0 || Object.keys(mirroredMcp).length > 0;
 
   const existingRaw = (
     process.env.BANANA_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT
@@ -1172,19 +1249,26 @@ async function bananaConfigContent(projectPathHint?: string): Promise<string | n
       : {};
 
   const merged: any = { ...existing, ...override };
-  if (includeOpenrouterProxy) {
+  if (includeOpenrouterProxy || override.provider?.local) {
     merged.provider = {
       ...existingProvider,
-      openrouter: {
-        ...existingOpenrouter,
-        options: {
-          ...existingOptions,
-          ...override.provider.openrouter.options,
-        },
-        ...(Object.keys(overrideOpenrouterModels).length || Object.keys(existingOpenrouterModels).length
-          ? { models: { ...overrideOpenrouterModels, ...existingOpenrouterModels } }
-          : {}),
-      },
+      ...(includeOpenrouterProxy
+        ? {
+            openrouter: {
+              ...existingOpenrouter,
+              options: {
+                ...existingOptions,
+                ...override.provider.openrouter.options,
+              },
+              ...(Object.keys(overrideOpenrouterModels).length || Object.keys(existingOpenrouterModels).length
+                ? { models: { ...overrideOpenrouterModels, ...existingOpenrouterModels } }
+                : {}),
+            },
+          }
+        : {}),
+      // The local (vLLM) provider is generated fresh each build — no existing
+      // merge needed; just carry it through so it isn't dropped here.
+      ...(override.provider?.local ? { local: override.provider.local } : {}),
     };
   }
   if (Object.keys(mirroredMcp).length || Object.keys(existingMcp).length) {
