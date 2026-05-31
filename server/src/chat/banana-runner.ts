@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -1142,6 +1142,88 @@ async function localConfigModels(): Promise<Record<string, Record<string, unknow
 export async function listLocalModels(): Promise<{ id: string; name: string }[]> {
   const models = await fetchLocalVllmModels();
   return models.map((m) => ({ id: `local/${m.id}`, name: m.id.split('/').pop() || m.id }));
+}
+
+// ── Local vLLM control plane (swap / download models from the UI) ──────────
+// Drives ~/samwise/.bin/vllm so the user never touches a terminal. `serve` kicks
+// off a detached docker run that downloads the model from HF if needed; a
+// background watcher then reloads the banana serve once vLLM is up, so the new
+// model re-registers automatically (no Rivendell restart).
+const VLLM_BIN = join(homedir(), 'samwise', '.bin', 'vllm');
+const HF_HUB_DIR = join(homedir(), '.cache', 'huggingface', 'hub');
+const LOCAL_MODEL_ID_RE = /^[A-Za-z0-9._/-]+$/;
+const LOCAL_CURATED: { id: string; label: string; note: string }[] = [
+  { id: 'Qwen/Qwen3-8B-FP8', label: 'Qwen3 8B', note: 'small + fast · 32k ctx' },
+  { id: 'Qwen/Qwen3-14B-FP8', label: 'Qwen3 14B', note: 'mid · stronger' },
+  { id: 'Qwen/Qwen3-32B-FP8', label: 'Qwen3 32B', note: 'dense · strongest' },
+  { id: 'Qwen/Qwen3-30B-A3B-Instruct-2507-FP8', label: 'Qwen3 30B-A3B (2507)', note: 'MoE · fast · long ctx' },
+];
+
+export async function localVllmStatus(): Promise<{ loaded: string | null; ready: boolean }> {
+  const models = await fetchLocalVllmModels();
+  return { loaded: models[0]?.id ?? null, ready: models.length > 0 };
+}
+
+function cachedLocalModelIds(): string[] {
+  try {
+    return readdirSync(HF_HUB_DIR)
+      .filter((d) => d.startsWith('models--'))
+      .map((d) => d.slice('models--'.length).replace(/--/g, '/'));
+  } catch {
+    return [];
+  }
+}
+
+export async function localFullCatalog(): Promise<{
+  loaded: string | null;
+  ready: boolean;
+  cached: string[];
+  curated: { id: string; label: string; note: string }[];
+}> {
+  const status = await localVllmStatus();
+  return { loaded: status.loaded, ready: status.ready, cached: cachedLocalModelIds(), curated: LOCAL_CURATED };
+}
+
+/** Drop the shared banana serve so the next turn respawns it and rebuilds its
+ *  config — re-registering whatever model vLLM now has loaded. */
+export function reloadBananaServe(): void {
+  bananaServer.shutdown();
+}
+
+/** Swap vLLM to `model` (downloading from HF if needed) via the vllm helper,
+ *  then reload the banana serve once it's live. Returns immediately; the load
+ *  runs in the background — poll localVllmStatus() to track it. */
+export async function serveLocalModel(
+  model: string,
+  opts?: { util?: string; maxLen?: string },
+): Promise<{ ok: boolean; error?: string }> {
+  if (!LOCAL_MODEL_ID_RE.test(model)) return { ok: false, error: 'invalid model id' };
+  const util = opts?.util && /^[0-9.]+$/.test(opts.util) ? opts.util : '0.6';
+  const maxLen = opts?.maxLen && /^[0-9]+$/.test(opts.maxLen) ? opts.maxLen : '32768';
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(VLLM_BIN, ['serve', model, util, maxLen], { timeout: 90_000 }, (err) =>
+        err ? reject(err) : resolve(),
+      );
+    });
+  } catch (error) {
+    return { ok: false, error: errorText(error) };
+  }
+  // Background: wait until vLLM reports the new model, then reload banana so it
+  // re-registers. ~5 min budget for HF download + sm121 kernel compile.
+  void (async () => {
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      const status = await localVllmStatus();
+      if (status.ready && status.loaded === model) {
+        reloadBananaServe();
+        console.log(`[local-vllm] ${model} ready; reloaded banana serve`);
+        return;
+      }
+    }
+    console.warn(`[local-vllm] ${model} did not come up within the load budget`);
+  })();
+  return { ok: true };
 }
 
 /** Which MCP servers (if any) to mirror into Banana for a given project. Banana

@@ -24,6 +24,7 @@ import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
 import { useBananaModel } from '../chat/hooks/useBananaModel';
 import { ModelPicker } from '../chat/components/ModelPicker';
+import { LocalModelPicker } from '../chat/components/LocalModelPicker';
 import { CodexEnginePicker, CLAUDE_MODELS, CLAUDE_EFFORTS } from '../chat/components/CodexEnginePicker';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
@@ -222,7 +223,6 @@ export function Hall() {
   // Local (vLLM) catalog — fetched live from /api/local/models when the Local
   // engine is active. vLLM serves one model at a time; swapping it on the box
   // (then reopening the picker) repopulates this.
-  const [localModels, setLocalModels] = useState<{ id: string; name: string }[]>([]);
   const [localModel, setLocalModelState] = useState<string>(
     () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:local-model')) || '',
   );
@@ -240,28 +240,6 @@ export function Hall() {
   const isLocalEngine = effectiveCli === 'banana-local';
   const isOpenRouterEngine = effectiveCli === 'banana';
   const isBananaEngine = isOpenRouterEngine || isLocalEngine;
-
-  // Pull the live vLLM catalog when Local is active; default to the first model.
-  useEffect(() => {
-    if (!isLocalEngine) return;
-    let cancelled = false;
-    fetch('/api/local/models')
-      .then((r) => r.json())
-      .then((d) => {
-        if (cancelled) return;
-        const models: { id: string; name: string }[] = Array.isArray(d?.data) ? d.data : [];
-        setLocalModels(models);
-        setLocalModelState((cur) => {
-          const next = models.some((m) => m.id === cur) ? cur : (models[0]?.id ?? '');
-          if (next && typeof window !== 'undefined') localStorage.setItem('rivendell:local-model', next);
-          return next;
-        });
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [isLocalEngine]);
 
   const chat = useChat({
     repo,
@@ -424,29 +402,7 @@ export function Hall() {
             </select>
           ) : null}
           {isLocalEngine ? (
-            <select
-              aria-label="Local model"
-              value={localModel}
-              onChange={(e) => changeLocalModel(e.target.value)}
-              title="vLLM model (whatever is loaded on :8000)"
-              style={{
-                fontSize: 12.5,
-                border: '1px solid var(--r-line)',
-                borderRadius: 7,
-                background: 'var(--r-bg-card)',
-                color: 'var(--r-ink)',
-                padding: '5px 9px',
-                cursor: 'pointer',
-              }}
-            >
-              {localModels.length ? (
-                localModels.map((m) => (
-                  <option key={m.id} value={m.id}>{m.name}</option>
-                ))
-              ) : (
-                <option value="">vLLM unreachable</option>
-              )}
-            </select>
+            <LocalModelPicker onActiveChange={(id) => { if (id) changeLocalModel(id); }} />
           ) : null}
           <button
             className={`rail-icon-button hall-info-toggle ${mobileInfoOpen ? 'is-active' : ''}`}

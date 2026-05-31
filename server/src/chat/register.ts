@@ -26,6 +26,9 @@ import {
   activeBananaSessions,
   listBananaOpenRouterModels,
   listLocalModels,
+  localFullCatalog,
+  localVllmStatus,
+  serveLocalModel,
   pruneIdleBananaSessions,
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
@@ -157,6 +160,46 @@ export async function registerChat(app: express.Express, server: Server): Promis
   app.get('/api/local/models', async (_req, res) => {
     try {
       res.json({ data: await listLocalModels() });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Full local catalog for the swap/download picker: loaded model, cached models,
+  // and a curated FP8 list.
+  app.get('/api/local/catalog', async (_req, res) => {
+    try {
+      res.json(await localFullCatalog());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Live vLLM status (which model is loaded + ready) — polled by the picker
+  // while a swap/download is in flight.
+  app.get('/api/local/status', async (_req, res) => {
+    try {
+      res.json(await localVllmStatus());
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
+  // Swap vLLM to a model (downloads from HF if needed), then auto-reload banana.
+  app.post('/api/local/serve', async (req, res) => {
+    const body = req.body as Partial<{ model: string; util: string; maxLen: string }>;
+    const model = typeof body.model === 'string' ? body.model.trim() : '';
+    if (!model) {
+      res.status(400).json({ error: 'model required' });
+      return;
+    }
+    try {
+      const result = await serveLocalModel(model, { util: body.util, maxLen: body.maxLen });
+      if (!result.ok) {
+        res.status(400).json(result);
+        return;
+      }
+      res.json(result);
     } catch (error) {
       res.status(500).json({ error: (error as Error).message });
     }
