@@ -1236,16 +1236,24 @@ export function reloadBananaServe(): void {
 /** Reload, but first wait (up to ~2 min) for Banana turns to go idle so we don't
  *  SIGTERM an in-flight OpenRouter/local turn out from under the user. */
 async function reloadBananaServeWhenIdle(): Promise<void> {
-  for (let i = 0; i < 24; i++) {
-    if (!activeBananaSessions().some((s) => s.busy)) break;
+  // Wait for Banana turns to go idle; NEVER SIGTERM an in-flight turn. Poll up
+  // to ~10 min; if a turn is still running past that, defer rather than kill it
+  // — the next serve respawn (idle prune / next session) re-registers the model.
+  for (let i = 0; i < 120; i++) {
+    if (!activeBananaSessions().some((s) => s.busy)) {
+      bananaServer.shutdown();
+      return;
+    }
     await new Promise((r) => setTimeout(r, 5000));
   }
-  bananaServer.shutdown();
+  console.warn('[local-vllm] banana still busy after reload window; deferring serve reload to next respawn');
 }
 
 // Single-flight guard for local serves: the newest serve wins; older background
 // watchers bail when superseded, so concurrent swaps don't race reloads.
 let localServeGeneration = 0;
+// Reject concurrent local serves so two swaps can't race the docker run / reload.
+let localServeInFlight = false;
 
 /** Swap vLLM to `model` (downloading from HF if needed) via the vllm helper,
  *  then reload the banana serve once it's live. Returns immediately; the load
@@ -1255,6 +1263,10 @@ export async function serveLocalModel(
   opts?: { util?: string; maxLen?: string },
 ): Promise<{ ok: boolean; error?: string }> {
   if (!LOCAL_MODEL_ID_RE.test(model)) return { ok: false, error: 'invalid model id' };
+  if (localServeInFlight) {
+    return { ok: false, error: 'a local model load is already in progress — wait for it to finish' };
+  }
+  localServeInFlight = true;
 
   // GPU memory fraction: finite, 0 < util <= 0.95 (leave headroom), else default.
   const utilNum = opts?.util != null ? Number(opts.util) : NaN;
@@ -1279,27 +1291,32 @@ export async function serveLocalModel(
       );
     });
   } catch (error) {
+    localServeInFlight = false;
     return { ok: false, error: errorText(error) };
   }
   // Background: wait until vLLM reports the new model, then reload banana (once
   // idle) so it re-registers. ~20 min budget for a first-time HF download +
   // sm121 kernel compile. A newer serve supersedes this watcher.
   void (async () => {
-    for (let i = 0; i < 240; i++) {
-      if (gen !== localServeGeneration) {
-        console.log(`[local-vllm] watcher for ${model} superseded by a newer serve`);
-        return;
+    try {
+      for (let i = 0; i < 240; i++) {
+        if (gen !== localServeGeneration) {
+          console.log(`[local-vllm] watcher for ${model} superseded by a newer serve`);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+        const status = await localVllmStatus();
+        if (status.ready && status.loaded === model) {
+          if (gen !== localServeGeneration) return;
+          await reloadBananaServeWhenIdle();
+          console.log(`[local-vllm] ${model} ready; reloaded banana serve`);
+          return;
+        }
       }
-      await new Promise((r) => setTimeout(r, 5000));
-      const status = await localVllmStatus();
-      if (status.ready && status.loaded === model) {
-        if (gen !== localServeGeneration) return;
-        await reloadBananaServeWhenIdle();
-        console.log(`[local-vllm] ${model} ready; reloaded banana serve`);
-        return;
-      }
+      console.warn(`[local-vllm] ${model} did not come up within the load budget`);
+    } finally {
+      localServeInFlight = false;
     }
-    console.warn(`[local-vllm] ${model} did not come up within the load budget`);
   })();
   return { ok: true };
 }
@@ -2689,7 +2706,23 @@ export class BananaSession {
     //    id), prepend the recap of the prior conversation to the prompt text
     //    so the brand-new session inherits context. Slash commands are expanded
     //    into prompt text here so Banana sees Claude/project commands too.
-    const model = parseModel(opts?.model);
+    // Engine boundary: a banana-local session must run ONLY a local (vLLM)
+    // model — never fall back to Banana's default / OpenRouter, which would leak
+    // a local-intended prompt to the cloud. Pin a missing/non-local model to
+    // whatever vLLM has loaded; if nothing is loaded, force a local/* id so the
+    // request errors locally instead of routing remotely. And never run a
+    // local/* model on the OpenRouter banana cli.
+    let requestedModelId = opts?.model;
+    if (this.cli === 'banana-local') {
+      const parsed = parseModel(requestedModelId);
+      if (!parsed || parsed.providerID !== 'local') {
+        const st = await localVllmStatus();
+        requestedModelId = `local/${st.loaded ?? 'no-model-loaded'}`;
+      }
+    } else if (parseModel(requestedModelId)?.providerID === 'local') {
+      requestedModelId = undefined;
+    }
+    const model = parseModel(requestedModelId);
     const slashCommand = await parseBananaSlashCommand(text, this.cwd);
     const needsContextRecovery = this.wipedThisTurn || recoverContextThisTurn;
     const commandExpandedText = slashCommand ? expandBananaSlashCommand(slashCommand) : text;

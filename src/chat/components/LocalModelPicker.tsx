@@ -54,7 +54,16 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
     if (!busy) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
+    const startedAt = Date.now();
+    const DEADLINE_MS = 22 * 60 * 1000; // just past the backend's ~20-min load budget
     const tick = async () => {
+      if (Date.now() - startedAt > DEADLINE_MS) {
+        // Don't disable the controls forever on a failed/slow load — clear busy
+        // and surface a recoverable error so the user can retry.
+        setBusy(null);
+        setErr(`Loading ${busy.split('/').pop()} timed out — check vLLM (download/compile may have failed). Try again.`);
+        return;
+      }
       try {
         const r = await fetch('/api/local/status');
         const s: { loaded: string | null; ready: boolean } = await r.json();
