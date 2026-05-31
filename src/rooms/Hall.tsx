@@ -177,6 +177,13 @@ export function Hall() {
     setClaudeEffort(e);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:claude-effort', e);
   };
+  const [bananaEffort, setBananaEffort] = useState<string>(
+    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:banana-effort')) || 'medium',
+  );
+  const changeBananaEffort = (e: string) => {
+    setBananaEffort(e);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:banana-effort', e);
+  };
 
   const chat = useChat({
     repo,
@@ -193,6 +200,7 @@ export function Hall() {
     effort:
       companion === 'codex' ? codexEffort
       : (companion === 'claude' || companion === 'assistant') ? claudeEffort
+      : companion === 'banana' ? bananaEffort
       : undefined,
   });
 
@@ -447,6 +455,8 @@ export function Hall() {
             modelPicker={companion === 'banana' ? bananaModel : null}
             codexPicker={companion === 'codex' ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
             claudePicker={(companion === 'claude' || companion === 'assistant') ? { model: claudeModel, effort: claudeEffort, setModel: changeClaudeModel, setEffort: changeClaudeEffort } : null}
+            bananaEffort={companion === 'banana' ? bananaEffort : null}
+            onBananaEffortChange={changeBananaEffort}
           />
         </main>
 
@@ -534,6 +544,8 @@ function Composer({
   modelPicker,
   codexPicker,
   claudePicker,
+  bananaEffort,
+  onBananaEffortChange,
 }: {
   disabled: boolean;
   streaming: boolean;
@@ -553,6 +565,9 @@ function Composer({
   codexPicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
   /** Non-null only for Claude/assistant — renders the model+effort selector. */
   claudePicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
+  /** OpenRouter reasoning effort (non-null only for the Banana companion). */
+  bananaEffort: string | null;
+  onBananaEffortChange: (e: string) => void;
 }) {
   const [value, setValue] = useState('');
   const [images, setImages] = useState<StagedImage[]>([]);
@@ -754,6 +769,18 @@ function Composer({
       <div className="composer-footer">
         <div className={modelPicker ? 'has-model-picker' : undefined}>
           {modelPicker ? <ModelPicker state={modelPicker} /> : null}
+          {modelPicker && bananaEffort ? (
+            <select
+              aria-label="Reasoning effort"
+              value={bananaEffort}
+              onChange={(e) => onBananaEffortChange(e.target.value)}
+              style={{ fontSize: 12.5, border: '1px solid var(--rule, currentColor)', borderRadius: 6, background: 'transparent', color: 'inherit', padding: '2px 6px', cursor: 'pointer' }}
+            >
+              {['low', 'medium', 'high'].map((e) => (
+                <option key={e} value={e}>{`effort · ${e}`}</option>
+              ))}
+            </select>
+          ) : null}
           {codexPicker ? (
             <CodexEnginePicker
               model={codexPicker.model}
