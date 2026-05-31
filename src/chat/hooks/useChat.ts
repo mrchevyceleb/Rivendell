@@ -25,8 +25,8 @@ const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 // defaults to 200K and ratchets to 1M when the model id reveals the [1m]
 // beta; banana defaults to a 200K window.
 function defaultWindowForCli(cli: CompanionId): number {
-  if (cli === 'codex') return CODEX_WINDOW_TOKENS;
-  if (cli === 'banana') return BANANA_WINDOW_TOKENS;
+  if (cli === 'codex' || cli === 'codex-personal') return CODEX_WINDOW_TOKENS;
+  if (cli === 'banana' || cli === 'banana-local') return BANANA_WINDOW_TOKENS;
   return DEFAULT_WINDOW_TOKENS;
 }
 

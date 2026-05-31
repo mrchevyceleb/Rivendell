@@ -7,7 +7,7 @@ import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
-import { accountEnv } from '../lib/accountResolver.ts';
+import { accountEnvForAccount } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
@@ -48,7 +48,34 @@ function collectDescendantPids(pid: number): number[] {
 //   resume failure, drop the stale id, and let the conversation continue from
 //   the new one (don't spawn again — the user's message hasn't been sent yet).
 
-export type CliKind = 'claude' | 'codex' | 'assistant' | 'banana';
+// Rivendell binds each companion to a CLI + account/provider via the `cli` value:
+//   assistant      = Elrond → Kim Claude (.claude)
+//   codex          = Codex  → Kim Codex (.codex)
+//   claude         = Banana → Personal Claude (.claude-personal)
+//   codex-personal = Banana → Personal Codex (.codex-personal)
+//   banana         = Banana → OpenRouter (monkey)
+//   banana-local   = Banana → Local LLM (vLLM on the Spark, direct)
+// The per-directory account-map still governs everywhere else (terminals, AutoSam,
+// samwise-2); this companion→account binding is Rivendell-only.
+export type CliKind =
+  | 'claude'
+  | 'codex'
+  | 'assistant'
+  | 'banana'
+  | 'codex-personal'
+  | 'banana-local';
+
+/** Rivendell-only: which named account a Claude/Codex-backed companion runs on. */
+export function cliAccount(cli: CliKind): string {
+  switch (cli) {
+    case 'assistant':
+    case 'codex':
+      return 'kim';
+    default:
+      // claude (Personal Claude), codex-personal (Personal Codex)
+      return 'personal';
+  }
+}
 
 export type StreamEvent = unknown;
 
@@ -206,7 +233,9 @@ class ClaudeSession {
 
     this.child = spawn('claude', args, {
       cwd,
-      env: accountEnv(cwd),
+      // Rivendell: the companion (not the directory) picks the account —
+      // assistant=Kim (Elrond), claude=personal (Banana → Personal Claude).
+      env: accountEnvForAccount(cliAccount(cli), cwd),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
@@ -492,11 +521,16 @@ export async function getOrCreateSession(opts: {
   effort?: string;
 }): Promise<AnySession> {
   const chatId = opts.chatId || 'main';
-  if (opts.cli === 'codex') {
-    return getOrCreateCodexSession({ repoPath: opts.repoPath, chatId });
+  if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
+    return getOrCreateCodexSession({
+      repoPath: opts.repoPath,
+      chatId,
+      cli: opts.cli,
+      account: cliAccount(opts.cli),
+    });
   }
-  if (opts.cli === 'banana') {
-    return getOrCreateBananaSession({ repoPath: opts.repoPath, chatId });
+  if (opts.cli === 'banana' || opts.cli === 'banana-local') {
+    return getOrCreateBananaSession({ repoPath: opts.repoPath, chatId, cli: opts.cli });
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
@@ -617,13 +651,13 @@ export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number
 // last spawned.
 export async function freshStart(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<AnySession> {
   const chatId = opts.chatId || 'main';
-  if (opts.cli === 'codex') {
+  if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { freshStartCodex } = await import('./codex-runner.ts');
-    return freshStartCodex({ repoPath: opts.repoPath, chatId });
+    return freshStartCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli, account: cliAccount(opts.cli) });
   }
-  if (opts.cli === 'banana') {
+  if (opts.cli === 'banana' || opts.cli === 'banana-local') {
     const { freshStartBanana } = await import('./banana-runner.ts');
-    return freshStartBanana({ repoPath: opts.repoPath, chatId });
+    return freshStartBanana({ repoPath: opts.repoPath, chatId, cli: opts.cli });
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
@@ -650,14 +684,14 @@ export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): vo
  *  saved session_id so the next message resumes the conversation. */
 export async function interruptSession(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<void> {
   const chatId = opts.chatId || 'main';
-  if (opts.cli === 'codex') {
+  if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { interruptCodex } = await import('./codex-runner.ts');
-    await interruptCodex({ repoPath: opts.repoPath, chatId });
+    await interruptCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
     return;
   }
-  if (opts.cli === 'banana') {
+  if (opts.cli === 'banana' || opts.cli === 'banana-local') {
     const { interruptBanana } = await import('./banana-runner.ts');
-    interruptBanana({ repoPath: opts.repoPath, chatId });
+    interruptBanana({ repoPath: opts.repoPath, chatId, cli: opts.cli });
     return;
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;

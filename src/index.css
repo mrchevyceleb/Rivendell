@@ -3791,7 +3791,11 @@ button {
   z-index: 40;
   width: 320px;
   max-width: 78vw;
-  background: var(--r-card, #1b1712);
+  /* Use the themed card surface so the menu is readable in BOTH light and dark
+     (the old `--r-card` was never defined → fell back to a hardcoded dark color,
+     which made the menu unreadable in light mode). */
+  background: var(--r-bg-card);
+  color: var(--r-ink);
   border: 1px solid var(--r-line);
   border-radius: 12px;
   padding: 12px;

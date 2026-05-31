@@ -7,7 +7,7 @@ import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
-import { accountEnv } from '../lib/accountResolver.ts';
+import { accountEnvForAccount } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -121,7 +121,7 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
-type CodexSessionOptions = { recoverContextOnNextTurn?: boolean };
+type CodexSessionOptions = { recoverContextOnNextTurn?: boolean; cli?: CliKind; account?: string };
 type ToolUseBlock = { index: number; toolUseId: string };
 type CodexUsage = {
   input_tokens: number;
@@ -198,7 +198,8 @@ function stringifyToolResultContent(content: unknown): string {
 
 export class CodexSession {
   readonly key: string;
-  readonly cli: CliKind = 'codex';
+  readonly cli: CliKind;
+  private readonly account: string;
   readonly cwd: string;
   readonly chatId: string;
   private listeners = new Set<Listener>();
@@ -223,7 +224,9 @@ export class CodexSession {
   constructor(cwd: string, chatId: string, threadId: string | null, opts: CodexSessionOptions = {}) {
     this.cwd = cwd;
     this.chatId = chatId;
-    this.key = keyOf(cwd, chatId);
+    this.cli = opts.cli ?? 'codex';
+    this.account = opts.account ?? 'kim';
+    this.key = keyOf(this.cli, cwd, chatId);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
 
@@ -322,8 +325,8 @@ export class CodexSession {
   private persistThreadId(threadId: string): Promise<void> {
     this.threadId = threadId;
     this.threadIdWrite = this.threadIdWrite.then(
-      () => setSessionId('codex', this.cwd, threadId, this.chatId),
-      () => setSessionId('codex', this.cwd, threadId, this.chatId),
+      () => setSessionId(this.cli, this.cwd, threadId, this.chatId),
+      () => setSessionId(this.cli, this.cwd, threadId, this.chatId),
     );
     return this.threadIdWrite;
   }
@@ -565,7 +568,7 @@ export class CodexSession {
 
     const child = spawn('codex', args, {
       cwd: this.cwd,
-      env: accountEnv(this.cwd),
+      env: accountEnvForAccount(this.account, this.cwd),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -862,9 +865,9 @@ export class CodexSession {
   }
 }
 
-function keyOf(cwd: string, chatId = 'main'): string {
+function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
   const normalized = chatId || 'main';
-  return normalized === 'main' ? `codex|${cwd}` : `codex|${cwd}|${normalized}`;
+  return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 
 function latestThreadIdFromEvents(events: SeqEvent[]): string | null {
@@ -901,7 +904,7 @@ export function activeCodexSessions(): {
   lastActivityAt: number;
 }[] {
   return Array.from(codexSessions.values()).map((s) => ({
-    cli: 'codex',
+    cli: s.cli,
     cwd: s.cwd,
     chatId: s.chatId,
     busy: s.isBusy(),
@@ -926,15 +929,22 @@ export function pruneIdleCodexSessions(ttlMs: number, now = Date.now()): number 
   return pruned;
 }
 
-export async function getOrCreateCodexSession(opts: { repoPath: string; chatId?: string }): Promise<CodexSession> {
+export async function getOrCreateCodexSession(opts: {
+  repoPath: string;
+  chatId?: string;
+  cli?: CliKind;
+  account?: string;
+}): Promise<CodexSession> {
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
-  const key = keyOf(cwd, chatId);
+  const cli = opts.cli ?? 'codex';
+  const account = opts.account ?? 'kim';
+  const key = keyOf(cli, cwd, chatId);
   const existing = codexSessions.get(key);
   if (existing && existing.isAlive()) return existing;
 
-  const threadId = (await getSessionId('codex', cwd, chatId)) ?? null;
-  const session = new CodexSession(cwd, chatId, threadId);
+  const threadId = (await getSessionId(cli, cwd, chatId)) ?? null;
+  const session = new CodexSession(cwd, chatId, threadId, { cli, account });
   codexSessions.set(key, session);
   return session;
 }
@@ -949,9 +959,9 @@ export function shutdownAllCodexSessions(): void {
 /** Kill the in-flight codex child and wait for it to fully exit before
  *  returning. Caller (steer/stop) needs the await so the next `codex exec
  *  resume` doesn't race the dying child's writes to the rollout JSONL. */
-export async function interruptCodex(opts: { repoPath: string; chatId?: string }): Promise<void> {
+export async function interruptCodex(opts: { repoPath: string; chatId?: string; cli?: CliKind }): Promise<void> {
   const cwd = opts.repoPath;
-  const key = keyOf(cwd, opts.chatId || 'main');
+  const key = keyOf(opts.cli ?? 'codex', cwd, opts.chatId || 'main');
   const s = codexSessions.get(key);
   if (s) {
     codexSessions.delete(key);
@@ -960,17 +970,24 @@ export async function interruptCodex(opts: { repoPath: string; chatId?: string }
 }
 
 /** Drop the stored thread id so the next codex spawn starts a fresh thread. */
-export async function freshStartCodex(opts: { repoPath: string; chatId?: string }): Promise<CodexSession> {
+export async function freshStartCodex(opts: {
+  repoPath: string;
+  chatId?: string;
+  cli?: CliKind;
+  account?: string;
+}): Promise<CodexSession> {
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
-  const key = keyOf(cwd, chatId);
+  const cli = opts.cli ?? 'codex';
+  const account = opts.account ?? 'kim';
+  const key = keyOf(cli, cwd, chatId);
   const existing = codexSessions.get(key);
   if (existing) {
     codexSessions.delete(key);
     await existing.shutdown();
   }
-  await setSessionId('codex', cwd, '', chatId);
-  const session = new CodexSession(cwd, chatId, null);
+  await setSessionId(cli, cwd, '', chatId);
+  const session = new CodexSession(cwd, chatId, null, { cli, account });
   codexSessions.set(key, session);
   return session;
 }

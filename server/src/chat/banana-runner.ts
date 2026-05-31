@@ -41,7 +41,7 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
-type BananaSessionOptions = { recoverContextOnNextTurn?: boolean };
+type BananaSessionOptions = { recoverContextOnNextTurn?: boolean; cli?: CliKind };
 type BananaSendOptions = {
   model?: string;
   /** Reasoning effort (e.g. low|medium|high) for OpenRouter/openai-compatible models. */
@@ -1951,7 +1951,7 @@ const bananaServer = new BananaServer();
 
 export class BananaSession {
   readonly key: string;
-  readonly cli: CliKind = 'banana';
+  readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
   private listeners = new Set<Listener>();
@@ -1989,7 +1989,8 @@ export class BananaSession {
   constructor(cwd: string, chatId: string, threadId: string | null, opts: BananaSessionOptions = {}) {
     this.cwd = cwd;
     this.chatId = chatId;
-    this.key = keyOf(cwd, chatId);
+    this.cli = opts.cli ?? 'banana';
+    this.key = keyOf(this.cli, cwd, chatId);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
 
@@ -3388,9 +3389,9 @@ function isPromptTransportFailure(message: string): boolean {
   return /fetch failed|ECONNREFUSED|ECONNRESET|EPIPE|UND_ERR|socket|terminated/i.test(message);
 }
 
-function keyOf(cwd: string, chatId = 'main'): string {
+function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
   const normalized = chatId || 'main';
-  return normalized === 'main' ? `banana|${cwd}` : `banana|${cwd}|${normalized}`;
+  return normalized === 'main' ? `${cli}|${cwd}` : `${cli}|${cwd}|${normalized}`;
 }
 
 /** Manager keyed by cwd + chat id, matching the claude/codex session maps. */
@@ -3405,7 +3406,7 @@ export function activeBananaSessions(): {
   lastActivityAt: number;
 }[] {
   return Array.from(bananaSessions.values()).map((s) => ({
-    cli: 'banana',
+    cli: s.cli,
     cwd: s.cwd,
     chatId: s.chatId,
     busy: s.isBusy(),
@@ -3427,10 +3428,15 @@ export function pruneIdleBananaSessions(ttlMs: number, now = Date.now()): number
   return pruned;
 }
 
-export async function getOrCreateBananaSession(opts: { repoPath: string; chatId?: string }): Promise<BananaSession> {
+export async function getOrCreateBananaSession(opts: {
+  repoPath: string;
+  chatId?: string;
+  cli?: CliKind;
+}): Promise<BananaSession> {
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
-  const key = keyOf(cwd, chatId);
+  const cli = opts.cli ?? 'banana';
+  const key = keyOf(cli, cwd, chatId);
   const existing = bananaSessions.get(key);
   if (existing && existing.isAlive()) return existing;
 
@@ -3440,14 +3446,14 @@ export async function getOrCreateBananaSession(opts: { repoPath: string; chatId?
   // while the in-memory BananaSession is alive, but always start fresh after
   // a process restart / idle prune.
   let recoverContextOnNextTurn = false;
-  if (await getSessionId('banana', cwd, chatId)) {
+  if (await getSessionId(cli, cwd, chatId)) {
     recoverContextOnNextTurn = true;
-    await setSessionId('banana', cwd, '', chatId);
+    await setSessionId(cli, cwd, '', chatId);
     console.warn(
       `[chat banana] ignoring persisted opencode session after process restart for ${key}; will recover context from event log on next turn`,
     );
   }
-  const session = new BananaSession(cwd, chatId, null, { recoverContextOnNextTurn });
+  const session = new BananaSession(cwd, chatId, null, { recoverContextOnNextTurn, cli });
   bananaSessions.set(key, session);
   return session;
 }
@@ -3461,9 +3467,9 @@ export function shutdownAllBananaSessions(): void {
 }
 
 /** Kill the in-flight banana turn but keep the session id saved for resume. */
-export function interruptBanana(opts: { repoPath: string; chatId?: string }): void {
+export function interruptBanana(opts: { repoPath: string; chatId?: string; cli?: CliKind }): void {
   const cwd = opts.repoPath;
-  const key = keyOf(cwd, opts.chatId || 'main');
+  const key = keyOf(opts.cli ?? 'banana', cwd, opts.chatId || 'main');
   const s = bananaSessions.get(key);
   if (s) {
     s.shutdown();
@@ -3472,17 +3478,22 @@ export function interruptBanana(opts: { repoPath: string; chatId?: string }): vo
 }
 
 /** Drop the stored session id so the next banana turn starts a fresh session. */
-export async function freshStartBanana(opts: { repoPath: string; chatId?: string }): Promise<BananaSession> {
+export async function freshStartBanana(opts: {
+  repoPath: string;
+  chatId?: string;
+  cli?: CliKind;
+}): Promise<BananaSession> {
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
-  const key = keyOf(cwd, chatId);
+  const cli = opts.cli ?? 'banana';
+  const key = keyOf(cli, cwd, chatId);
   const existing = bananaSessions.get(key);
   if (existing) {
     existing.shutdown();
     bananaSessions.delete(key);
   }
-  await setSessionId('banana', cwd, '', chatId);
-  const session = new BananaSession(cwd, chatId, null);
+  await setSessionId(cli, cwd, '', chatId);
+  const session = new BananaSession(cwd, chatId, null, { cli });
   bananaSessions.set(key, session);
   return session;
 }

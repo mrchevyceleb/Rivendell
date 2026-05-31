@@ -46,6 +46,29 @@ export function resolveAccount(cwd: string): string | null {
 }
 
 /**
+ * Env for spawning a CLI on an EXPLICITLY NAMED account, overriding the directory
+ * rules. Rivendell uses this to bind a companion (not a directory) to an account:
+ * Elrond/Codex → kim, Banana's personal engines → personal. The per-directory
+ * `accountEnv` below stays authoritative everywhere else (terminals, AutoSam,
+ * samwise-2). Unknown account name → falls back to directory resolution.
+ */
+export function accountEnvForAccount(account: string, cwd: string): NodeJS.ProcessEnv {
+  const map = loadMap();
+  const a = map ? map.accounts[account] : undefined;
+  if (a) {
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    env.SAMWISE_ACCOUNT = account;
+    env.CLAUDE_CONFIG_DIR = join(HOME, a.claude_config_dir);
+    env.CODEX_HOME = join(HOME, a.codex_home);
+    return env;
+  }
+  console.warn(
+    `[accountResolver] forced account "${account}" not in map; falling back to directory rules for cwd="${cwd}"`,
+  );
+  return accountEnv(cwd);
+}
+
+/**
  * Env for spawning a CLI in `cwd`: layers the right CLAUDE_CONFIG_DIR / CODEX_HOME
  * for that workspace over process.env. If the map is missing or the account is
  * unknown, returns process.env unchanged (safe no-op fallback).

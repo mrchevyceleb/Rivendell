@@ -53,24 +53,51 @@ const SCRIBE_COLLAPSED_KEY = 'rivendell:hall-scribe-collapsed';
 
 const companionLabel: Record<CompanionId, string> = {
   assistant: 'Elrond',
-  claude: 'Claude Code',
+  claude: 'Personal Claude',
   codex: 'Codex',
   banana: 'Banana',
+  'codex-personal': 'Personal Codex',
+  'banana-local': 'Local LLM',
 };
 
 const companionTitle: Record<CompanionId, string> = {
   assistant: 'Lord of Imladris',
-  claude: 'Anthropic emissary',
+  claude: 'personal-account Claude Code',
   codex: 'OpenAI emissary',
   banana: 'Banana Code emissary',
+  'codex-personal': 'personal-account Codex',
+  'banana-local': 'local model on the Spark',
 };
 
 const companionSub: Record<CompanionId, string> = {
-  assistant: 'local Claude Code session in ASSISTANT-HUB',
-  claude: 'tool-rich, persistent session',
-  codex: 'local Codex session in ASSISTANT-HUB',
-  banana: 'local Banana Code session in ASSISTANT-HUB',
+  assistant: 'Kim Claude Code in ASSISTANT-HUB',
+  claude: 'personal-account Claude Code',
+  codex: 'Kim Codex',
+  banana: 'OpenRouter via Banana Code',
+  'codex-personal': 'personal-account Codex',
+  'banana-local': 'local vLLM model, direct',
 };
+
+// Banana is an engine multiplexer: the picked engine selects the wire cli
+// (and thus the account / provider) the session actually runs on.
+type BananaEngine = 'personal-claude' | 'personal-codex' | 'openrouter' | 'local';
+const BANANA_ENGINES: { id: BananaEngine; label: string }[] = [
+  { id: 'openrouter', label: 'OpenRouter' },
+  { id: 'personal-claude', label: 'Personal Claude' },
+  { id: 'personal-codex', label: 'Personal Codex' },
+];
+function bananaEngineToCli(engine: string): CompanionId {
+  switch (engine) {
+    case 'personal-claude':
+      return 'claude';
+    case 'personal-codex':
+      return 'codex-personal';
+    case 'local':
+      return 'banana-local';
+    default:
+      return 'banana';
+  }
+}
 
 const statusCopy: Record<ChatStatus, string> = {
   idle: 'idle',
@@ -184,23 +211,38 @@ export function Hall() {
     setBananaEffort(e);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:banana-effort', e);
   };
+  const [bananaEngine, setBananaEngineState] = useState<string>(
+    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:banana-engine')) || 'openrouter',
+  );
+  const changeBananaEngine = (e: string) => {
+    setBananaEngineState(e);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:banana-engine', e);
+  };
+
+  // The wire cli the Banana companion actually runs as, per its engine pick.
+  // Elrond/Codex tabs map straight through. This drives the account/provider
+  // (server-side) AND which model/effort picker we surface (client-side).
+  const effectiveCli: CompanionId = companion === 'banana' ? bananaEngineToCli(bananaEngine) : companion;
+  const isClaudeEngine = effectiveCli === 'claude' || effectiveCli === 'assistant';
+  const isCodexEngine = effectiveCli === 'codex' || effectiveCli === 'codex-personal';
+  const isBananaEngine = effectiveCli === 'banana' || effectiveCli === 'banana-local';
 
   const chat = useChat({
     repo,
-    cli: companion,
+    cli: effectiveCli,
     chatId: activeTab?.id ?? MAIN_CHAT_ID,
     enabled: Boolean(repo),
     initialMessage: pendingPrompt,
     onInitialMessageSent: () => setPendingPrompt(null),
     model:
-      companion === 'banana' ? bananaModel.model
-      : companion === 'codex' ? codexModel
-      : (companion === 'claude' || companion === 'assistant') ? claudeModel
+      isBananaEngine ? bananaModel.model
+      : isCodexEngine ? codexModel
+      : isClaudeEngine ? claudeModel
       : undefined,
     effort:
-      companion === 'codex' ? codexEffort
-      : (companion === 'claude' || companion === 'assistant') ? claudeEffort
-      : companion === 'banana' ? bananaEffort
+      isCodexEngine ? codexEffort
+      : isClaudeEngine ? claudeEffort
+      : isBananaEngine ? bananaEffort
       : undefined,
   });
 
@@ -217,8 +259,8 @@ export function Hall() {
   }, [activeTab?.id, chat.blocks]);
 
   const activeCommands =
-    companion === 'codex' ? commands.codex
-    : companion === 'banana' ? commands.banana
+    isCodexEngine ? commands.codex
+    : isBananaEngine ? commands.banana
     : commands.claude;
   const activeLive = liveSessions.find((session) => (
     session.cwd === repo?.path &&
@@ -322,6 +364,28 @@ export function Hall() {
               </button>
             ))}
           </div>
+          {companion === 'banana' ? (
+            <select
+              aria-label="Banana engine"
+              className="banana-engine-select"
+              value={bananaEngine}
+              onChange={(e) => changeBananaEngine(e.target.value)}
+              title="Which engine the Banana companion runs"
+              style={{
+                fontSize: 12.5,
+                border: '1px solid var(--r-line)',
+                borderRadius: 7,
+                background: 'var(--r-bg-card)',
+                color: 'var(--r-ink)',
+                padding: '5px 9px',
+                cursor: 'pointer',
+              }}
+            >
+              {BANANA_ENGINES.map((opt) => (
+                <option key={opt.id} value={opt.id}>{opt.label}</option>
+              ))}
+            </select>
+          ) : null}
           <button
             className={`rail-icon-button hall-info-toggle ${mobileInfoOpen ? 'is-active' : ''}`}
             type="button"
@@ -447,15 +511,15 @@ export function Hall() {
             onFreshStart={beginFresh}
             onReconnect={chat.reconnect}
             chatStatus={chat.status}
-            commandPrefix={companion === 'codex' ? '$' : '/'}
-            claudeCommands={companion === 'banana' ? commands.banana : commands.claude}
+            commandPrefix={isCodexEngine ? '$' : '/'}
+            claudeCommands={isBananaEngine ? commands.banana : commands.claude}
             codexCommands={commands.codex}
             agentName={companionLabel[companion]}
             usage={chat.usage}
-            modelPicker={companion === 'banana' ? bananaModel : null}
-            codexPicker={companion === 'codex' ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
-            claudePicker={(companion === 'claude' || companion === 'assistant') ? { model: claudeModel, effort: claudeEffort, setModel: changeClaudeModel, setEffort: changeClaudeEffort } : null}
-            bananaEffort={companion === 'banana' ? bananaEffort : null}
+            modelPicker={isBananaEngine ? bananaModel : null}
+            codexPicker={isCodexEngine ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
+            claudePicker={isClaudeEngine ? { model: claudeModel, effort: claudeEffort, setModel: changeClaudeModel, setEffort: changeClaudeEffort } : null}
+            bananaEffort={isBananaEngine ? bananaEffort : null}
             onBananaEffortChange={changeBananaEffort}
           />
         </main>

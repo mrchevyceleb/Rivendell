@@ -155,7 +155,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
   app.post('/api/chat/interrupt', async (req, res) => {
     const body = req.body as Partial<{ cli: CliKind; repo: string; chatId: string }>;
     const cli = body.cli;
-    if (cli !== 'assistant' && cli !== 'claude' && cli !== 'codex' && cli !== 'banana') {
+    if (
+      cli !== 'assistant' &&
+      cli !== 'claude' &&
+      cli !== 'codex' &&
+      cli !== 'banana' &&
+      cli !== 'codex-personal' &&
+      cli !== 'banana-local'
+    ) {
       res.status(400).json({ error: 'invalid cli' });
       return;
     }

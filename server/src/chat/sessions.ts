@@ -5,7 +5,7 @@ import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 // One mapping per (repo, cli) → claude session_id.
 // Persists across server restarts so re-opening a chat resumes the right thread.
 
-type Cli = 'claude' | 'codex' | 'assistant' | 'banana';
+type Cli = 'claude' | 'codex' | 'assistant' | 'banana' | 'codex-personal' | 'banana-local';
 type Key = string; // `${cli}|${repoPath}` or `${cli}|${repoPath}|${chatId}`
 
 type Stored = Record<Key, { sessionId: string; updatedAt: number }>;
