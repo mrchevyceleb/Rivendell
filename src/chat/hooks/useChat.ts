@@ -724,6 +724,10 @@ export function useChat(opts: {
     pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'send', chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));
+    // Show the thinking/working indicator immediately. A slow local model (e.g.
+    // a 30B reasoning model) can take many seconds before turnStart arrives,
+    // which otherwise looks frozen. turnStart/turnEnd/result/error reset this.
+    setStatus('streaming');
   };
 
   const freshStart = () => {
@@ -763,6 +767,7 @@ export function useChat(opts: {
     pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));
+    setStatus('streaming');
   };
 
   const reconnect = () => forceReconnectRef.current();
