@@ -1210,9 +1210,10 @@ export async function serveLocalModel(
     return { ok: false, error: errorText(error) };
   }
   // Background: wait until vLLM reports the new model, then reload banana so it
-  // re-registers. ~5 min budget for HF download + sm121 kernel compile.
+  // re-registers. ~20 min budget — a first-time HF download of a 30B FP8 model
+  // plus sm121 kernel compile can take ~8-10 min.
   void (async () => {
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 240; i++) {
       await new Promise((r) => setTimeout(r, 5000));
       const status = await localVllmStatus();
       if (status.ready && status.loaded === model) {
