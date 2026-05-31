@@ -44,8 +44,6 @@ type ChatImage = { mediaType: string; base64: string };
 type BananaSessionOptions = { recoverContextOnNextTurn?: boolean };
 type BananaSendOptions = {
   model?: string;
-  /** Reasoning effort (e.g. low|medium|high) for OpenRouter/openai-compatible models. */
-  effort?: string;
   hidden?: boolean;
   autoContinueDepth?: number;
   blockedSearchContinueDepth?: number;
@@ -2428,8 +2426,6 @@ export class BananaSession {
       const res = await client.session.prompt({
         sessionID: this.threadId,
         ...(model ? { model } : {}),
-        // Per-request reasoning effort -> providerOptions -> reasoning_effort.
-        ...(opts?.effort ? { options: { reasoningEffort: opts.effort } } : {}),
         parts: [...fileParts, { type: 'text' as const, text: effectiveText }],
       });
       if (res.error) {
