@@ -28,7 +28,7 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
   const [busy, setBusy] = useState<string | null>(null);
   const [custom, setCustom] = useState('');
   const [ctx, setCtx] = useState(''); // '' = auto (model's native context, capped)
-  const [util, setUtil] = useState('0.6'); // GPU memory fraction (LM-Studio-style knob)
+  const [util, setUtil] = useState('0.85'); // GPU memory fraction (LM-Studio-style knob)
   const [err, setErr] = useState<string | null>(null);
   const activeCbRef = useRef(onActiveChange);
   activeCbRef.current = onActiveChange;

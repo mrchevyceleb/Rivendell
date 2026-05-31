@@ -1270,7 +1270,7 @@ export async function serveLocalModel(
 
   // GPU memory fraction: finite, 0 < util <= 0.95 (leave headroom), else default.
   const utilNum = opts?.util != null ? Number(opts.util) : NaN;
-  const util = Number.isFinite(utilNum) && utilNum > 0 && utilNum <= 0.95 ? String(utilNum) : '0.6';
+  const util = Number.isFinite(utilNum) && utilNum > 0 && utilNum <= 0.95 ? String(utilNum) : '0.85';
 
   // Context: an explicit value is floored, must be positive, and hard-capped.
   // Blank => the model's native window, capped to the memory-safe auto ceiling.
