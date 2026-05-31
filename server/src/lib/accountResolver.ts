@@ -50,22 +50,28 @@ export function resolveAccount(cwd: string): string | null {
  * rules. Rivendell uses this to bind a companion (not a directory) to an account:
  * Elrond/Codex → kim, Banana's personal engines → personal. The per-directory
  * `accountEnv` below stays authoritative everywhere else (terminals, AutoSam,
- * samwise-2). Unknown account name → falls back to directory resolution.
+ * samwise-2). If the named account is missing from the map we FAIL CLOSED —
+ * scrub CLAUDE_CONFIG_DIR/CODEX_HOME to the CLI defaults rather than silently
+ * falling back to directory rules, which could bleed the companion onto the
+ * wrong account (e.g. Personal Claude in ASSISTANT-HUB routing to Kim).
  */
 export function accountEnvForAccount(account: string, cwd: string): NodeJS.ProcessEnv {
   const map = loadMap();
   const a = map ? map.accounts[account] : undefined;
+  const env: NodeJS.ProcessEnv = { ...process.env };
   if (a) {
-    const env: NodeJS.ProcessEnv = { ...process.env };
     env.SAMWISE_ACCOUNT = account;
     env.CLAUDE_CONFIG_DIR = join(HOME, a.claude_config_dir);
     env.CODEX_HOME = join(HOME, a.codex_home);
     return env;
   }
   console.warn(
-    `[accountResolver] forced account "${account}" not in map; falling back to directory rules for cwd="${cwd}"`,
+    `[accountResolver] forced account "${account}" not in map (${MAP_PATH}); failing CLOSED — scrubbing CLAUDE_CONFIG_DIR/CODEX_HOME -> CLI default rather than risk wrong-account bleed (cwd="${cwd}")`,
   );
-  return accountEnv(cwd);
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.CODEX_HOME;
+  env.SAMWISE_ACCOUNT = `unresolved:${account}`;
+  return env;
 }
 
 /**

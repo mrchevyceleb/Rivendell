@@ -1169,8 +1169,10 @@ export async function localVllmStatus(): Promise<{
 }
 
 // Cap the AUTO context default for memory safety — a model may advertise 256k+
-// native, but a KV cache that large can OOM. The user can override upward.
+// native, but a KV cache that large can OOM. The user can override upward, but
+// only up to a hard maximum.
 const LOCAL_CTX_CEILING = 131072;
+const LOCAL_CTX_HARD_MAX = 262144;
 
 /** The model's native context window, read from its HF config.json (so we can
  *  default to it instead of a fixed 32k). Null if unreachable. */
@@ -1224,10 +1226,26 @@ export async function localFullCatalog(): Promise<{
 }
 
 /** Drop the shared banana serve so the next turn respawns it and rebuilds its
- *  config — re-registering whatever model vLLM now has loaded. */
+ *  config — re-registering whatever model vLLM now has loaded. Immediate; from
+ *  background paths prefer reloadBananaServeWhenIdle() so an in-flight turn isn't
+ *  stranded. */
 export function reloadBananaServe(): void {
   bananaServer.shutdown();
 }
+
+/** Reload, but first wait (up to ~2 min) for Banana turns to go idle so we don't
+ *  SIGTERM an in-flight OpenRouter/local turn out from under the user. */
+async function reloadBananaServeWhenIdle(): Promise<void> {
+  for (let i = 0; i < 24; i++) {
+    if (!activeBananaSessions().some((s) => s.busy)) break;
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  bananaServer.shutdown();
+}
+
+// Single-flight guard for local serves: the newest serve wins; older background
+// watchers bail when superseded, so concurrent swaps don't race reloads.
+let localServeGeneration = 0;
 
 /** Swap vLLM to `model` (downloading from HF if needed) via the vllm helper,
  *  then reload the banana serve once it's live. Returns immediately; the load
@@ -1237,13 +1255,23 @@ export async function serveLocalModel(
   opts?: { util?: string; maxLen?: string },
 ): Promise<{ ok: boolean; error?: string }> {
   if (!LOCAL_MODEL_ID_RE.test(model)) return { ok: false, error: 'invalid model id' };
-  const util = opts?.util && /^[0-9.]+$/.test(opts.util) ? opts.util : '0.6';
-  let maxLen = opts?.maxLen && /^[0-9]+$/.test(opts.maxLen) ? opts.maxLen : '';
-  if (!maxLen) {
-    // Auto: default to the model's native context (capped), not a flat 32k.
+
+  // GPU memory fraction: finite, 0 < util <= 0.95 (leave headroom), else default.
+  const utilNum = opts?.util != null ? Number(opts.util) : NaN;
+  const util = Number.isFinite(utilNum) && utilNum > 0 && utilNum <= 0.95 ? String(utilNum) : '0.6';
+
+  // Context: an explicit value is floored, must be positive, and hard-capped.
+  // Blank => the model's native window, capped to the memory-safe auto ceiling.
+  const explicitLen = opts?.maxLen != null && opts.maxLen !== '' ? Number(opts.maxLen) : NaN;
+  let maxLen: string;
+  if (Number.isFinite(explicitLen) && explicitLen > 0) {
+    maxLen = String(Math.min(Math.floor(explicitLen), LOCAL_CTX_HARD_MAX));
+  } else {
     const native = await fetchHfNativeContext(model);
     maxLen = String(Math.min(native ?? 32768, LOCAL_CTX_CEILING));
   }
+
+  const gen = ++localServeGeneration;
   try {
     await new Promise<void>((resolve, reject) => {
       execFile(VLLM_BIN, ['serve', model, util, maxLen], { timeout: 90_000 }, (err) =>
@@ -1253,15 +1281,20 @@ export async function serveLocalModel(
   } catch (error) {
     return { ok: false, error: errorText(error) };
   }
-  // Background: wait until vLLM reports the new model, then reload banana so it
-  // re-registers. ~20 min budget — a first-time HF download of a 30B FP8 model
-  // plus sm121 kernel compile can take ~8-10 min.
+  // Background: wait until vLLM reports the new model, then reload banana (once
+  // idle) so it re-registers. ~20 min budget for a first-time HF download +
+  // sm121 kernel compile. A newer serve supersedes this watcher.
   void (async () => {
     for (let i = 0; i < 240; i++) {
+      if (gen !== localServeGeneration) {
+        console.log(`[local-vllm] watcher for ${model} superseded by a newer serve`);
+        return;
+      }
       await new Promise((r) => setTimeout(r, 5000));
       const status = await localVllmStatus();
       if (status.ready && status.loaded === model) {
-        reloadBananaServe();
+        if (gen !== localServeGeneration) return;
+        await reloadBananaServeWhenIdle();
         console.log(`[local-vllm] ${model} ready; reloaded banana serve`);
         return;
       }
@@ -2309,7 +2342,7 @@ export class BananaSession {
     this.threadId = null;
     this.threadServeGeneration = null;
     this.wipedThisTurn = true;
-    await setSessionId('banana', this.cwd, '', this.chatId);
+    await setSessionId(this.cli, this.cwd, '', this.chatId);
   }
 
   private quarantineThread(reason: string): void {
@@ -2320,7 +2353,7 @@ export class BananaSession {
     this.threadId = null;
     this.threadServeGeneration = null;
     this.recoverContextOnNextTurn = true;
-    void setSessionId('banana', this.cwd, '', this.chatId).catch((err) => {
+    void setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
       console.warn(`[chat banana] failed to persist quarantined session: ${(err as Error).message}`);
     });
   }
@@ -2602,7 +2635,7 @@ export class BananaSession {
         }
         this.threadId = newId;
         this.threadServeGeneration = serveGeneration;
-        await setSessionId('banana', this.cwd, newId, this.chatId);
+        await setSessionId(this.cli, this.cwd, newId, this.chatId);
         this.emit({ type: 'event', event: { type: 'system', subtype: 'init', session_id: newId } });
       } catch (err) {
         this.failTurn(`banana session.create failed: ${(err as Error).message}`);
