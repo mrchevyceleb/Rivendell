@@ -2428,8 +2428,13 @@ export class BananaSession {
       const res = await client.session.prompt({
         sessionID: this.threadId,
         ...(model ? { model } : {}),
-        // Per-request reasoning effort -> providerOptions -> reasoning_effort.
-        ...(opts?.effort ? { options: { reasoningEffort: opts.effort } } : {}),
+        // Per-request reasoning effort. The SDK prompt client only forwards a
+        // fixed key set and silently DROPS `options` — but it does forward
+        // `variant`. Banana maps the model's effort variant (low|medium|high) to
+        // providerOptions: {reasoning:{effort}} for the OpenRouter provider,
+        // {reasoningEffort} for openai-compatible. A model with no matching
+        // variant (e.g. glm/kimi/qwen, which Banana excludes) is a safe no-op.
+        ...(opts?.effort ? { variant: opts.effort } : {}),
         parts: [...fileParts, { type: 'text' as const, text: effectiveText }],
       });
       if (res.error) {
