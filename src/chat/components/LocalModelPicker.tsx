@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 type Catalog = {
   loaded: string | null;
   ready: boolean;
+  contextLen: number | null;
   cached: string[];
   curated: { id: string; label: string; note: string }[];
 };
@@ -26,6 +27,8 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
   const [cat, setCat] = useState<Catalog | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [custom, setCustom] = useState('');
+  const [ctx, setCtx] = useState(''); // '' = auto (model's native context, capped)
+  const [util, setUtil] = useState('0.6'); // GPU memory fraction (LM-Studio-style knob)
   const [err, setErr] = useState<string | null>(null);
   const activeCbRef = useRef(onActiveChange);
   activeCbRef.current = onActiveChange;
@@ -85,7 +88,7 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
       const r = await fetch('/api/local/serve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model }),
+        body: JSON.stringify({ model, maxLen: ctx.trim() || undefined, util: util.trim() || undefined }),
       });
       const d = await r.json().catch(() => ({}));
       if (!r.ok || d.ok === false) {
@@ -103,7 +106,8 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
   const options: { id: string; label: string }[] = [];
   if (cat?.loaded) {
     seen.add(cat.loaded);
-    options.push({ id: cat.loaded, label: `● ${cat.loaded.split('/').pop()} (loaded)` });
+    const ctxLabel = cat.contextLen ? ` · ${Math.round(cat.contextLen / 1024)}k ctx` : '';
+    options.push({ id: cat.loaded, label: `● ${cat.loaded.split('/').pop()} (loaded${ctxLabel})` });
   }
   for (const c of cat?.curated ?? []) {
     if (seen.has(c.id)) continue;
@@ -144,6 +148,22 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
           if (e.key === 'Enter' && custom.trim()) void load(custom.trim());
         }}
         style={{ ...selStyle, width: 130 }}
+      />
+      <input
+        placeholder="ctx: auto"
+        title="Context length in tokens. Blank = the model's native max (capped ~131k for memory). Set before picking a model — like LM Studio's context slider."
+        value={ctx}
+        disabled={!!busy}
+        onChange={(e) => setCtx(e.target.value.replace(/[^0-9]/g, ''))}
+        style={{ ...selStyle, width: 80 }}
+      />
+      <input
+        placeholder="gpu 0.6"
+        title="GPU memory fraction vLLM may use (0–1). Raise for bigger models / longer context."
+        value={util}
+        disabled={!!busy}
+        onChange={(e) => setUtil(e.target.value.replace(/[^0-9.]/g, ''))}
+        style={{ ...selStyle, width: 66 }}
       />
       {busy ? (
         <span style={{ fontSize: 11.5, fontStyle: 'italic', color: 'var(--r-ink-faint)' }}>

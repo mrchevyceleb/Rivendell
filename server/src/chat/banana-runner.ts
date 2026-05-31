@@ -1159,9 +1159,41 @@ const LOCAL_CURATED: { id: string; label: string; note: string }[] = [
   { id: 'Qwen/Qwen3-30B-A3B-Instruct-2507-FP8', label: 'Qwen3 30B-A3B (2507)', note: 'MoE · fast · long ctx' },
 ];
 
-export async function localVllmStatus(): Promise<{ loaded: string | null; ready: boolean }> {
+export async function localVllmStatus(): Promise<{
+  loaded: string | null;
+  ready: boolean;
+  contextLen: number | null;
+}> {
   const models = await fetchLocalVllmModels();
-  return { loaded: models[0]?.id ?? null, ready: models.length > 0 };
+  return { loaded: models[0]?.id ?? null, ready: models.length > 0, contextLen: models[0]?.maxLen ?? null };
+}
+
+// Cap the AUTO context default for memory safety — a model may advertise 256k+
+// native, but a KV cache that large can OOM. The user can override upward.
+const LOCAL_CTX_CEILING = 131072;
+
+/** The model's native context window, read from its HF config.json (so we can
+ *  default to it instead of a fixed 32k). Null if unreachable. */
+async function fetchHfNativeContext(model: string): Promise<number | null> {
+  try {
+    const r = await fetch(`https://huggingface.co/${model}/resolve/main/config.json`, {
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) return null;
+    const c = (await r.json()) as {
+      max_position_embeddings?: unknown;
+      max_seq_len?: unknown;
+      text_config?: { max_position_embeddings?: unknown };
+    };
+    const n =
+      (typeof c.max_position_embeddings === 'number' && c.max_position_embeddings) ||
+      (typeof c.text_config?.max_position_embeddings === 'number' && c.text_config.max_position_embeddings) ||
+      (typeof c.max_seq_len === 'number' && c.max_seq_len) ||
+      0;
+    return n > 0 ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 function cachedLocalModelIds(): string[] {
@@ -1177,11 +1209,18 @@ function cachedLocalModelIds(): string[] {
 export async function localFullCatalog(): Promise<{
   loaded: string | null;
   ready: boolean;
+  contextLen: number | null;
   cached: string[];
   curated: { id: string; label: string; note: string }[];
 }> {
   const status = await localVllmStatus();
-  return { loaded: status.loaded, ready: status.ready, cached: cachedLocalModelIds(), curated: LOCAL_CURATED };
+  return {
+    loaded: status.loaded,
+    ready: status.ready,
+    contextLen: status.contextLen,
+    cached: cachedLocalModelIds(),
+    curated: LOCAL_CURATED,
+  };
 }
 
 /** Drop the shared banana serve so the next turn respawns it and rebuilds its
@@ -1199,7 +1238,12 @@ export async function serveLocalModel(
 ): Promise<{ ok: boolean; error?: string }> {
   if (!LOCAL_MODEL_ID_RE.test(model)) return { ok: false, error: 'invalid model id' };
   const util = opts?.util && /^[0-9.]+$/.test(opts.util) ? opts.util : '0.6';
-  const maxLen = opts?.maxLen && /^[0-9]+$/.test(opts.maxLen) ? opts.maxLen : '32768';
+  let maxLen = opts?.maxLen && /^[0-9]+$/.test(opts.maxLen) ? opts.maxLen : '';
+  if (!maxLen) {
+    // Auto: default to the model's native context (capped), not a flat 32k.
+    const native = await fetchHfNativeContext(model);
+    maxLen = String(Math.min(native ?? 32768, LOCAL_CTX_CEILING));
+  }
   try {
     await new Promise<void>((resolve, reject) => {
       execFile(VLLM_BIN, ['serve', model, util, maxLen], { timeout: 90_000 }, (err) =>
