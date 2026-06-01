@@ -43,6 +43,22 @@ export const BANANA_DIR = join(CROSS_COMPUTER_SHARE_PATH, 'bananacode');
 export const BANANA_COMMANDS_DIR = join(BANANA_DIR, 'Commands');
 export const BANANA_GLOBAL_INSTRUCTIONS_FILE = join(BANANA_DIR, '.banana.md');
 
+// --- Hall slash-menu command discovery (post-Moria) ---
+// The CROSS-COMPUTER-SHARE tree above is a Mac/OneDrive artifact that does not
+// exist on Moria (Linux), so the /api/commands catalog read from it returned
+// empty — that's the "0 commands / no autocomplete" in Hall. These point at the
+// real per-account command dirs that the spawned CLIs actually load from, and
+// are env-overridable for other hosts:
+//   Elrond (kim)            -> $CLAUDE_CONFIG_DIR=~/.claude  -> ~/.claude/commands
+//   Codex (kim)             -> ~/.codex/prompts (flat *.md)
+//   Personal Claude/Banana  -> ~/.claude-personal/commands
+export const ELROND_COMMANDS_DIR =
+  process.env.RIVENDELL_ELROND_COMMANDS_DIR || join(homedir(), '.claude', 'commands');
+export const CODEX_PROMPTS_DIR =
+  process.env.RIVENDELL_CODEX_PROMPTS_DIR || join(homedir(), '.codex', 'prompts');
+export const PERSONAL_CLAUDE_COMMANDS_DIR =
+  process.env.RIVENDELL_PERSONAL_COMMANDS_DIR || join(homedir(), '.claude-personal', 'commands');
+
 // Where Claude Code persists its session JSONL files.
 export const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
