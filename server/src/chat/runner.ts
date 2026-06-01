@@ -128,6 +128,28 @@ const VALID_MODEL_ID = /^[A-Za-z0-9._-]+$/;
 const resolveClaudeModel = (m?: string): string => (m && VALID_MODEL_ID.test(m) ? m : CLAUDE_MODEL);
 const resolveClaudeEffort = (e?: string): string => (e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT);
 
+// assistant-mcp is defined in the personal-account config (~/.claude.json) but NOT
+// in the kim-account config (~/.claude/.claude.json) that Elrond (cli='assistant')
+// runs under — so a kim-account spawn reads zero MCP servers and Elrond loses his
+// entire tool backend (tasks, gmail, calendar, docs, memory, ...). Inject it
+// explicitly at spawn time so it's present no matter which per-account .claude.json
+// claude reads. Path is derived from ELROND_WORKSPACE_PATH so it's correct on every
+// host (Moria/Mac). Passed WITHOUT --strict-mcp-config so it MERGES with, never
+// replaces, any servers the account config already has.
+const ASSISTANT_MCP_WORKSPACE = process.env.ELROND_WORKSPACE_PATH || '/home/mrchevyceleb/ASSISTANT-HUB';
+const ASSISTANT_MCP_SERVER_URL =
+  process.env.ASSISTANT_MCP_URL || 'https://matt-assistant-production.up.railway.app/mcp';
+const ASSISTANT_MCP_CONFIG = JSON.stringify({
+  mcpServers: {
+    'assistant-mcp': {
+      type: 'stdio',
+      command: 'node',
+      args: [`${ASSISTANT_MCP_WORKSPACE}/assistant-mcp/proxy/mcp-proxy.js`],
+      env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
+    },
+  },
+});
+
 const ASSISTANT_AGENT_PROMPT =
   "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
   "You're working inside ASSISTANT-HUB, which contains his task system, " +
@@ -229,7 +251,12 @@ class ClaudeSession {
       '--effort', this.spawnEffort,
     ];
     if (resumeId) args.push('--resume', resumeId);
-    if (cli === 'assistant') args.push('--append-system-prompt', ASSISTANT_AGENT_PROMPT);
+    if (cli === 'assistant') {
+      args.push('--append-system-prompt', ASSISTANT_AGENT_PROMPT);
+      // Keep --mcp-config last: it's variadic and would greedily swallow any
+      // plain (non-dash) arg that followed it.
+      args.push('--mcp-config', ASSISTANT_MCP_CONFIG);
+    }
 
     this.child = spawn('claude', args, {
       cwd,
