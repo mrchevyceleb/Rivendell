@@ -4,7 +4,7 @@ This file mirrors `CLAUDE.md` for any agent runtime that reads `AGENTS.md` (Code
 
 ## Project
 
-Rivendell — local always-on office app for Bag End, served from this Mac on `:8091` and exposed inside the tailnet via `tailscale serve`. No app-layer auth; Tailscale ACLs are the auth boundary.
+Rivendell — local always-on office app for Bag End, served from the DGX Spark "Moria" (Ubuntu) on `:8091` and exposed inside the tailnet via `tailscale serve`. No app-layer auth; Tailscale ACLs are the auth boundary.
 
 ## Stack
 
@@ -12,7 +12,7 @@ Rivendell — local always-on office app for Bag End, served from this Mac on `:
 - **Server**: Express 5 + `ws` on one Node HTTP server, run via `tsx`. Workspace at `server/`.
 - **Persistence**: Supabase (service role) for durable job queue + Scribe events. Local JSON stores under `~/.rivendell/`.
 
-## Commands (zsh / macOS)
+## Commands (bash / Linux)
 
 ```bash
 npm install
@@ -22,16 +22,16 @@ npm run typecheck
 npm start             # production server, serves dist/
 ```
 
-Production on this Mac:
+Production on Moria (`systemd --user`, enabled + auto-restart):
 
 ```bash
-./scripts/install-launchd.sh        # com.matt.rivendell with KeepAlive
+systemctl --user status rivendell
+npm run build && systemctl --user restart rivendell   # rebuild + reload
+journalctl --user -u rivendell -f                     # live logs
 ./scripts/tailscale-serve.sh
-launchctl list | grep rivendell
-tail -f ~/.rivendell/rivendell.out.log
-./scripts/uninstall-launchd.sh
-launchctl kickstart -k gui/$(id -u)/com.matt.rivendell   # forced reload
 ```
+
+Unit `~/.config/systemd/user/rivendell.service` runs `~/bin/start-rivendell-moria` (loads `~/.config/moria-services/doppler.env` → project `assistant-mcp`/`prd`, then `./scripts/start.sh` under `doppler run`). The in-repo `install-launchd.sh` + `com.matt.rivendell.plist` are the legacy macOS path.
 
 Health: `curl http://localhost:8091/api/health`.
 
@@ -56,7 +56,7 @@ server/src/
   lib/                     supabase, doppler, mcp, jsonStore, room/task/pin
                            stores, assistantAdmin/Data, workspace
 supabase/migrations/       queue/events SQL
-scripts/                   launchd plist + install/uninstall + tailscale-serve
+scripts/                   start.sh + tailscale-serve + legacy launchd plist/install
 ```
 
 Rooms: `/` Hall, `/council`, `/dashboard`, `/tidings`, `/hearth`, `/library`, `/pins`, `/reckoning` (P&L), `/forge`, `/weavings`, `/annals`, `/scribe`.

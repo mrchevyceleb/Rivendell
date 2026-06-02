@@ -59,6 +59,15 @@ export function accountEnvForAccount(account: string, cwd: string): NodeJS.Proce
   const map = loadMap();
   const a = map ? map.accounts[account] : undefined;
   const env: NodeJS.ProcessEnv = { ...process.env };
+  // Bill the SUBSCRIPTION selected below (CLAUDE_CONFIG_DIR for claude, CODEX_HOME
+  // for codex), never a metered provider key. A present key silently overrides the
+  // chosen subscription (this quietly billed metered API $ on every spawn), so
+  // scrub them from every spawn env we hand to the CLI:
+  //   ANTHROPIC_API_KEY/_AUTH_TOKEN -> would override the Claude subscription
+  //   OPENAI_API_KEY                -> would override the Codex ChatGPT subscription
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.OPENAI_API_KEY;
   if (a) {
     env.SAMWISE_ACCOUNT = account;
     env.CLAUDE_CONFIG_DIR = join(HOME, a.claude_config_dir);
@@ -83,6 +92,15 @@ export function accountEnv(cwd: string): NodeJS.ProcessEnv {
   const map = loadMap();
   const account = resolveAccount(cwd);
   const env: NodeJS.ProcessEnv = { ...process.env };
+  // Bill the SUBSCRIPTION selected below (CLAUDE_CONFIG_DIR for claude, CODEX_HOME
+  // for codex), never a metered provider key. A present key silently overrides the
+  // chosen subscription (this quietly billed metered API $ on every spawn), so
+  // scrub them from every spawn env we hand to the CLI:
+  //   ANTHROPIC_API_KEY/_AUTH_TOKEN -> would override the Claude subscription
+  //   OPENAI_API_KEY                -> would override the Codex ChatGPT subscription
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.OPENAI_API_KEY;
   const a = map && account ? map.accounts[account] : undefined;
   if (a) {
     env.SAMWISE_ACCOUNT = account!;

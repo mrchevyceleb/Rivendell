@@ -1,6 +1,6 @@
 # Rivendell
 
-Local always-on office app for Bag End. Runs on this Mac at `http://localhost:8091` as a `launchd` service (`com.matt.rivendell`) and is exposed inside the tailnet via `tailscale serve`.
+Local always-on office app for Bag End. Runs on the DGX Spark "Moria" (Ubuntu) at `http://localhost:8091` as a `systemd --user` service (`rivendell.service`) and is exposed inside the tailnet via `tailscale serve`.
 
 ## Stack
 
@@ -9,7 +9,7 @@ Local always-on office app for Bag End. Runs on this Mac at `http://localhost:80
 - **Persistence**: Supabase (`@supabase/supabase-js`, service role) for the durable job queue and Scribe events. Local JSON stores under `~/.rivendell/` for pins, tasks, room state.
 - **Auth**: None at the app layer. Tailscale ACLs are the auth boundary.
 
-## Commands (zsh / macOS)
+## Commands (bash / Linux)
 
 ```bash
 npm install
@@ -19,15 +19,16 @@ npm run typecheck
 npm start             # production server (serves dist/ from STATIC_DIR)
 ```
 
-Production install on this Mac:
+Production on Moria (systemd `--user`, enabled + auto-restart):
 
 ```bash
-./scripts/install-launchd.sh        # installs com.matt.rivendell with KeepAlive
-./scripts/tailscale-serve.sh        # exposes :8091 on the tailnet
-launchctl list | grep rivendell
-tail -f ~/.rivendell/rivendell.out.log
-./scripts/uninstall-launchd.sh
+systemctl --user status rivendell
+systemctl --user restart rivendell    # after a rebuild
+journalctl --user -u rivendell -f     # live logs
+./scripts/tailscale-serve.sh          # exposes :8091 on the tailnet
 ```
+
+The unit (`~/.config/systemd/user/rivendell.service`) runs `~/bin/start-rivendell-moria`, which sources the shared Doppler env (`~/.config/moria-services/doppler.env` → project `assistant-mcp`, config `prd`) and launches `./scripts/start.sh` under `doppler run`. The in-repo `scripts/install-launchd.sh` + `com.matt.rivendell.plist` are the legacy macOS path, kept for reference only.
 
 ## Layout
 
@@ -50,7 +51,7 @@ server/src/
   lib/                  supabase, doppler, MCP bridge, JSON stores, room/task/pin stores,
                         assistantAdmin/Data, workspace
 supabase/migrations/    SQL migrations (queue/events tables)
-scripts/                launchd plist + install/uninstall + tailscale-serve + start.sh
+scripts/                start.sh + tailscale-serve + legacy launchd plist/install (macOS)
 ```
 
 Rooms map: `/` Hall, `/council` Council, `/dashboard` Dashboard, `/tidings` Tidings, `/hearth` Hearth, `/library` Library (file tree of `ELROND_WORKSPACE_PATH`), `/pins` Pins, `/reckoning` Reckoning (P&L), `/forge` Forge, `/weavings` Weavings, `/annals` Annals, `/scribe` Scribe (live worker activity log).
@@ -82,5 +83,5 @@ Secrets live in Doppler (per global rules). Never use the literal word `supabase
 ## Deploy / verify
 
 - Migrations: deploy via the Supabase MCP — don't wait to be asked.
-- After local changes, rebuild and the launchd service picks up automatically (`KeepAlive`). For a forced reload: `launchctl kickstart -k gui/$(id -u)/com.matt.rivendell`.
+- After local changes, rebuild and restart: `npm run build && systemctl --user restart rivendell` (the service runs `npm start`, which serves the prebuilt `dist/` — it does not rebuild on its own).
 - Health check: `curl http://localhost:8091/api/health`.

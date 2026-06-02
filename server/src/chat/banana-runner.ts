@@ -1837,8 +1837,11 @@ class BananaServer {
   /** Rejects the in-flight start promise when a config-change restart supersedes it. */
   private startReject: ((e: Error) => void) | null = null;
 
-  /** Lazily start (or restart) the serve process. Resolves when reachable. */
-  async ensure(projectPathHint?: string): Promise<void> {
+  /** Lazily start (or restart) the serve process. Resolves when reachable.
+   *  `caller` is the session driving this ensure() (mid-send, not yet streaming
+   *  on the serve); it is excluded from the "is a sibling turn live?" check so a
+   *  chat can still pick up a config change for its OWN next turn. */
+  async ensure(projectPathHint?: string, caller?: BananaSession): Promise<void> {
     const inlineConfig = await bananaConfigContent(projectPathHint);
     // Compare on a canonical signature: ~/.claude.json and OpenRouter's catalog
     // can return semantically identical content with shuffled key/row order,
@@ -1846,6 +1849,15 @@ class BananaServer {
     const configSignature = canonicalConfigSignature(inlineConfig);
     if (this.readyPromise && !this.dead) {
       if (configSignature !== this.configSignature) {
+        // A config-change restart SIGTERMs the shared serve and fails every
+        // in-flight turn (onServerDeath). Never do that out from under another
+        // chat's live turn — keep the running serve and let the new config take
+        // effect on the next idle (re)start. The per-turn model rides on the
+        // prompt, so the caller's turn still runs correctly on the old serve.
+        if (anyBananaTurnBusyExcept(caller)) {
+          console.warn('[banana serve] config changed but a sibling chat turn is live; deferring serve restart to avoid killing its work');
+          return this.readyPromise;
+        }
         this.restartForConfigChange();
       } else {
         return this.readyPromise;
@@ -1938,6 +1950,17 @@ class BananaServer {
   }
 
   notePromptTransportFailure(reason: string): void {
+    // A single prompt's transport error does NOT prove the shared serve is
+    // dead. If another chat's turn is still streaming, the process is plainly
+    // alive — SIGTERMing it here (handleDeath -> onServerDeath) would abort that
+    // sibling's long-running work, which is exactly the cross-chat data loss we
+    // must avoid. The caller already failed its own turn; skip the restart. If
+    // the serve really is dead, the sibling's stall watchdog ends its turn and
+    // the next ensure() validates the session and restarts cleanly.
+    if (anyBananaTurnBusyExcept()) {
+      console.warn(`[banana serve] prompt transport failure but a sibling chat turn is live; NOT restarting serve to preserve its work: ${reason}`);
+      return;
+    }
     console.warn(`[banana serve] prompt transport failure, restarting serve: ${reason}`);
     this.handleDeath(`prompt transport failure: ${reason}`);
   }
@@ -2612,7 +2635,7 @@ export class BananaSession {
 
     // 1. Make sure the shared serve process is up.
     try {
-      await bananaServer.ensure(this.cwd);
+      await bananaServer.ensure(this.cwd, this);
     } catch (err) {
       this.failTurn(`banana serve unavailable: ${(err as Error).message}`);
       return;
@@ -3673,6 +3696,21 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 
 /** Manager keyed by cwd + chat id, matching the claude/codex session maps. */
 const bananaSessions = new Map<string, BananaSession>();
+
+/** True if any live BananaSession other than `except` has an in-flight turn.
+ *  The `banana serve` process is shared by EVERY chat, so any teardown of it
+ *  (config-change restart, prompt-transport-failure death) aborts every live
+ *  turn at once via onServerDeath -> failTurn. Callers that would restart the
+ *  serve must first check this and defer, or a hiccup/close in one chat will
+ *  silently kill a long-running task in another. Function declaration so it can
+ *  be referenced from BananaServer methods defined earlier in the file. */
+function anyBananaTurnBusyExcept(except?: BananaSession): boolean {
+  for (const session of bananaSessions.values()) {
+    if (session === except) continue;
+    if (session.isBusy()) return true;
+  }
+  return false;
+}
 
 export function activeBananaSessions(): {
   cli: CliKind;

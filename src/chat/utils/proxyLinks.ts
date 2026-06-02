@@ -9,6 +9,10 @@
 
 const LABEL = 'ASSISTANT-HUB';
 export const WIN_WORKSPACE_PREFIX = String.raw`C:\ASSISTANT-HUB`;
+const UNIX_WORKSPACE_PREFIXES = [
+  '/home/mrchevyceleb/ASSISTANT-HUB',
+  '/Users/mjohnst/ASSISTANT-HUB',
+];
 
 // Resolve the workspace-relative path Rivendell stores in ChatBlocks into the
 // two URL forms a Windows client needs: a same-origin HTTP URL (the Tailscale
@@ -81,15 +85,18 @@ const STOP_WORDS = '(?:and|or|but|the|a|an|is|are|was|were|to|of|in|on|at|by|for
 const STOP_LOOKAHEAD = String.raw`(?=$|[,;:!?]|[\n\r]|\.(?:\s|$)|\s+${STOP_WORDS}\b|[)\]"'\`<>])`;
 const WORKSPACE_MENTION = String.raw`\b${LABEL}(?:\/[^\n\r]+?)?`;
 const WIN_MENTION = String.raw`C:\\ASSISTANT-HUB(?:\\[^\n\r]+?)?`;
+const UNIX_MENTION = UNIX_WORKSPACE_PREFIXES
+  .map((prefix) => `${escapeRegex(prefix)}(?:/[^\\n\\r]+?)?`)
+  .join('|');
 const MENTION_PATTERN = new RegExp(
-  `(?:${WIN_MENTION}|${WORKSPACE_MENTION})${STOP_LOOKAHEAD}`,
+  `(?:${WIN_MENTION}|${UNIX_MENTION}|${WORKSPACE_MENTION})${STOP_LOOKAHEAD}`,
   'g',
 );
 
 const TRAILING_PUNCT = /[\s).,;:!?\]'"`>]+$/;
 
 export function annotateWorkspaceMentions(input: string): string {
-  if (!input.includes(LABEL)) return input;
+  if (!mentionsWorkspace(input)) return input;
   return input.replace(MENTION_PATTERN, (match) => {
     const trailingMatch = match.match(TRAILING_PUNCT);
     const trailing = trailingMatch ? trailingMatch[0] : '';
@@ -114,6 +121,10 @@ function extractRelativePath(value: string): string | null {
     if (!tail.startsWith('\\')) return null;
     return tail.slice(1).replace(/\\/g, '/');
   }
+  for (const prefix of UNIX_WORKSPACE_PREFIXES) {
+    if (value === prefix) return '';
+    if (value.startsWith(`${prefix}/`)) return value.slice(prefix.length + 1);
+  }
   if (value === LABEL) return '';
   if (value.startsWith(`${LABEL}/`)) return value.slice(LABEL.length + 1);
   return null;
@@ -128,6 +139,8 @@ export function parseProxyHref(href: string | undefined): { kind: 'doc' | 'folde
   if (!href) return null;
   if (href.startsWith('rivendell-doc:')) return { kind: 'doc', path: decodeProxyPath(href.slice('rivendell-doc:'.length)) };
   if (href.startsWith('rivendell-folder:')) return { kind: 'folder', path: decodeProxyPath(href.slice('rivendell-folder:'.length)) };
+  const rel = extractRelativePath(normalizeHrefPath(href));
+  if (rel !== null) return { kind: inferKind(rel), path: rel };
   return null;
 }
 
@@ -145,4 +158,25 @@ function splitPathAndTrailingText(value: string): { path: string; trailingText: 
     return { path: filePathWithTrailingText[1], trailingText: filePathWithTrailingText[2] };
   }
   return { path: value, trailingText: '' };
+}
+
+function mentionsWorkspace(value: string): boolean {
+  return value.includes(LABEL)
+    || value.includes(WIN_WORKSPACE_PREFIX)
+    || UNIX_WORKSPACE_PREFIXES.some((prefix) => value.includes(prefix));
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeHrefPath(href: string): string {
+  const decoded = decodeProxyPath(href);
+  if (decoded.startsWith('file://')) return decoded.slice('file://'.length);
+  return decoded;
+}
+
+function inferKind(rel: string): 'doc' | 'folder' {
+  const leaf = rel.split('/').pop() ?? '';
+  return /\.[A-Za-z0-9]+$/.test(leaf) ? 'doc' : 'folder';
 }
