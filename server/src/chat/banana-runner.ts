@@ -146,6 +146,14 @@ type BananaTurnState = {
 // stream simply goes quiet. Default 120s of silence aborts the turn. The
 // watchdog NEVER kills the shared server — it only ends the stuck turn.
 const DEFAULT_STALL_TIMEOUT_MS = 120_000;
+// A tool that runs in its own context (e.g. `task` spawning a subagent) streams
+// NO events back to the parent banana session while it works, so the parent
+// stream goes silent for the tool's whole lifetime. 120s of that silence is
+// normal, not a stall — a slow local-model subagent reading files easily
+// exceeds it. While a tool is open and unfinished, the watchdog tolerates this
+// much cumulative silence before it gives up and aborts. Pure silence with NO
+// open tool still aborts at the base timeout.
+const DEFAULT_TOOL_STALL_TIMEOUT_MS = 15 * 60_000;
 const SESSION_VALIDATION_TIMEOUT_MS = 5_000;
 
 function stallTimeoutMs(): number {
@@ -153,6 +161,13 @@ function stallTimeoutMs(): number {
   if (!raw) return DEFAULT_STALL_TIMEOUT_MS;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_STALL_TIMEOUT_MS;
+}
+
+function toolStallTimeoutMs(): number {
+  const raw = process.env.RIVENDELL_BANANA_TOOL_STALL_TIMEOUT_MS;
+  if (!raw) return DEFAULT_TOOL_STALL_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TOOL_STALL_TIMEOUT_MS;
 }
 
 async function validateSessionExists(client: any, sessionID: string): Promise<string | null> {
@@ -2256,6 +2271,10 @@ export class BananaSession {
   private turn: BananaTurnState | null = null;
   /** Stall watchdog handle for the active turn. */
   private watchdog: NodeJS.Timeout | null = null;
+  /** Cumulative silence (ms) tolerated so far while a tool was open and
+   *  unfinished. Reset to 0 by any real streaming activity; only grows when the
+   *  watchdog re-arms itself because a tool is still legitimately running. */
+  private toolStallWaitedMs = 0;
   /** Cleanup for the current turn's image temp dir — runs once the turn ends
    *  (success, failure, or shutdown). Null when the turn sent no images. */
   private turnCleanup: (() => void) | null = null;
@@ -3590,6 +3609,13 @@ export class BananaSession {
     return truncateToolText(redactToolText(text));
   }
 
+  private hasOpenTool(state: BananaTurnState): boolean {
+    for (const rec of state.parts.values()) {
+      if (rec.kind === 'tool' && !rec.closed) return true;
+    }
+    return false;
+  }
+
   private describeOpenTools(state: BananaTurnState): string {
     const tools: string[] = [];
     for (const rec of state.parts.values()) {
@@ -3604,19 +3630,41 @@ export class BananaSession {
 
   // ── stall watchdog ─────────────────────────────────────────
 
-  private armWatchdog(): void {
+  // `keepToolWait` is set only when the watchdog re-arms itself because a tool
+  // is still legitimately running — every other caller is real streaming
+  // activity, which resets the cumulative tool-silence budget.
+  private armWatchdog(keepToolWait = false): void {
     this.clearWatchdog();
+    if (!keepToolWait) this.toolStallWaitedMs = 0;
     const timeoutMs = stallTimeoutMs();
     this.watchdog = setTimeout(() => {
       if (!this.busy || !this.turn || this.turn.done) return;
+      // A tool running in its own context (e.g. `task` → subagent) emits no
+      // parent-stream events while it works. That silence is expected, not a
+      // stall, so don't abort — re-arm and keep waiting, up to a much larger
+      // cumulative ceiling that still catches a genuinely wedged tool.
+      if (this.hasOpenTool(this.turn)) {
+        this.toolStallWaitedMs += timeoutMs;
+        const toolCeiling = toolStallTimeoutMs();
+        if (this.toolStallWaitedMs < toolCeiling) {
+          console.log(
+            `[chat banana] tool still running after ${Math.round(this.toolStallWaitedMs / 1000)}s of parent-stream silence cwd=${this.cwd} (${this.describeOpenTools(this.turn)}) — not a stall, still waiting (ceiling ${Math.round(toolCeiling / 1000)}s)`,
+          );
+          this.armWatchdog(true);
+          return;
+        }
+      }
+      const elapsedMs = this.hasOpenTool(this.turn)
+        ? Math.max(timeoutMs, this.toolStallWaitedMs)
+        : timeoutMs;
       const hadServerActivity = this.turnHasServerActivity(this.turn);
       const detail = this.describeOpenTools(this.turn);
       const message = [
-        `banana stalled - no output for ${Math.round(timeoutMs / 1000)}s, the turn was aborted`,
+        `banana stalled - no output for ${Math.round(elapsedMs / 1000)}s, the turn was aborted`,
         detail,
       ].filter(Boolean).join('\n');
       console.warn(
-        `[chat banana] stall watchdog fired after ${timeoutMs}ms of silence cwd=${this.cwd}${detail ? ` (${detail})` : ''}`,
+        `[chat banana] stall watchdog fired after ${elapsedMs}ms of silence cwd=${this.cwd}${detail ? ` (${detail})` : ''}`,
       );
       // Abort the stuck prompt on the server too so its late events can't leak
       // into the next turn, then end this turn locally. The shared serve
