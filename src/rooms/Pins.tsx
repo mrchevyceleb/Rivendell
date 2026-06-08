@@ -51,6 +51,7 @@ export function Pins() {
   const [draft, setDraft] = useState<PinDraft>(emptyDraft);
   const [composerOpen, setComposerOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [viewing, setViewing] = useState<PinItem | null>(null);
 
   const categories = useMemo(() => {
     const counts = new Map<string, number>();
@@ -241,15 +242,22 @@ export function Pins() {
                   <Trash2 size={14} />
                 </button>
               </div>
-              <header>
-                <h2>{pin.title}</h2>
-                <small>{pin.updatedAt ? timeAgo(pin.updatedAt) : 'saved'}</small>
-              </header>
-              <p>{pin.content}</p>
-              <footer>
-                <Chip tone={categoryTone[pin.category] ?? 'neutral'}>{pin.category}</Chip>
-                {pin.pinned ? <span className="pin-status">pinned</span> : null}
-              </footer>
+              <button
+                type="button"
+                className="pin-card-open"
+                onClick={() => setViewing(pin)}
+                title="Open pin"
+              >
+                <header>
+                  <h2>{pin.title}</h2>
+                  <small>{pin.updatedAt ? timeAgo(pin.updatedAt) : 'saved'}</small>
+                </header>
+                <p>{pin.content}</p>
+                <footer>
+                  <Chip tone={categoryTone[pin.category] ?? 'neutral'}>{pin.category}</Chip>
+                  {pin.pinned ? <span className="pin-status">pinned</span> : null}
+                </footer>
+              </button>
             </article>
           ))
         ) : (
@@ -259,6 +267,42 @@ export function Pins() {
           />
         )}
       </div>
+
+      {viewing ? (
+        <div className="r-modal-overlay" onClick={() => setViewing(null)}>
+          <div className="r-modal-card" onClick={(event) => event.stopPropagation()} style={pinStyle(viewing)}>
+            <div className="r-modal-head">
+              <div>
+                <span className="r-eyebrow-gold">{viewing.category || 'general'}</span>
+                <h2>{viewing.title}</h2>
+                <small style={{ color: 'var(--r-ink-mute)' }}>{viewing.updatedAt ? `updated ${timeAgo(viewing.updatedAt)}` : 'saved'}</small>
+              </div>
+              <button type="button" onClick={() => setViewing(null)} title="Close" className="r-modal-x">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="r-modal-body">
+              <pre className="pin-view-content">{viewing.content}</pre>
+            </div>
+            <div className="r-modal-foot">
+              <div>
+                <Chip tone={categoryTone[viewing.category] ?? 'neutral'}>{viewing.category}</Chip>
+                {viewing.pinned ? <span className="pin-status">pinned</span> : null}
+              </div>
+              <div className="r-modal-foot-end">
+                <Button tone="ghost" onClick={() => copyPin(viewing)}>
+                  {copiedId === viewing.id ? <Check size={14} /> : <Copy size={14} />}
+                  {copiedId === viewing.id ? 'Copied' : 'Copy'}
+                </Button>
+                <Button tone="gold" onClick={() => { const pin = viewing; setViewing(null); openEdit(pin); }}>
+                  <Pencil size={14} />
+                  Edit
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
