@@ -33,6 +33,10 @@ type ConversationProps = {
   onFreshStart?: () => void;
   onStop?: () => void;
   acceptImages?: boolean;
+  /** Slim layout for embedding in a narrow side panel (e.g. the Workspace
+   *  room). Drops the full-page hero (portrait, giant headline, date) and
+   *  tightens horizontal padding so the chat fits a ~380px column. */
+  compact?: boolean;
 };
 
 const statusToneByStatus: Record<Status, 'ember' | 'moss' | 'gold' | 'neutral'> = {
@@ -70,8 +74,11 @@ export function Conversation({
   onFreshStart,
   onStop,
   acceptImages = true,
+  compact = false,
 }: ConversationProps) {
   const { scrollRef, bottomRef, contentRef, onScroll } = useStickyScroll();
+  const sidePad = compact ? '0 16px' : '0 48px';
+  const contentMax = compact ? 'none' : 760;
 
   return (
     <div
@@ -94,41 +101,46 @@ export function Conversation({
           padding: '28px 0 0',
         }}
       >
-        <div ref={contentRef} style={{ maxWidth: 760, margin: '0 auto', padding: '0 48px' }}>
+        <div ref={contentRef} style={{ maxWidth: contentMax, margin: '0 auto', padding: sidePad }}>
+          {!compact && (
+            <>
+              <div
+                style={{
+                  textAlign: 'center',
+                  marginBottom: 10,
+                  display: 'flex',
+                  justifyContent: 'center',
+                }}
+              >
+                <SamPortrait size={44} />
+              </div>
+              <div className="sw-folio" style={{ textAlign: 'center', marginBottom: 8, fontSize: 13 }}>
+                errand · {todayLabel()}
+              </div>
+              <h1
+                style={{
+                  margin: 0,
+                  fontFamily: 'var(--serif-display)',
+                  fontSize: 48,
+                  fontWeight: 500,
+                  color: 'var(--ink)',
+                  textAlign: 'center',
+                  lineHeight: 1.05,
+                }}
+              >
+                <span style={{ fontStyle: 'italic', color: 'var(--ink-soft)' }}>Of </span>
+                {title}
+              </h1>
+            </>
+          )}
           <div
             style={{
               textAlign: 'center',
-              marginBottom: 10,
+              marginTop: compact ? 0 : 12,
+              marginBottom: compact ? 4 : 0,
               display: 'flex',
-              justifyContent: 'center',
-            }}
-          >
-            <SamPortrait size={44} />
-          </div>
-          <div className="sw-folio" style={{ textAlign: 'center', marginBottom: 8, fontSize: 13 }}>
-            errand · {todayLabel()}
-          </div>
-          <h1
-            style={{
-              margin: 0,
-              fontFamily: 'var(--serif-display)',
-              fontSize: 48,
-              fontWeight: 500,
-              color: 'var(--ink)',
-              textAlign: 'center',
-              lineHeight: 1.05,
-            }}
-          >
-            <span style={{ fontStyle: 'italic', color: 'var(--ink-soft)' }}>Of </span>
-            {title}
-          </h1>
-          <div
-            style={{
-              textAlign: 'center',
-              marginTop: 12,
-              display: 'flex',
-              justifyContent: 'center',
-              gap: 10,
+              justifyContent: compact ? 'flex-start' : 'center',
+              gap: 8,
               flexWrap: 'wrap',
             }}
           >
@@ -136,7 +148,7 @@ export function Conversation({
               {statusLabel[status]}
             </Chip>
             <Chip tone="neutral">{agent.toLowerCase()}</Chip>
-            {repo && <Chip tone="neutral">{repo}</Chip>}
+            {repo && !compact && <Chip tone="neutral">{repo}</Chip>}
           </div>
           {(onBack || onFreshStart || usage || (onStop && status === 'streaming')) && (
             <div
@@ -201,9 +213,11 @@ export function Conversation({
               )}
             </div>
           )}
-          <div className="sw-ornament" style={{ margin: '32px 0 36px' }}>
-            <Dinkus />
-          </div>
+          {!compact && (
+            <div className="sw-ornament" style={{ margin: '32px 0 36px' }}>
+              <Dinkus />
+            </div>
+          )}
 
           {blocks.length === 0 && status !== 'streaming' && (
             <p
@@ -212,7 +226,8 @@ export function Conversation({
                 fontStyle: 'italic',
                 color: 'var(--ink-faint)',
                 textAlign: 'center',
-                margin: '32px 0',
+                margin: compact ? '24px 0' : '32px 0',
+                fontSize: compact ? 15 : undefined,
               }}
             >
               Speak, master, and I shall set forth.
@@ -254,12 +269,12 @@ export function Conversation({
 
       <div
         style={{
-          padding: '18px 0 26px',
+          padding: compact ? '12px 0 16px' : '18px 0 26px',
           borderTop: '1px solid var(--rule-soft)',
           background: 'var(--vellum)',
         }}
       >
-        <div style={{ maxWidth: 760, margin: '0 auto', padding: '0 48px' }}>
+        <div style={{ maxWidth: contentMax, margin: '0 auto', padding: sidePad }}>
           <ChatInput
             agent={agent}
             repo={repo}

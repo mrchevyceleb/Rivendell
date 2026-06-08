@@ -832,6 +832,7 @@ export function Workspace() {
           {/* ── Right: Elrond chat ─────────────────────────────────────── */}
           <aside style={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%', borderLeft: '1px solid var(--r-line)', overflow: 'hidden' }}>
             <Conversation
+              compact
               agent="Elrond"
               repo={assistantHubRepo?.name}
               title="workspace thread"
