@@ -500,7 +500,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // an IDLE session whose model/effort differ (busy sessions left intact),
           // preserving session_id so the replacement --resumes the conversation.
           if (!wasBusy && (cliKind === 'claude' || cliKind === 'assistant') && repoPath) {
-            const reconciled = await getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort });
+            const reconciled = await getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort, recycleOnMismatch: true });
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
           } else if (!session && cliKind && repoPath) {
             // sessionPromise resolved to a dead/null session — rebind a fresh

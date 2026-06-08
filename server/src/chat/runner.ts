@@ -414,6 +414,13 @@ class ClaudeSession {
     return this.resumeFailed;
   }
 
+  /** True once the CLI has emitted its system/init event. Until then the
+   *  process is still loading (MCP servers can take 30-70s); recycling it for
+   *  a model/effort change would throw away the whole startup. */
+  hasInitialized(): boolean {
+    return this.initSeen;
+  }
+
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
     return this.turnStartedAt !== null;
@@ -546,6 +553,13 @@ export async function getOrCreateSession(opts: {
   chatId?: string;
   model?: string;
   effort?: string;
+  /** Only an explicit user turn (send/steer) may recycle a warm session to
+   *  apply a changed model/effort. Passive hellos/reconnects MUST default to
+   *  attach-only: a backgrounded tab or a second device with a stale effort
+   *  fires a hello on every focus/visibility/online event, and recycling on
+   *  that would SIGTERM the warm session each time. With 30-70s MCP startup the
+   *  replacement never reaches init → the "asleep"/"no session" storm. */
+  recycleOnMismatch?: boolean;
 }): Promise<AnySession> {
   const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
@@ -575,13 +589,24 @@ export async function getOrCreateSession(opts: {
     const ok = await existing.ready;
     if (sessions.get(key) !== existing) continue;
     if (ok && existing.isAlive()) {
-      // Recycle only an IDLE session whose model/effort differs from the request;
-      // session_id is preserved so the replacement --resumes the same conversation.
-      // NEVER recycle a busy session — that would SIGTERM an in-flight turn and
-      // race the event-log/session-id writes. Leave it; the change applies on the
-      // next idle resolve.
+      // Recycle only an IDLE, FULLY-INITIALIZED session whose model/effort
+      // differs, and only when the caller explicitly opted in (a real user
+      // turn). session_id is preserved so the replacement --resumes the same
+      // conversation. NEVER recycle:
+      //   - a busy session — SIGTERMs an in-flight turn and races the
+      //     event-log/session-id writes;
+      //   - a session that hasn't emitted init yet — throws away the 30-70s MCP
+      //     startup and, under reconnect floods, storms into a process that
+      //     never finishes initializing.
+      // In every protected case we attach as-is; the change lands on the next
+      // idle turn once the session is settled.
       const matches = existing.spawnModel === wantModel && existing.spawnEffort === wantEffort;
-      if (matches || existing.isBusy()) return existing;
+      const recyclable =
+        opts.recycleOnMismatch === true &&
+        !matches &&
+        !existing.isBusy() &&
+        existing.hasInitialized();
+      if (!recyclable) return existing;
       existing.shutdown('model/effort change');
       sessions.delete(key);
       continue;
@@ -589,9 +614,35 @@ export async function getOrCreateSession(opts: {
     sessions.delete(key);
   }
 
-  const resumeId = (await getSessionId(opts.cli, cwd, chatId)) ?? null;
-  const session = await spawnSession(opts.cli, cwd, chatId, resumeId, key, 0, wantModel, wantEffort);
-  return session;
+  return spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
+}
+
+/** Concurrent getOrCreateSession calls for the same key (e.g. the hello handler
+ *  and the send-reconcile firing on the same socket within a few ms) can each
+ *  fall through to a spawn — the second would orphan the first process. Share a
+ *  single in-flight spawn per key so only one process is ever created. */
+const pendingSpawns = new Map<string, Promise<ClaudeSession>>();
+
+async function spawnSessionOnce(
+  cli: CliKind,
+  cwd: string,
+  chatId: string,
+  key: string,
+  model: string,
+  effort: string,
+): Promise<ClaudeSession> {
+  const inFlight = pendingSpawns.get(key);
+  if (inFlight) return inFlight;
+  const spawnPromise = (async () => {
+    const resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
+    return spawnSession(cli, cwd, chatId, resumeId, key, 0, model, effort);
+  })();
+  pendingSpawns.set(key, spawnPromise);
+  try {
+    return await spawnPromise;
+  } finally {
+    if (pendingSpawns.get(key) === spawnPromise) pendingSpawns.delete(key);
+  }
 }
 
 async function spawnSession(
