@@ -1,0 +1,159 @@
+/* ============================================================
+   Chat theme compatibility shim
+   ------------------------------------------------------------
+   The chat client (src/chat/**) was ported from the Samwise app,
+   which themes itself with unprefixed tokens (--vellum, --ink,
+   --ember, --serif-display, …) and a set of `.sw-*` utility
+   classes. None of those exist in Rivendell, so the embedded
+   `Conversation` rendered with transparent backgrounds, default
+   sans fonts, and no thinking-dot / scrollbar / button styling.
+
+   This file maps every Samwise token onto Rivendell's themed
+   `--r-*` tokens (so the chat tracks Rivendell's dark/light
+   themes automatically) and ports the `.sw-*` utilities the chat
+   markup references. Imported after index.css in main.tsx.
+   ============================================================ */
+
+:root {
+  /* Surfaces */
+  --vellum:      var(--r-bg-raised);   /* card / input / message-bubble surface */
+  --parchment:   var(--r-bg);          /* page */
+  --parchment-2: var(--r-bg-soft);
+  --parchment-3: var(--r-bg-card);
+
+  /* Ink */
+  --ink:         var(--r-ink);
+  --ink-2:       var(--r-ink-soft);
+  --ink-soft:    var(--r-ink-mute);
+  --ink-faint:   var(--r-ink-faint);
+
+  /* Rules */
+  --rule:        var(--r-line-strong);
+  --rule-soft:   var(--r-line);
+
+  /* Accents — Samwise's warm ember/moss/gold mapped to Rivendell's
+     lantern-amber / emerald / gold so "tending" still reads warm. */
+  --ember:       var(--r-amber);
+  --moss:        var(--r-emerald);
+  --gold:        var(--r-gold);
+
+  --shadow-warm: rgba(0, 0, 0, 0.4);
+
+  /* Type */
+  --serif-display: var(--r-display);
+  --serif-body:    var(--r-body);
+  --mono:          var(--r-mono);
+}
+
+/* ---------- Ported .sw-* utilities ---------- */
+
+.sw-rule-solid { border: 0; height: 1px; background: var(--rule); }
+
+.sw-ornament {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink-faint);
+  font-family: var(--serif-display);
+  font-style: italic;
+  font-size: 13px;
+}
+.sw-ornament::before,
+.sw-ornament::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.sw-smallcaps {
+  font-family: var(--serif-body);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+  color: var(--ink-soft);
+  font-size: 0.92em;
+}
+
+.sw-folio {
+  font-family: var(--serif-display);
+  font-style: italic;
+  color: var(--ink-faint);
+  font-size: 14px;
+}
+
+.sw-mono {
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.55;
+  font-weight: 500;
+}
+
+/* Thinking dots */
+@keyframes sw-pulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+.sw-thinking span {
+  display: inline-block;
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--ember);
+  margin-right: 4px;
+  animation: sw-pulse 1.4s ease-in-out infinite;
+}
+.sw-thinking span:nth-child(2) { animation-delay: 0.2s; }
+.sw-thinking span:nth-child(3) { animation-delay: 0.4s; }
+
+/* Lantern flicker */
+@keyframes sw-flicker {
+  0%, 100% { opacity: 0.85; transform: scale(1); }
+  35% { opacity: 1; transform: scale(1.04); }
+  60% { opacity: 0.78; transform: scale(0.97); }
+  82% { opacity: 0.95; transform: scale(1.02); }
+}
+.sw-flame {
+  animation: sw-flicker 2.6s ease-in-out infinite;
+  transform-origin: center bottom;
+}
+
+/* Scrollbar */
+.sw-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+.sw-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.sw-scroll::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 3px; }
+.sw-scroll::-webkit-scrollbar-track { background: transparent; }
+
+.sw-chronicle-ribbon { background: color-mix(in srgb, var(--r-ink) 4%, transparent); }
+
+/* Buttons */
+.sw-btn {
+  font-family: var(--serif-body);
+  font-size: 14px;
+  padding: 9px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: var(--vellum);
+  color: var(--ink);
+  cursor: pointer;
+  letter-spacing: 0.01em;
+  transition: background 0.15s, border-color 0.15s;
+  min-height: 38px;
+}
+.sw-btn:hover { background: var(--r-bg-hover); border-color: var(--ink-soft); }
+
+.sw-btn-primary,
+button.sw-btn.sw-btn-primary {
+  background: var(--r-elf-blue);
+  color: #fff !important;
+  border-color: var(--r-elf-blue);
+}
+.sw-btn-primary:hover { background: var(--r-elf-glow); border-color: var(--r-elf-glow); }
+
+.sw-btn-ember {
+  background: var(--ember);
+  color: #1a120a;
+  border-color: var(--ember);
+}
+.sw-btn-ember:hover { filter: brightness(1.1); }
