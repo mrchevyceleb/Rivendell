@@ -44,7 +44,23 @@ import { useWorkspaceTree } from '../hooks/useRoomData';
 import { useScribeSocket } from '../hooks/useScribeSocket';
 import { useChat } from '../chat/hooks/useChat';
 import { useRepos } from '../chat/hooks/useRepos';
+import { useCompanionPicker } from '../chat/hooks/useCompanionPicker';
+import { CompanionControls } from '../chat/components/CompanionControls';
 import { Conversation } from '../chat/components/desktop/Conversation';
+
+// ─── Companion display label ────────────────────────────────────────────────
+
+function companionAgentLabel(cli: string): string {
+  switch (cli) {
+    case 'assistant': return 'Elrond';
+    case 'claude': return 'Personal Claude';
+    case 'codex': return 'Codex';
+    case 'codex-personal': return 'Personal Codex';
+    case 'banana': return 'OpenRouter';
+    case 'banana-local': return 'Local';
+    default: return cli;
+  }
+}
 
 // ─── CodeMirror language map ────────────────────────────────────────────────
 
@@ -405,11 +421,15 @@ export function Workspace() {
   const { repos } = useRepos();
   const assistantHubRepo = repos.find((r) => r.isAssistantHub) ?? repos[0];
 
+  const picker = useCompanionPicker('rivendell:workspace-companion');
+
   const chat = useChat({
     repo: assistantHubRepo,
-    cli: 'assistant',
+    cli: picker.cli,
     chatId: 'workspace',
     enabled: Boolean(assistantHubRepo),
+    model: picker.model,
+    effort: picker.effort,
   });
 
   // Mirror chat.send into a ref so sendToElrond is stable (no stale closure).
@@ -761,7 +781,7 @@ export function Workspace() {
                   )}
 
                   <Button tone="ghost" onClick={() => sendToElrond(openDoc.path)}>
-                    <Send size={13} /> Ask Elrond
+                    <Send size={13} /> Ask {companionAgentLabel(picker.companion)}
                   </Button>
 
                   <Button tone="ghost" onClick={() => { if (!dirty || confirm('Discard unsaved changes?')) { setOpenDoc(null); setDraft(''); } }}>
@@ -831,9 +851,10 @@ export function Workspace() {
 
           {/* ── Right: Elrond chat ─────────────────────────────────────── */}
           <aside style={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%', borderLeft: '1px solid var(--r-line)', overflow: 'hidden' }}>
+            <CompanionControls picker={picker} />
             <Conversation
               compact
-              agent="Elrond"
+              agent={companionAgentLabel(picker.companion)}
               repo={assistantHubRepo?.name}
               title="workspace thread"
               blocks={chat.blocks}
