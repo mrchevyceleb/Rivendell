@@ -207,16 +207,26 @@ function resolveWorkspacePath(relPath: string, allowRoot: boolean): { absPath: s
 async function assertInsideWorkspace(absPath: string): Promise<void> {
   const root = workspaceRoot();
   const realRoot = await realpath(root);
-  let realTarget: string;
-  try {
-    realTarget = await realpath(absPath);
-  } catch {
-    // Path doesn't exist yet (create case) — lexical check is sufficient
-    return;
-  }
   const rootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
-  if (realTarget !== realRoot && !realTarget.startsWith(rootWithSep)) {
-    throw new Error('File path is outside the Elrond workspace');
+
+  // Walk up to the nearest existing ancestor. For new files the target doesn't
+  // exist yet, but a symlinked parent can still escape the workspace — so we
+  // cannot simply return early when realpath fails.
+  let toCheck = absPath;
+  while (true) {
+    try {
+      const realTarget = await realpath(toCheck);
+      if (realTarget !== realRoot && !realTarget.startsWith(rootWithSep)) {
+        throw new Error('File path is outside the Elrond workspace');
+      }
+      return;
+    } catch (err: any) {
+      // Re-throw our own sentinel; ENOENT means walk up one level.
+      if (err?.message === 'File path is outside the Elrond workspace') throw err;
+      const parent = dirname(toCheck);
+      if (parent === toCheck) return; // reached filesystem root; lexical check sufficient
+      toCheck = parent;
+    }
   }
 }
 
@@ -255,7 +265,12 @@ export async function writeWorkspaceFile(
   await assertInsideWorkspace(absPath);
   const byteLen = Buffer.byteLength(content, 'utf8');
   if (byteLen > EDIT_MAX_BYTES) throw Object.assign(new Error('file too large to save'), { code: 'E2BIG' });
-  if (opts?.expectedModifiedAt && existsSync(absPath)) {
+  if (opts?.expectedModifiedAt) {
+    // Fail closed: if a baseline version was provided, the file must still exist
+    // and match. Silently recreating a deleted file defeats conflict protection.
+    if (!existsSync(absPath)) {
+      throw Object.assign(new Error('file no longer exists on disk'), { code: 'ECONFLICT' });
+    }
     const cur = await stat(absPath);
     if (cur.mtime.toISOString() !== opts.expectedModifiedAt) {
       throw Object.assign(new Error('file changed on disk since you opened it'), { code: 'ECONFLICT' });

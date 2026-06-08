@@ -221,7 +221,7 @@ function ContextMenu({
   onDelete: (node: FileTreeNode) => void;
   onNewFile: (parentPath: string) => void;
   onNewFolder: (parentPath: string) => void;
-  onSendToElrond: (node: FileTreeNode) => void;
+  onSendToElrond: (path: string) => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -252,7 +252,7 @@ function ContextMenu({
       }}
     >
       {menu.node.type === 'file' && (
-        <button className="ctx-item" onClick={() => { onSendToElrond(menu.node); onClose(); }}>
+        <button className="ctx-item" onClick={() => { onSendToElrond(menu.node.path); onClose(); }}>
           <MessageSquare size={13} /> Send to Elrond
         </button>
       )}
@@ -404,18 +404,17 @@ export function Workspace() {
   // Chat/Elrond
   const { repos } = useRepos();
   const assistantHubRepo = repos.find((r) => r.isAssistantHub) ?? repos[0];
-  const [sendToElrondMsg, setSendToElrondMsg] = useState<string | undefined>();
-  const [sendNonce, setSendNonce] = useState(0);
-  const chatInitialMessage = sendToElrondMsg ? `${sendToElrondMsg}` : undefined;
 
   const chat = useChat({
     repo: assistantHubRepo,
     cli: 'assistant',
     chatId: 'workspace',
     enabled: Boolean(assistantHubRepo),
-    initialMessage: chatInitialMessage,
-    onInitialMessageSent: () => setSendToElrondMsg(undefined),
   });
+
+  // Mirror chat.send into a ref so sendToElrond is stable (no stale closure).
+  const chatSendRef = useRef(chat.send);
+  chatSendRef.current = chat.send;
 
   const dirty = Boolean(openDoc?.editable && draft !== openDoc.content);
 
@@ -428,15 +427,24 @@ export function Workspace() {
     lastEventRef.current = last;
     const p = last.payload as any;
     if (p?.kind !== 'workspace-change' || p?.by === 'human') return;
-    // Refresh tree for adds/deletes/renames
-    if (p?.op !== 'change') { void refetch(); return; }
     void refetch();
-    if (openDoc && p?.path === openDoc.path) {
+    if (!openDoc) return;
+    const changedPath: string = p?.path ?? '';
+    // A rename/delete of an ancestor also invalidates the open document.
+    const affectsOpenDoc = changedPath === openDoc.path || openDoc.path.startsWith(`${changedPath}/`);
+    if (!affectsOpenDoc) return;
+    if (p?.op === 'change' && changedPath === openDoc.path) {
+      // File contents changed — reload if clean, warn if dirty.
       if (!dirty) {
         void reloadOpenFile(openDoc.path);
       } else {
-        setExternalChange(`Elrond changed ${p.path}`);
+        setExternalChange(`Elrond changed ${changedPath}`);
       }
+    } else {
+      // Parent dir renamed/deleted or file itself removed — close the editor.
+      setOpenDoc(null);
+      setDraft('');
+      setExternalChange(null);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events]);
@@ -586,10 +594,9 @@ export function Workspace() {
     }
   };
 
-  const sendToElrond = useCallback((node: FileTreeNode) => {
-    const ref = `ASSISTANT-HUB/${node.path}`;
-    setSendToElrondMsg(`Please open and review \`${ref}\`.`);
-    setSendNonce((n) => n + 1);
+  const sendToElrond = useCallback((path: string) => {
+    const ref = `ASSISTANT-HUB/${path}`;
+    chatSendRef.current(`Please open and review \`${ref}\`.`);
   }, []);
 
   const isMarkdownView = openDoc?.language === 'md' || openDoc?.language === 'markdown' || (openDoc?.name?.endsWith('.md') ?? false);
@@ -753,7 +760,7 @@ export function Workspace() {
                     </Button>
                   )}
 
-                  <Button tone="ghost" onClick={() => sendToElrond(openDoc as unknown as FileTreeNode)}>
+                  <Button tone="ghost" onClick={() => sendToElrond(openDoc.path)}>
                     <Send size={13} /> Ask Elrond
                   </Button>
 
