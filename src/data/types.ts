@@ -5,6 +5,7 @@ export type RoomKey =
   | '/tidings'
   | '/calendar'
   | '/library'
+  | '/workspace'
   | '/pins'
   | '/reckoning'
   | '/forge'
@@ -176,6 +177,23 @@ export type WorkspaceFileResponse = {
   language: string;
   content: string;
   tooLarge: boolean;
+};
+
+export type WorkspaceEditFileResponse = {
+  path: string;
+  name: string;
+  size: number;
+  modifiedAt: string;
+  language: string;
+  content: string;
+  editable: boolean;
+  reason?: string;
+};
+
+export type WorkspaceSaveResponse = {
+  path: string;
+  size: number;
+  modifiedAt: string;
 };
 
 export type PlEntry = {

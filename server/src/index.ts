@@ -6,6 +6,7 @@ import { HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { registerChat } from './chat/register.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
 import { startWorkerQueue, stopWorkerQueue } from './worker/queue.ts';
+import { startWorkspaceWatcher, stopWorkspaceWatcher } from './lib/workspaceWatcher.ts';
 import { tasksRouter } from './routes/tasks.ts';
 import { calendarRouter } from './routes/calendar.ts';
 import { emailRouter } from './routes/email.ts';
@@ -55,6 +56,7 @@ const server = createServer(app);
 const stopChat = await registerChat(app, server);
 registerScribeSocket(server);
 startWorkerQueue();
+startWorkspaceWatcher();
 
 if (existsSync(STATIC_DIR)) {
   app.use(express.static(STATIC_DIR));
@@ -76,6 +78,7 @@ server.listen(PORT, HOST, () => {
 const tearDown = (signal: NodeJS.Signals) => {
   console.warn(`[rivendell] received ${signal}, shutting down (pid=${process.pid}, uptime=${Math.round(process.uptime())}s)`);
   stopWorkerQueue();
+  stopWorkspaceWatcher();
   stopChat();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();

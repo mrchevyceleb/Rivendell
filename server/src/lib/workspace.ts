@@ -1,6 +1,7 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename as fsRename, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, extname, relative, resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { basename, dirname, extname, relative, resolve, sep } from 'node:path';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 
 export type FileTreeNode = {
@@ -201,4 +202,111 @@ function resolveWorkspacePath(relPath: string, allowRoot: boolean): { absPath: s
     throw new Error('File path is outside the Elrond workspace');
   }
   return { absPath, inside };
+}
+
+async function assertInsideWorkspace(absPath: string): Promise<void> {
+  const root = workspaceRoot();
+  const realRoot = await realpath(root);
+  let realTarget: string;
+  try {
+    realTarget = await realpath(absPath);
+  } catch {
+    // Path doesn't exist yet (create case) — lexical check is sufficient
+    return;
+  }
+  const rootWithSep = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+  if (realTarget !== realRoot && !realTarget.startsWith(rootWithSep)) {
+    throw new Error('File path is outside the Elrond workspace');
+  }
+}
+
+const EDIT_MAX_BYTES = 2_000_000;
+
+export async function readWorkspaceFileForEdit(relPath: string): Promise<{
+  path: string;
+  name: string;
+  size: number;
+  modifiedAt: string;
+  language: string;
+  content: string;
+  editable: boolean;
+  reason?: string;
+}> {
+  const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  const s = await stat(absPath);
+  if (!s.isFile()) throw Object.assign(new Error('Requested path is not a file'), { code: 'EISDIR' });
+  const ext = extname(absPath).toLowerCase();
+  const name = basename(absPath);
+  const language = ext.replace('.', '') || 'text';
+  const meta = { path: inside, name, size: s.size, modifiedAt: s.mtime.toISOString(), language };
+  const isText = TEXT_EXTENSIONS.has(ext) || TEXT_FILENAMES.has(name.toLowerCase()) || name.startsWith('.env');
+  if (!isText) return { ...meta, content: '', editable: false, reason: 'binary' };
+  if (s.size > EDIT_MAX_BYTES) return { ...meta, content: '', editable: false, reason: 'too-large' };
+  const content = await readFile(absPath, 'utf8');
+  return { ...meta, content, editable: true };
+}
+
+export async function writeWorkspaceFile(
+  relPath: string,
+  content: string,
+  opts?: { expectedModifiedAt?: string },
+): Promise<{ path: string; size: number; modifiedAt: string }> {
+  const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  await assertInsideWorkspace(absPath);
+  const byteLen = Buffer.byteLength(content, 'utf8');
+  if (byteLen > EDIT_MAX_BYTES) throw Object.assign(new Error('file too large to save'), { code: 'E2BIG' });
+  if (opts?.expectedModifiedAt && existsSync(absPath)) {
+    const cur = await stat(absPath);
+    if (cur.mtime.toISOString() !== opts.expectedModifiedAt) {
+      throw Object.assign(new Error('file changed on disk since you opened it'), { code: 'ECONFLICT' });
+    }
+  }
+  await mkdir(dirname(absPath), { recursive: true });
+  await writeFile(absPath, content, 'utf8');
+  const s = await stat(absPath);
+  return { path: inside, size: s.size, modifiedAt: s.mtime.toISOString() };
+}
+
+export async function createWorkspaceEntry(
+  relPath: string,
+  kind: 'file' | 'directory',
+): Promise<FileTreeNode> {
+  const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  if (existsSync(absPath)) throw Object.assign(new Error('already exists'), { code: 'EEXIST' });
+  if (kind === 'directory') {
+    await mkdir(absPath, { recursive: true });
+  } else {
+    await mkdir(dirname(absPath), { recursive: true });
+    await writeFile(absPath, '', { flag: 'wx' });
+  }
+  const s = await stat(absPath);
+  return {
+    name: basename(absPath),
+    path: inside,
+    type: kind === 'directory' ? 'directory' : 'file',
+    size: s.isFile() ? s.size : undefined,
+    modifiedAt: s.mtime.toISOString(),
+    ...(kind === 'directory' ? { deferred: true, children: [] } : {}),
+  };
+}
+
+export async function renameWorkspaceEntry(fromRel: string, toRel: string): Promise<{ path: string }> {
+  const from = resolveWorkspacePath(fromRel, false);
+  const to = resolveWorkspacePath(toRel, false);
+  await assertInsideWorkspace(from.absPath);
+  // to path doesn't exist yet so realpath would fail; lexical check already done above
+  if (!existsSync(from.absPath)) throw Object.assign(new Error('source not found'), { code: 'ENOENT' });
+  if (existsSync(to.absPath)) throw Object.assign(new Error('target already exists'), { code: 'EEXIST' });
+  await mkdir(dirname(to.absPath), { recursive: true });
+  await fsRename(from.absPath, to.absPath);
+  return { path: to.inside };
+}
+
+export async function deleteWorkspaceEntry(relPath: string): Promise<{ path: string }> {
+  const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  await assertInsideWorkspace(absPath);
+  if (!existsSync(absPath)) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
+  const s = await stat(absPath);
+  await rm(absPath, { recursive: s.isDirectory(), force: false });
+  return { path: inside };
 }

@@ -7,6 +7,7 @@ import { Dashboard } from './rooms/Dashboard';
 import { Forge } from './rooms/Forge';
 import { Hall } from './rooms/Hall';
 import { Library } from './rooms/Library';
+import { Workspace } from './rooms/Workspace';
 import { Pins } from './rooms/Pins';
 import { Reckoning } from './rooms/Reckoning';
 import { Scribe } from './rooms/Scribe';
@@ -88,6 +89,8 @@ function RoomSwitch({ active }: { active: RoomKey }) {
       return <Calendar />;
     case '/library':
       return <Library />;
+    case '/workspace':
+      return <Workspace />;
     case '/pins':
       return <Pins />;
     case '/reckoning':
