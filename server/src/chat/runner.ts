@@ -5,7 +5,7 @@ import { ASSISTANT_HUB_PATH } from './config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
-import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnvForAccount } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
@@ -195,6 +195,11 @@ class ClaudeSession {
   private spawnError: string | null = null;
   private initSeen = false;
   private exitedBeforeInit = false;
+  /** Set by shutdown(): once an intentional teardown begins, stop appending to
+   *  the durable log. The killed child's `exit`→`closed` emit fires async and
+   *  must NOT re-create the jsonl after freshStart's clearEventLog removed it
+   *  (that would resurrect a reset thread on a later full replay). */
+  private disposed = false;
   private startupWaiters = new Set<(state: 'initialized' | 'closed') => void>();
   /** Resolves true once init is received, false if the process exits before init. */
   readonly ready: Promise<boolean>;
@@ -388,6 +393,7 @@ class ClaudeSession {
 
   /** Tear down the underlying process. */
   shutdown(reason = 'unspecified'): void {
+    this.disposed = true;
     const idleMs = Date.now() - this.lastActivityAtMs;
     console.warn(
       `[chat ${this.cli}] shutdown key=${this.key} pid=${this.child.pid ?? '-'} initSeen=${this.initSeen} listeners=${this.subscriberCount} idleMs=${idleMs} reason=${reason}`,
@@ -473,7 +479,9 @@ class ClaudeSession {
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
-    appendEventLog(this.key, se);
+    // Don't persist events emitted after an intentional shutdown — they're the
+    // dying child's trailing output and would repollute a freshly-cleared log.
+    if (!this.disposed) appendEventLog(this.key, se);
     for (const fn of this.listeners) fn(se);
   }
 
@@ -745,6 +753,9 @@ export async function freshStart(opts: { cli: CliKind; repoPath: string; chatId?
     sessions.delete(key);
   }
   await setSessionId(opts.cli, cwd, '', chatId); // drop the stored id so we don't --resume
+  // Wipe the durable log too — otherwise a client whose cache is empty would
+  // pull the old thread back via a full (sinceSeq=0) replay after the reset.
+  await clearEventLog(key);
   return spawnSession(opts.cli, cwd, chatId, null, key);
 }
 

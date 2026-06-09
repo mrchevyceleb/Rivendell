@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
@@ -86,6 +86,30 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
     })
     .catch(() => {});
   writeChains.set(key, next);
+}
+
+// Wipe the durable log for a key. Called on freshStart so a reset thread can't
+// be resurrected when a client with an empty cache requests a full replay
+// (sinceSeq=0). Chained through the per-key write queue so any in-flight append
+// from the prior session lands first and can't re-create the file afterward,
+// then the chain is cleared so the next session starts from an empty log.
+export async function clearEventLog(key: string): Promise<void> {
+  const path = logPath(key);
+  const prior = writeChains.get(key) ?? Promise.resolve();
+  const next = prior
+    .then(async () => {
+      try {
+        await rm(path, { force: true });
+      } catch (err) {
+        console.warn('[event-log-store] clear failed', key, (err as Error).message);
+      }
+    })
+    .catch(() => {});
+  writeChains.set(key, next);
+  await next;
+  // Drop the chain entry if no newer write superseded ours, so the file we
+  // just removed isn't pinned by a stale resolved promise.
+  if (writeChains.get(key) === next) writeChains.delete(key);
 }
 
 // Optional: rewrite the file to drop everything but the most recent

@@ -48,6 +48,11 @@ type ChatTab = { id: string; cli: CompanionId; title: string; createdAt: number 
 const ACTIVE_KEY = 'rivendell:hall-chat-active';
 const CHAT_TABS_KEY = 'rivendell:hall-chat-tabs';
 const ACTIVE_TAB_KEY = 'rivendell:hall-chat-active-tab';
+// Tombstones for tabs closed in any window, so the cross-window tab-list merge
+// honors deletions instead of resurrecting a closed tab from another window's
+// stale list. Map of tab id → closedAt(ms); pruned to recent entries.
+const CLOSED_TABS_KEY = 'rivendell:hall-chat-closed-tabs';
+const CLOSED_TAB_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAIN_CHAT_ID = 'main';
 const FRESH_TITLE = 'a fresh errand';
 const SCRIBE_COLLAPSED_KEY = 'rivendell:hall-scribe-collapsed';
@@ -162,6 +167,45 @@ export function Hall() {
   useEffect(() => {
     writeTabs(tabs);
   }, [tabs]);
+
+  // Cross-browser-window tab-list safety. The tab list lives in one shared
+  // localStorage key, and each window holds its own copy in React state. Without
+  // this, a tab created in window B is silently erased the next time window A
+  // writes its (older) list back. When another window changes the list, merge
+  // by id — never drop a tab that exists in either window — and re-merge on
+  // focus as a backstop. The merge is a no-op when nothing new appeared, so the
+  // two windows settle instead of ping-ponging writes.
+  useEffect(() => {
+    const mergeFromStorage = () => {
+      const stored = readTabs(companion);
+      const closed = readClosedTabs();
+      setTabs((prev) => {
+        const known = new Set(prev.map((tab) => tab.id));
+        // Honor deletions: drop tabs closed in another window…
+        const kept = prev.filter((tab) => !(tab.id in closed));
+        // …and add tabs created elsewhere that aren't known or already closed.
+        const additions = stored.filter((tab) => !known.has(tab.id) && !(tab.id in closed));
+        let next = [...kept, ...additions];
+        // Never leave Hall with zero tabs (e.g. the active tab was closed in
+        // another window and that window's replacement hasn't synced yet).
+        if (next.length === 0) {
+          next = [stored.find((tab) => !(tab.id in closed)) ?? defaultTab(companion)];
+        }
+        next.sort((a, b) => a.createdAt - b.createdAt);
+        const unchanged = next.length === prev.length && next.every((tab, i) => tab.id === prev[i].id);
+        return unchanged ? prev : next;
+      });
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === CHAT_TABS_KEY || e.key === CLOSED_TABS_KEY) mergeFromStorage();
+    };
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', mergeFromStorage);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', mergeFromStorage);
+    };
+  }, [companion]);
 
   useEffect(() => {
     if (!tabs.some((tab) => tab.id === activeTabId) && tabs[0]) {
@@ -333,12 +377,14 @@ export function Hall() {
       setTabs([replacement]);
       setActiveTabId(replacement.id);
       clearStoredTab(closingTab, repo);
+      markTabsClosed([closingTab.id]);
       setPendingPrompt(null);
       return;
     }
     const nextTabs = tabs.filter((tab) => tab.id !== tabId);
     setTabs(nextTabs);
     clearStoredTab(closingTab, repo);
+    markTabsClosed([closingTab.id]);
     if (activeTabId === tabId) {
       const nextActive = nextTabs[Math.max(0, index - 1)] ?? nextTabs[0];
       if (nextActive) setActiveTabId(nextActive.id);
@@ -1262,6 +1308,38 @@ function writeTabs(tabs: ChatTab[]) {
   localStorage.setItem(CHAT_TABS_KEY, JSON.stringify(tabs));
 }
 
+function readClosedTabs(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(CLOSED_TABS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const cutoff = Date.now() - CLOSED_TAB_TTL_MS;
+    const out: Record<string, number> = {};
+    for (const [id, ts] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof ts === 'number' && ts >= cutoff) out[id] = ts;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+// Tombstone tab ids so other windows drop them on merge instead of writing them
+// back. The MAIN tab is never tombstoned — it's the always-present default.
+function markTabsClosed(ids: string[]): void {
+  const closeable = ids.filter((id) => id && id !== MAIN_CHAT_ID);
+  if (!closeable.length) return;
+  const closed = readClosedTabs();
+  const now = Date.now();
+  for (const id of closeable) closed[id] = now;
+  try {
+    localStorage.setItem(CLOSED_TABS_KEY, JSON.stringify(closed));
+  } catch {
+    // best-effort — a missed tombstone only risks a stale-window resurrection
+  }
+}
+
 async function interruptLiveSession(session: LiveSession, repoPath: string, chatId: string): Promise<void> {
   const response = await fetch('/api/chat/interrupt', {
     method: 'POST',
@@ -1276,7 +1354,8 @@ async function interruptLiveSession(session: LiveSession, repoPath: string, chat
 function clearStoredTab(tab: ChatTab, repo: Repo | undefined): void {
   if (!repo) return;
   const suffix = tab.id === MAIN_CHAT_ID ? '' : `|${tab.id}`;
-  for (const cli of ['assistant', 'codex', 'claude'] as CompanionId[]) {
+  const allClis: CompanionId[] = ['assistant', 'claude', 'codex', 'codex-personal', 'banana', 'banana-local'];
+  for (const cli of allClis) {
     const key = `rivendell:chat-blocks:${cli}|${repo.path}${suffix}`;
     localStorage.removeItem(key);
     localStorage.removeItem(`${key}:seq`);

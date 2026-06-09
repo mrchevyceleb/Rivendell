@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnvForAccount } from '../lib/accountResolver.ts';
@@ -987,6 +987,9 @@ export async function freshStartCodex(opts: {
     await existing.shutdown();
   }
   await setSessionId(cli, cwd, '', chatId);
+  // Wipe the durable log before the new session loads it, so a reset thread
+  // can't be resurrected by a full (sinceSeq=0) replay from an empty client.
+  await clearEventLog(key);
   const session = new CodexSession(cwd, chatId, null, { cli, account });
   codexSessions.set(key, session);
   return session;

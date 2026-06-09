@@ -9,7 +9,7 @@ import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import type { Event, PermissionRequest, PermissionRuleset } from '@opencode-ai/sdk/v2';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import {
   ASSISTANT_HUB_PATH,
   BANANA_COMMANDS_DIR,
@@ -3694,7 +3694,9 @@ export class BananaSession {
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
-    appendEventLog(this.key, se);
+    // Don't persist events emitted after shutdown — late child-close output
+    // must not repollute a freshly-cleared log (would resurrect a reset thread).
+    if (!this.dead) appendEventLog(this.key, se);
     for (const fn of this.listeners) fn(se);
   }
 
@@ -3856,6 +3858,9 @@ export async function freshStartBanana(opts: {
     bananaSessions.delete(key);
   }
   await setSessionId(cli, cwd, '', chatId);
+  // Wipe the durable log before the new session loads it, so a reset thread
+  // can't be resurrected by a full (sinceSeq=0) replay from an empty client.
+  await clearEventLog(key);
   const session = new BananaSession(cwd, chatId, null, { cli });
   bananaSessions.set(key, session);
   return session;

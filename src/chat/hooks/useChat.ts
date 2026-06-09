@@ -242,11 +242,13 @@ function writeStoredState(cli: CompanionId, repoPath: string, chatId: string, bl
   try {
     localStorage.setItem(key, JSON.stringify(blocksForStorage(blocks)));
     localStorage.setItem(`${key}:seq`, String(seq));
-  } catch {
-    try {
-      localStorage.removeItem(key);
-      localStorage.removeItem(`${key}:seq`);
-    } catch {}
+  } catch (err) {
+    // A transient write failure (quota, serialization) must NEVER destroy the
+    // existing cache — deleting it strands the user with a permanently blank
+    // chat (the server only replays events newer than the persisted seq). Keep
+    // whatever was last stored; the server log is the durable backstop and a
+    // reconnect with an empty cache rehydrates via a full replay.
+    console.warn('[chat] persist failed, keeping prior cache:', (err as Error).message);
   }
 }
 
@@ -418,8 +420,13 @@ export function useChat(opts: {
     setBlocks(stored);
     turnIdRef.current = '';
     reconnectAttemptRef.current = 0;
-    // Sequence we've already seen (persisted) — replay only what's newer.
-    lastSeqRef.current = readStoredSeq(cli, repo.path, chatId);
+    // Decide replay start from whether we actually have cached blocks, NOT from
+    // the persisted seq alone. If the cache is empty (wiped, quota error, a
+    // brand-new browser, or a different device), ask the server for a FULL
+    // replay (sinceSeq=0 → every event, seq starts at 1) so the entire
+    // conversation rehydrates from the durable event log. Trusting a stale
+    // persisted seq here is exactly what stranded users with a blank chat.
+    lastSeqRef.current = stored.length > 0 ? readStoredSeq(cli, repo.path, chatId) : 0;
     // Mark this conversation as restored so the persistence-write effect can
     // safely begin saving updates back to storage.
     restoredKeyRef.current = conversationKey(cli, repo.path, chatId);
@@ -672,6 +679,25 @@ export function useChat(opts: {
     window.addEventListener('online', reconcile);
     window.addEventListener('pageshow', reconcile);
 
+    // Cross-browser-tab sync: when ANOTHER tab on the same conversation writes
+    // newer state, adopt it here instead of letting this (possibly stale) tab
+    // later overwrite the shared cache with older blocks. We key off the `:seq`
+    // companion entry because writeStoredState writes blocks first, then seq —
+    // so by the time seq fires, the blocks value is already current. Skip while
+    // this tab has a turn in flight so we don't clobber a live stream.
+    const seqStorageKey = blocksStorageKey(cli, repo.path, chatId) + ':seq';
+    const onStorage = (e: StorageEvent) => {
+      if (!isCurrentConnection()) return;
+      if (e.key !== seqStorageKey || e.newValue == null) return;
+      const incoming = Number(e.newValue);
+      if (!Number.isFinite(incoming) || incoming <= lastSeqRef.current) return;
+      if (statusRef.current === 'streaming' || pendingSendRef.current) return;
+      const fresh = restoreBlocksWithUniqueIds(readStoredBlocks(cli, repo.path, chatId));
+      setBlocks(fresh);
+      lastSeqRef.current = incoming;
+    };
+    window.addEventListener('storage', onStorage);
+
     forceReconnectRef.current = () => {
       if (!isCurrentConnection()) return;
       if (reconnectTimerRef.current) {
@@ -697,6 +723,7 @@ export function useChat(opts: {
       window.removeEventListener('focus', reconcile);
       window.removeEventListener('online', reconcile);
       window.removeEventListener('pageshow', reconcile);
+      window.removeEventListener('storage', onStorage);
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
