@@ -54,7 +54,14 @@ export function Studio() {
   const boot = useMemo(readTabs, []);
   const [tabs, setTabs] = useState<StudioTab[]>(boot.tabs);
   const [active, setActive] = useState<string>(boot.active);
-  const [treeCollapsed, setTreeCollapsed] = useState(() => localStorage.getItem(STUDIO_TREE_KEY) === 'true');
+  const [treeCollapsed, setTreeCollapsed] = useState(() => {
+    const stored = localStorage.getItem(STUDIO_TREE_KEY);
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+    // No saved preference: collapse by default on phones so the tree doesn't
+    // cover the content on first load.
+    return typeof window !== 'undefined' && window.innerWidth <= 760;
+  });
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('rivendell:theme') === 'light' ? 'light' : 'dark'));
   const [zoom, setZoom] = useState<number>(() => {
     const v = Number(localStorage.getItem('rivendell:zoom'));
@@ -98,6 +105,8 @@ export function Studio() {
     const id = `file:${path}`;
     setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, { id, kind: 'file', path, title: name }]));
     setActive(id);
+    // On phones the tree overlays the content — close it so the file is visible.
+    if (typeof window !== 'undefined' && window.innerWidth <= 760) setTreeCollapsed(true);
   }, []);
 
   const openChatTab = useCallback(() => {

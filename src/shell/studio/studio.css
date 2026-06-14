@@ -354,3 +354,41 @@
 
 /* Keep the starfield behind everything in the shell */
 .studio > .r-star-field { z-index: 0; }
+
+/* ============================================================
+   Mobile / narrow screens
+   ============================================================ */
+@media (max-width: 760px) {
+  .studio { grid-template-rows: 44px 1fr 22px; }
+
+  /* Top bar: keep the mark, drop the wordmark + zoom to save room */
+  .studio-brand { padding-right: 8px; margin-right: 2px; }
+  .studio-brand strong { display: none; }
+  .studio-zoom { display: none; }
+  .studio-topbar { padding-left: 8px; }
+
+  /* Single column: the file tree slides OVER the content instead of squeezing it */
+  .studio-body,
+  .studio-body.tree-collapsed { grid-template-columns: 1fr; }
+  .studio-tree {
+    position: absolute;
+    z-index: 40;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(85vw, 320px);
+    border-right: 1px solid var(--r-line-strong);
+    box-shadow: 0 0 50px rgba(0, 0, 0, 0.6);
+  }
+  .studio-body.tree-collapsed .studio-tree { display: none; }
+
+  /* Roomier tap targets */
+  .studio-tree-toggle,
+  .studio-topbar-actions button { width: 36px; height: 34px; }
+  .studio-tab { max-width: 152px; }
+  .studio-tab-main { font-size: 13px; }
+  .studio-tab-close { opacity: 1; }
+
+  /* Trim the status bar to the essentials */
+  .studio-status-right { display: none; }
+}

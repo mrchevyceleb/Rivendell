@@ -445,6 +445,7 @@ export function ChatInput({
   agent = 'Claude Code',
   repo = '',
   acceptImages = true,
+  compact = false,
 }: {
   value?: string;
   onChange?: (v: string) => void;
@@ -462,6 +463,9 @@ export function ChatInput({
   agent?: string;
   repo?: string;
   acceptImages?: boolean;
+  /** Slim composer for the embedded Studio chat: no companion header, tighter
+   *  padding, smaller text. The CompanionControls bar above already shows the agent. */
+  compact?: boolean;
 }) {
   const [internal, setInternal] = useState(value ?? '');
   const isControlled = value !== undefined;
@@ -563,13 +567,13 @@ export function ChatInput({
         background: 'var(--vellum)',
         border: '1px solid var(--rule)',
         borderRadius: 2,
-        padding: '16px 18px 14px',
+        padding: compact ? '8px 12px 10px' : '16px 18px 14px',
         boxShadow: '0 1px 0 var(--shadow-warm)',
       }}
     >
       <div
         style={{
-          display: 'flex',
+          display: compact ? 'none' : 'flex',
           alignItems: 'center',
           gap: 10,
           marginBottom: 10,
@@ -693,13 +697,13 @@ export function ChatInput({
               inset: 0,
               pointerEvents: 'none',
               fontFamily: 'var(--serif-body)',
-              fontSize: 19,
+              fontSize: compact ? 15 : 19,
               lineHeight: 1.55,
               fontStyle: v ? 'normal' : 'italic',
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
               color: 'transparent',
-              minHeight: 64,
+              minHeight: compact ? 38 : 64,
               overflow: 'hidden',
             }}
           >
@@ -747,12 +751,12 @@ export function ChatInput({
             outline: 'none',
             background: 'transparent',
             fontFamily: 'var(--serif-body)',
-            fontSize: 19,
+            fontSize: compact ? 15 : 19,
             lineHeight: 1.55,
             color: 'var(--ink)',
             fontStyle: v ? 'normal' : 'italic',
-            minHeight: 64,
-            maxHeight: '40dvh',
+            minHeight: compact ? 38 : 64,
+            maxHeight: compact ? '30dvh' : '40dvh',
             overflowY: 'hidden',
           }}
         />
@@ -785,8 +789,8 @@ export function ChatInput({
           if (fileInputRef.current) fileInputRef.current.value = '';
         }}
       />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
-        <span className="sw-folio" style={{ fontStyle: 'italic', fontSize: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: compact ? 6 : 8 }}>
+        <span className="sw-folio" style={{ fontStyle: 'italic', fontSize: 12, display: compact ? 'none' : undefined }}>
           ↵ to send · ⇧↵ for new line
         </span>
         <button

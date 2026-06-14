@@ -276,6 +276,7 @@ export function Conversation({
       >
         <div style={{ maxWidth: contentMax, margin: '0 auto', padding: sidePad }}>
           <ChatInput
+            compact={compact}
             agent={agent}
             repo={repo}
             placeholder="speak, master…"
