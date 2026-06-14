@@ -54,6 +54,10 @@ export type RivendellCronJob = {
   actionType?: string;
   prompt?: string;
   aiModel?: CronAiModel;
+  /** Full companion engine id (assistant/claude/codex/codex-personal/banana/banana-local/zai). */
+  engine?: string;
+  /** Specific model id for the engine (glm-5.2, claude-opus-4-8, gpt-5.5, an OpenRouter/LM Studio id). */
+  modelId?: string;
   repo?: string;
   toolName?: string;
   deliveryChannel?: string;
@@ -477,6 +481,8 @@ function mapCron(job: AdminCron): RivendellCronJob {
   const actionType = job.action_type || 'ai_prompt';
   const prompt = typeof job.action_config?.prompt === 'string' ? job.action_config.prompt : undefined;
   const aiModel = normalizeCronModel(job.action_config?.model, job.runtime);
+  const engine = typeof job.action_config?.engine === 'string' ? job.action_config.engine : undefined;
+  const modelId = typeof job.action_config?.model_id === 'string' ? job.action_config.model_id : undefined;
   const repo = normalizeOptionalString(job.action_config?.repo);
   const toolName = typeof job.action_config?.tool_name === 'string' ? job.action_config.tool_name : undefined;
   const maxTokens = typeof job.action_config?.max_tokens === 'number' ? job.action_config.max_tokens : undefined;
@@ -496,6 +502,8 @@ function mapCron(job: AdminCron): RivendellCronJob {
     actionType,
     prompt,
     aiModel,
+    engine,
+    modelId,
     repo,
     toolName,
     deliveryChannel: job.delivery_channel || undefined,
@@ -562,6 +570,9 @@ function actionConfigFromCron(input: Partial<RivendellCronJob>): Record<string, 
   const config: Record<string, unknown> = {};
   if (input.prompt !== undefined) config.prompt = input.prompt;
   if (input.aiModel !== undefined) config.model = input.aiModel;
+  // Full engine + specific model — what the local cron runner dispatches on.
+  if (input.engine !== undefined) config.engine = input.engine;
+  if (input.modelId !== undefined) config.model_id = input.modelId;
   const repo = normalizeOptionalString(input.repo);
   const cwd = normalizeOptionalString(input.cwd);
   if (repo !== undefined) config.repo = repo;

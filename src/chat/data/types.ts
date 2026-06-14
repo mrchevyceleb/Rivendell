@@ -11,7 +11,8 @@ export type CompanionId =
   | 'assistant'
   | 'banana'
   | 'codex-personal'
-  | 'banana-local';
+  | 'banana-local'
+  | 'zai';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.

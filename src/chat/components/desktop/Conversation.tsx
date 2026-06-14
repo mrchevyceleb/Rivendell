@@ -53,7 +53,7 @@ const statusLabel: Record<Status, string> = {
   connecting: 'kindling',
   ready: 'at hand',
   streaming: 'tending',
-  closed: 'asleep',
+  closed: 'reconnecting',
   error: 'troubled',
 };
 
@@ -234,7 +234,7 @@ export function Conversation({
             </p>
           )}
 
-          {renderBlocks(blocks)}
+          {renderBlocks(blocks, agent)}
 
           {status === 'streaming' && blocks.length > 0 && (
             <div style={{ marginTop: 4 }}>
@@ -294,7 +294,7 @@ export function Conversation({
   );
 }
 
-function renderBlocks(blocks: ChatBlock[]) {
+function renderBlocks(blocks: ChatBlock[], agent: string) {
   return blocks.map((b) => {
     if (b.kind === 'user') {
       return (
@@ -305,34 +305,34 @@ function renderBlocks(blocks: ChatBlock[]) {
     }
     if (b.kind === 'text') {
       return (
-        <SamMessage key={b.id} time={timeLabel(b.ts)}>
+        <SamMessage key={b.id} name={agent} time={timeLabel(b.ts)}>
           <Markdown>{b.text}</Markdown>
         </SamMessage>
       );
     }
     if (b.kind === 'doc-link') {
       return (
-        <SamMessage key={b.id} time={timeLabel(b.ts)}>
+        <SamMessage key={b.id} name={agent} time={timeLabel(b.ts)}>
           <DocLinkCard path={b.path} title={b.title} />
         </SamMessage>
       );
     }
     if (b.kind === 'folder-link') {
       return (
-        <SamMessage key={b.id} time={timeLabel(b.ts)}>
+        <SamMessage key={b.id} name={agent} time={timeLabel(b.ts)}>
           <FolderLinkCard path={b.path} title={b.title} />
         </SamMessage>
       );
     }
     if (b.kind === 'artifact') {
       return (
-        <SamMessage key={b.id} time={timeLabel(b.ts)}>
+        <SamMessage key={b.id} name={agent} time={timeLabel(b.ts)}>
           <ArtifactCard artifactId={b.artifactId} artifactKind={b.artifactKind} title={b.title} />
         </SamMessage>
       );
     }
     return (
-      <SamMessage key={b.id} time={timeLabel(b.ts)}>
+      <SamMessage key={b.id} name={agent} time={timeLabel(b.ts)}>
         <ToolCall
           tool={b.tool}
           args={b.args}

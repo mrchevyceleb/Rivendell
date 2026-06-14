@@ -64,6 +64,7 @@ const companionLabel: Record<CompanionId, string> = {
   banana: 'Banana',
   'codex-personal': 'Personal Codex',
   'banana-local': 'Local LLM',
+  zai: 'Z.ai GLM',
 };
 
 const companionTitle: Record<CompanionId, string> = {
@@ -73,6 +74,7 @@ const companionTitle: Record<CompanionId, string> = {
   banana: 'Banana Code emissary',
   'codex-personal': 'personal-account Codex',
   'banana-local': 'local model on the Spark',
+  zai: 'GLM via Z.ai coding plan',
 };
 
 const companionSub: Record<CompanionId, string> = {
@@ -81,7 +83,8 @@ const companionSub: Record<CompanionId, string> = {
   codex: 'Kim Codex',
   banana: 'OpenRouter via Banana Code',
   'codex-personal': 'personal-account Codex',
-  'banana-local': 'local vLLM model, direct',
+  'banana-local': 'local LM Studio model, direct',
+  zai: 'GLM 5.2 / 5.1 via Z.ai',
 };
 
 // Banana is an engine multiplexer: the picked engine selects the wire cli

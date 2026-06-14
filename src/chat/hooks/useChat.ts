@@ -344,6 +344,9 @@ export function useChat(opts: {
   const reconnectAttemptRef = useRef(0);
   const teardownRef = useRef(false);
   const connectionIdRef = useRef(0);
+  /** Wall-clock of the last server message on the current socket. The stream
+   *  watchdog uses it to detect a silently stalled turn. */
+  const lastMessageAtRef = useRef<number>(Date.now());
   const turnIdRef = useRef('');
   /** Set by the connection effect so the returned `reconnect()` can force a
    *  close-and-reopen even when auto-reconnect is mid-backoff. */
@@ -467,6 +470,7 @@ export function useChat(opts: {
       };
       ws.onmessage = (e) => {
         if (!isCurrentConnection()) return;
+        lastMessageAtRef.current = Date.now();
         let msg: any;
         try { msg = JSON.parse(String(e.data)); }
         catch { return; }
@@ -531,8 +535,13 @@ export function useChat(opts: {
           }
         }
         else if (msg.type === 'sessionClosed') {
-          setError('This warm session is asleep. Send a message to wake it.');
+          // The CLI idle-closed (or exited mid-turn). Don't strand the user on
+          // a dead-looking "asleep" banner — re-bind transparently, exactly
+          // like samwise-2. bindSession replies with a fresh ready/streaming.
+          pendingSendRef.current = false;
+          setError(null);
           setStatus('closed');
+          window.setTimeout(() => forceReconnectRef.current(), 250);
         }
         else if (msg.type === 'stream') {
           setBlocks((prev) => reduce(prev, msg.event, turnIdRef));
@@ -714,11 +723,29 @@ export function useChat(opts: {
       connect();
     };
 
+    // Stream watchdog: if a turn is streaming but the socket has been silent
+    // for STREAM_SILENCE_MS, the connection is almost certainly stale (the
+    // server already emitted turnEnd, it just never arrived). Force a fresh WS
+    // so bindSession replies with a fresh ready{busy:false} (or replays the
+    // missed turnEnd) and the "tending" dots clear instead of hanging forever.
+    const STREAM_SILENCE_MS = 45_000;
+    const WATCHDOG_TICK_MS = 5_000;
+    const watchdog = window.setInterval(() => {
+      if (!isCurrentConnection()) return;
+      if (statusRef.current !== 'streaming') return;
+      if (Date.now() - lastMessageAtRef.current < STREAM_SILENCE_MS) return;
+      // eslint-disable-next-line no-console
+      console.warn(`[useChat] stream watchdog: silent ${STREAM_SILENCE_MS}ms, forcing reconnect`);
+      lastMessageAtRef.current = Date.now();
+      forceReconnectRef.current();
+    }, WATCHDOG_TICK_MS);
+
     connect();
 
     return () => {
       teardownRef.current = true;
       forceReconnectRef.current = () => {};
+      window.clearInterval(watchdog);
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('focus', reconcile);
       window.removeEventListener('online', reconcile);

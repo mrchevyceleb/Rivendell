@@ -9,6 +9,7 @@ const COMPANION_LABEL: Record<CompanionId, string> = {
   banana: 'banana',
   'codex-personal': 'codex',
   'banana-local': 'banana',
+  zai: 'glm',
 };
 
 const dotColor: Record<ChronicleEventKind, string> = {

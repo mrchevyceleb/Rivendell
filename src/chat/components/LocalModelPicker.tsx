@@ -283,7 +283,7 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
     <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
       <select
         aria-label="Local model"
-        title="Pick a vLLM model — loads/downloads it if it isn't running"
+        title="Whatever text model is loaded in LM Studio on Moria"
         style={selStyle}
         value={cat?.loaded ?? ''}
         disabled={!!busy}
@@ -294,7 +294,7 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
             <option key={o.id} value={o.id}>{o.label}</option>
           ))
         ) : (
-          <option value="">vLLM unreachable</option>
+          <option value="">LM Studio unreachable</option>
         )}
       </select>
       <select

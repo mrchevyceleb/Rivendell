@@ -1,7 +1,8 @@
 import type { CSSProperties, ReactNode } from 'react';
+import { Evenstar } from '../../../theme/Ornaments';
 
 // ─────────────────────────────────────────────
-// SamPortrait — the gardener himself.
+// SamPortrait — Elrond's mark (the Evenstar). On-brand, no image asset.
 // ─────────────────────────────────────────────
 export function SamPortrait({
   size = 32,
@@ -14,22 +15,16 @@ export function SamPortrait({
         width: size,
         height: size,
         borderRadius: '50%',
-        overflow: 'hidden',
+        display: 'grid',
+        placeItems: 'center',
         position: 'relative',
         flexShrink: 0,
-        boxShadow: ring
-          ? `0 0 0 1px var(--rule), 0 1px 0 var(--shadow-warm)${glow ? ', 0 0 24px rgba(184,89,58,0.18)' : ''}`
-          : glow
-            ? '0 0 24px rgba(184,89,58,0.18)'
-            : 'none',
-        background: 'var(--vellum)',
+        boxShadow: ring ? '0 0 0 1px var(--r-line-gold)' : 'none',
+        background:
+          'radial-gradient(circle at 50% 38%, color-mix(in srgb, var(--r-gold) 16%, var(--r-bg-card)), var(--r-bg-deep))',
       }}
     >
-      <img
-        src="/sam.png"
-        alt="Samwise"
-        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-      />
+      <Evenstar size={Math.round(size * 0.62)} color="var(--r-gold)" glow={glow} />
     </div>
   );
 }

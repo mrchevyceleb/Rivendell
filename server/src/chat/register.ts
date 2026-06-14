@@ -214,7 +214,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'codex' &&
       cli !== 'banana' &&
       cli !== 'codex-personal' &&
-      cli !== 'banana-local'
+      cli !== 'banana-local' &&
+      cli !== 'zai'
     ) {
       res.status(400).json({ error: 'invalid cli' });
       return;

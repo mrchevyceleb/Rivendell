@@ -17,7 +17,14 @@ export const WORKSPACE_COMPANIONS: { id: CompanionId; label: string }[] = [
   { id: 'codex', label: 'KG Codex' },
   { id: 'codex-personal', label: 'Personal Codex' },
   { id: 'banana', label: 'OpenRouter' },
-  { id: 'banana-local', label: 'Local · vLLM' },
+  { id: 'banana-local', label: 'Local · LM Studio' },
+  { id: 'zai', label: 'Z.ai · GLM' },
+];
+
+// Z.ai coding-plan models (Anthropic-compatible, run through the claude CLI).
+export const ZAI_MODELS: { id: string; label: string }[] = [
+  { id: 'glm-5.2', label: 'GLM 5.2' },
+  { id: 'glm-5.1', label: 'GLM 5.1' },
 ];
 
 function readLS(key: string, fallback: string): string {
@@ -42,6 +49,7 @@ export function useCompanionPicker(storageKey: string) {
   const [claudeEffort, setClaudeEffortState] = useState(() => readLS('rivendell:claude-effort', 'xhigh'));
   const [codexModel, setCodexModelState] = useState(() => readLS('rivendell:codex-model', 'gpt-5.5'));
   const [codexEffort, setCodexEffortState] = useState(() => readLS('rivendell:codex-effort', 'xhigh'));
+  const [zaiModel, setZaiModelState] = useState(() => readLS('rivendell:zai-model', 'glm-5.2'));
   const [bananaEffort, setBananaEffortState] = useState(() => readLS('rivendell:banana-effort', 'medium'));
   const [localModel, setLocalModelState] = useState(() => readLS('rivendell:local-model', ''));
 
@@ -53,6 +61,7 @@ export function useCompanionPicker(storageKey: string) {
   const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState);
   const setCodexModel = persist('rivendell:codex-model', setCodexModelState);
   const setCodexEffort = persist('rivendell:codex-effort', setCodexEffortState);
+  const setZaiModel = persist('rivendell:zai-model', setZaiModelState);
   const setBananaEffort = persist('rivendell:banana-effort', setBananaEffortState);
   const setLocalModel = persist('rivendell:local-model', setLocalModelState);
 
@@ -61,26 +70,29 @@ export function useCompanionPicker(storageKey: string) {
   const isCodex = cli === 'codex' || cli === 'codex-personal';
   const isLocal = cli === 'banana-local';
   const isOpenRouter = cli === 'banana';
+  const isZai = cli === 'zai';
 
   const model =
-    isLocal ? (localModel || undefined)
+    isZai ? zaiModel
+    : isLocal ? (localModel || undefined)
     : isOpenRouter ? bananaModel.model
     : isCodex ? codexModel
     : isClaude ? claudeModel
     : undefined;
   const effort =
     isCodex ? codexEffort
-    : isClaude ? claudeEffort
+    : (isClaude || isZai) ? claudeEffort
     : (isOpenRouter || isLocal) ? bananaEffort
     : undefined;
 
   return {
     companion, setCompanion,
     cli, model, effort,
-    isClaude, isCodex, isLocal, isOpenRouter,
+    isClaude, isCodex, isLocal, isOpenRouter, isZai,
     bananaModel,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
+    zaiModel, setZaiModel,
     bananaEffort, setBananaEffort,
     localModel, setLocalModel,
   };

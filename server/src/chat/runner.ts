@@ -1,5 +1,7 @@
 import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
@@ -63,7 +65,8 @@ export type CliKind =
   | 'assistant'
   | 'banana'
   | 'codex-personal'
-  | 'banana-local';
+  | 'banana-local'
+  | 'zai';
 
 /** Rivendell-only: which named account a Claude/Codex-backed companion runs on. */
 export function cliAccount(cli: CliKind): string {
@@ -119,6 +122,26 @@ export function wrapSlashArgs(text: string): string {
 // truth. Opus 4.7+ uses adaptive thinking and ignores MAX_THINKING_TOKENS; the
 // live lever is the `--effort` flag (low|medium|high|xhigh|max). "max" is top.
 const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', 'claude-opus-4-8', 'xhigh');
+
+// Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
+// Runs through the same `claude` binary with the base URL + auth token
+// redirected and a dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the GLM token
+// authenticates (never Matt's Anthropic subscription). Model id (glm-5.2 /
+// glm-5.1) comes from the picker; the spawn validates it like any claude model.
+const ZAI_BASE_URL = process.env.RIVENDELL_ZAI_BASE_URL?.trim() || 'https://api.z.ai/api/anthropic';
+const ZAI_MODEL = process.env.RIVENDELL_ZAI_MODEL?.trim() || 'glm-5.2';
+const ZAI_CONFIG_DIR = join(homedir(), '.claude-zai');
+
+function zaiEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.OPENAI_API_KEY;
+  delete env.ANTHROPIC_API_KEY; // force token-based auth to Z.ai, not a metered Anthropic key
+  env.CLAUDE_CONFIG_DIR = ZAI_CONFIG_DIR;
+  env.ANTHROPIC_BASE_URL = ZAI_BASE_URL;
+  env.ANTHROPIC_AUTH_TOKEN = process.env.Z_AI_API_KEY || '';
+  env.SAMWISE_ACCOUNT = 'zai';
+  return env;
+}
 // Validate WS-supplied model/effort against an allow-list; fall back to the
 // config default on anything unexpected. Used both for spawn args and for the
 // recycle comparison in getOrCreateSession (must resolve identically, or an
@@ -212,7 +235,7 @@ class ClaudeSession {
     this.key = keyOf(cli, cwd, chatId);
     this.pendingResumeId = resumeId;
     this.startedResumeId = resumeId;
-    this.spawnModel = model ?? CLAUDE_MODEL;
+    this.spawnModel = model ?? (cli === 'zai' ? ZAI_MODEL : CLAUDE_MODEL);
     this.spawnEffort = effort ?? CLAUDE_EFFORT;
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
 
@@ -267,7 +290,7 @@ class ClaudeSession {
       cwd,
       // Rivendell: the companion (not the directory) picks the account —
       // assistant=Kim (Elrond), claude=personal (Banana → Personal Claude).
-      env: accountEnvForAccount(cliAccount(cli), cwd),
+      env: cli === 'zai' ? zaiEnv() : accountEnvForAccount(cliAccount(cli), cwd),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;

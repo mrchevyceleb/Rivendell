@@ -11,7 +11,8 @@ export function SamMessage({
   children,
   time,
   folio,
-}: { children: ReactNode; time?: string; folio?: string }) {
+  name = 'Elrond',
+}: { children: ReactNode; time?: string; folio?: string; name?: string }) {
   return (
     <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: 22 }}>
       <SamPortrait size={36} />
@@ -34,7 +35,7 @@ export function SamMessage({
               whiteSpace: 'nowrap',
             }}
           >
-            Samwise
+            {name}
           </span>
           {time && (
             <span className="sw-folio" style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
@@ -53,7 +54,7 @@ export function SamMessage({
         <div
           style={{
             fontFamily: 'var(--serif-body)',
-            fontSize: 19,
+            fontSize: 15,
             lineHeight: 1.6,
             color: 'var(--ink)',
           }}
@@ -95,14 +96,14 @@ export function UserMessage({
         </div>
         <div
           style={{
-            background: 'var(--ink)',
-            color: 'var(--vellum)',
-            padding: '12px 16px',
-            borderRadius: 14,
+            background: 'color-mix(in srgb, var(--r-elf-blue) 16%, var(--r-bg-raised))',
+            color: 'var(--r-ink)',
+            border: '1px solid color-mix(in srgb, var(--r-elf-blue) 30%, transparent)',
+            padding: '9px 14px',
+            borderRadius: 12,
             fontFamily: 'var(--serif-body)',
-            fontSize: 19,
+            fontSize: 15,
             lineHeight: 1.55,
-            boxShadow: '0 1px 0 var(--shadow-warm)',
           }}
         >
           {children}

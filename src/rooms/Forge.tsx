@@ -24,7 +24,8 @@ import { useCronJobs } from '../hooks/useRoomData';
 
 type CronDraft = {
   name: string;
-  aiModel: CronAiModel;
+  engine: string;
+  model: string;
   schedule: string;
   prompt: string;
   repo: string;
@@ -33,7 +34,8 @@ type CronDraft = {
 
 const emptyDraft: CronDraft = {
   name: '',
-  aiModel: 'claude',
+  engine: 'assistant',
+  model: 'claude-opus-4-8',
   schedule: 'daily 9am',
   prompt: '',
   repo: '',
@@ -55,6 +57,38 @@ const modelLabels: Record<CronAiModel, string> = {
   mandrill: 'Mandrill',
 };
 
+// Full engine set — mirrors the chat companion picker so a cron can run on ANY
+// engine: KG/Personal Claude, KG/Personal Codex, OpenRouter, Local LM Studio,
+// or Z.ai GLM. All execute on the local cron runner.
+const CRON_ENGINES: { id: string; label: string }[] = [
+  { id: 'assistant', label: 'Elrond · KG Claude' },
+  { id: 'claude', label: 'Personal Claude' },
+  { id: 'codex', label: 'KG Codex' },
+  { id: 'codex-personal', label: 'Personal Codex' },
+  { id: 'banana', label: 'OpenRouter' },
+  { id: 'banana-local', label: 'Local · LM Studio' },
+  { id: 'zai', label: 'Z.ai · GLM' },
+];
+function engineLabel(id: string): string {
+  return CRON_ENGINES.find((e) => e.id === id)?.label ?? id;
+}
+function engineDefaultModel(engine: string): string {
+  if (engine === 'zai') return 'glm-5.2';
+  if (engine === 'codex' || engine === 'codex-personal') return 'gpt-5.5';
+  if (engine === 'assistant' || engine === 'claude') return 'claude-opus-4-8';
+  return '';
+}
+function coarseAiModel(engine: string): CronAiModel {
+  if (engine === 'codex' || engine === 'codex-personal') return 'codex';
+  if (engine === 'banana' || engine === 'banana-local') return 'mandrill';
+  return 'claude';
+}
+function engineFromAiModel(m: CronAiModel): string {
+  if (m === 'codex') return 'codex';
+  if (m === 'mandrill') return 'banana';
+  return 'assistant';
+}
+
 const defaultNoRepoCwd = '/Users/mjohnst/ASSISTANT-HUB';
 
 export function Forge() {
@@ -66,10 +100,16 @@ export function Forge() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const scheduleInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Active first, then paused, then failed; stable within each group.
+  const sortedJobs = useMemo(() => {
+    const rank: Record<string, number> = { active: 0, paused: 1, failed: 2 };
+    return [...jobs].sort((a, b) => (rank[a.status] ?? 1) - (rank[b.status] ?? 1));
+  }, [jobs]);
+
   const selected = useMemo(() => {
-    if (!jobs.length) return null;
-    return jobs.find((job) => job.id === selectedId) ?? jobs[0];
-  }, [jobs, selectedId]);
+    if (!sortedJobs.length) return null;
+    return sortedJobs.find((job) => job.id === selectedId) ?? sortedJobs[0];
+  }, [sortedJobs, selectedId]);
 
   const isCreating = editingId === 'new';
   const editing = isCreating ? null : jobs.find((job) => job.id === editingId) ?? null;
@@ -184,8 +224,8 @@ export function Forge() {
           </div>
 
           <div className="cron-card-list">
-            {jobs.length ? (
-              jobs.map((job) => (
+            {sortedJobs.length ? (
+              sortedJobs.map((job) => (
                 <article
                   className={`cron-card status-${job.status} model-${job.aiModel || inferAiModel(job)} source-${job.source || 'assistant-mcp'} ${job.readOnly ? 'is-readonly' : ''} ${selected?.id === job.id ? 'is-selected' : ''}`}
                   key={job.id}
@@ -202,7 +242,14 @@ export function Forge() {
                     <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>
                       {job.status}
                     </Chip>
-                    <ModelChip model={job.aiModel || inferAiModel(job)} />
+                    {job.engine ? (
+                      <span title={job.modelId || engineLabel(job.engine)}>
+                        <Bot size={13} />
+                        {engineLabel(job.engine)}{job.modelId ? ` · ${job.modelId}` : ''}
+                      </span>
+                    ) : (
+                      <ModelChip model={job.aiModel || inferAiModel(job)} />
+                    )}
                     {job.sourceLabel ? (
                       <span title={job.description || job.sourceLabel}>
                         <Bot size={13} />
@@ -273,12 +320,29 @@ export function Forge() {
               </label>
 
               <div className="cron-field">
-                AI model to use
-                <ModelToggle
-                  value={draft.aiModel}
-                  onChange={(aiModel) => setDraft({ ...draft, aiModel })}
-                />
+                Engine
+                <select
+                  className="cron-engine-select"
+                  value={draft.engine}
+                  onChange={(event) => {
+                    const engine = event.target.value;
+                    setDraft({ ...draft, engine, model: engineDefaultModel(engine) });
+                  }}
+                >
+                  {CRON_ENGINES.map((e) => (
+                    <option key={e.id} value={e.id}>{e.label}</option>
+                  ))}
+                </select>
               </div>
+
+              <label className="cron-field">
+                Model
+                <input
+                  value={draft.model}
+                  onChange={(event) => setDraft({ ...draft, model: event.target.value })}
+                  placeholder={engineDefaultModel(draft.engine) || 'model id (OpenRouter / LM Studio)'}
+                />
+              </label>
 
               <label className="cron-field">
                 Schedule
@@ -398,8 +462,11 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
           <dd>{job.name}</dd>
         </div>
         <div>
-          <dt>AI model</dt>
-          <dd>{modelLabels[model]}</dd>
+          <dt>Engine</dt>
+          <dd>
+            {job.engine ? engineLabel(job.engine) : modelLabels[model]}
+            {job.modelId ? <> · <code>{job.modelId}</code></> : null}
+          </dd>
         </div>
         <div>
           <dt>Schedule</dt>
@@ -451,43 +518,6 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
   );
 }
 
-function ModelToggle({ value, onChange }: { value: CronAiModel; onChange: (value: CronAiModel) => void }) {
-  return (
-    <div className={`model-toggle model-${value}`} role="radiogroup" aria-label="AI model to use">
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === 'claude'}
-        className={value === 'claude' ? 'is-active' : ''}
-        onClick={() => onChange('claude')}
-      >
-        <Sparkles size={14} />
-        <span>Claude</span>
-      </button>
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === 'codex'}
-        className={value === 'codex' ? 'is-active' : ''}
-        onClick={() => onChange('codex')}
-      >
-        <Code2 size={14} />
-        <span>Codex</span>
-      </button>
-      <button
-        type="button"
-        role="radio"
-        aria-checked={value === 'mandrill'}
-        className={value === 'mandrill' ? 'is-active' : ''}
-        onClick={() => onChange('mandrill')}
-      >
-        <Bot size={14} />
-        <span>Mandrill</span>
-      </button>
-    </div>
-  );
-}
-
 function ModelChip({ model }: { model: CronAiModel }) {
   const Icon = model === 'claude' ? Sparkles : model === 'codex' ? Code2 : Bot;
   return (
@@ -498,9 +528,11 @@ function ModelChip({ model }: { model: CronAiModel }) {
 }
 
 function draftFromJob(job: CronJob): CronDraft {
+  const engine = job.engine || engineFromAiModel(job.aiModel || inferAiModel(job));
   return {
     name: job.name,
-    aiModel: job.aiModel || inferAiModel(job),
+    engine,
+    model: job.modelId || engineDefaultModel(engine),
     schedule: cronToInput(job.schedule),
     prompt: job.prompt || '',
     repo: displayRepo(job),
@@ -509,27 +541,31 @@ function draftFromJob(job: CronJob): CronDraft {
 }
 
 function normalizeDraft(draft: CronDraft): Partial<CronJob> {
-  const aiModel = draft.aiModel;
+  const engine = draft.engine;
+  const aiModel = coarseAiModel(engine);
   const repo = draft.repo.trim();
-  const localModel = aiModel === 'claude' || aiModel === 'codex';
   const schedule = resolveScheduleInput(draft.schedule);
 
   return {
     name: draft.name.trim(),
     description: '',
     schedule: schedule.cron,
-    target: aiModel,
+    target: engineLabel(engine),
     actionType: 'ai_prompt',
     prompt: draft.prompt.trim(),
     aiModel,
+    engine,
+    modelId: draft.model.trim() || undefined,
     repo: repo || undefined,
     toolName: '',
     deliveryChannel: 'log_only',
     maxTokens: 2048,
     status: draft.status,
-    runtime: localModel ? 'local' : 'railway',
+    // Every engine runs on the local cron runner: CLI engines spawn the matching
+    // account (or Z.ai redirect); OpenRouter/Local go over HTTP from that process.
+    runtime: 'local',
     cwd: repo || undefined,
-    permissionMode: localModel ? 'default' : undefined,
+    permissionMode: undefined,
   };
 }
 

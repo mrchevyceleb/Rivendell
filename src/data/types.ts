@@ -224,6 +224,10 @@ export type CronJob = {
   actionType?: string;
   prompt?: string;
   aiModel?: CronAiModel;
+  /** Full companion engine id (assistant/claude/codex/codex-personal/banana/banana-local/zai). */
+  engine?: string;
+  /** Specific model id for the engine (glm-5.2, claude-opus-4-8, gpt-5.5, OpenRouter/LM Studio id). */
+  modelId?: string;
   repo?: string;
   toolName?: string;
   deliveryChannel?: string;

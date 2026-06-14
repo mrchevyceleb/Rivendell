@@ -1,6 +1,6 @@
 import { Bot } from 'lucide-react';
 import type { CompanionPicker } from '../hooks/useCompanionPicker';
-import { WORKSPACE_COMPANIONS } from '../hooks/useCompanionPicker';
+import { WORKSPACE_COMPANIONS, ZAI_MODELS } from '../hooks/useCompanionPicker';
 import { CodexEnginePicker, CLAUDE_MODELS, CLAUDE_EFFORTS } from './CodexEnginePicker';
 import { ModelPicker } from './ModelPicker';
 import { LocalModelPicker } from './LocalModelPicker';
@@ -68,6 +68,20 @@ export function CompanionControls({ picker }: { picker: CompanionPicker }) {
       {picker.isOpenRouter && <ModelPicker state={picker.bananaModel} />}
 
       {picker.isLocal && <LocalModelPicker onActiveChange={(m) => picker.setLocalModel(m ?? '')} />}
+
+      {picker.isZai && (
+        <select
+          aria-label="GLM model"
+          title="Z.ai coding plan — GLM model"
+          style={selectStyle}
+          value={picker.zaiModel}
+          onChange={(e) => picker.setZaiModel(e.target.value)}
+        >
+          {ZAI_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

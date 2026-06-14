@@ -2448,7 +2448,7 @@ button {
 
 .cron-card-list {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .cron-card {
@@ -2460,11 +2460,11 @@ button {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--cron-accent) 8%, transparent), transparent 48%),
     var(--r-bg-deep);
-  padding: 14px;
+  padding: 10px 12px;
   overflow: hidden;
   cursor: pointer;
   display: grid;
-  gap: 12px;
+  gap: 7px;
   transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
 }
 
@@ -2502,17 +2502,17 @@ button {
 .cron-card h3 {
   margin: 0;
   color: var(--r-ink);
-  font-size: 15px;
-  line-height: 1.3;
+  font-size: 13.5px;
+  line-height: 1.25;
 }
 
 .cron-card p {
-  margin: 5px 0 0;
+  margin: 2px 0 0;
   color: var(--r-ink-mute);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 11.5px;
+  line-height: 1.4;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -2530,27 +2530,27 @@ button {
 
 .cron-card-meta {
   color: var(--r-ink-soft);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .cron-card-meta > span:not(.r-chip) {
   border: 1px solid var(--r-line);
   border-radius: 999px;
   background: rgba(196, 213, 247, 0.045);
-  padding: 4px 8px;
+  padding: 2px 7px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
 }
 
 .cron-card-actions {
-  padding-top: 10px;
+  padding-top: 6px;
   border-top: 1px solid rgba(196, 213, 247, 0.08);
 }
 
 .cron-card-actions button {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--r-line);
   border-radius: 7px;
   background: color-mix(in srgb, var(--r-bg-raised) 64%, transparent);

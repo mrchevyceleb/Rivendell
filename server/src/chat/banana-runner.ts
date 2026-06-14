@@ -1095,13 +1095,16 @@ function canonicalJson(value: unknown): string {
  *  so operator-supplied providers/agents/permissions survive. A non-JSON or
  *  unparseable existing value is ignored (logged) and only the override is
  *  used — better than crashing the spawn. */
-// ── Local LLM (vLLM on the Spark) ─────────────────────────────────────────
-// The "Local" Banana engine talks DIRECTLY to the on-box vLLM OpenAI endpoint
-// (no monkey-models hop) — vLLM is what exploits the GB10 Blackwell FP8 path.
-// We register whatever model vLLM currently has loaded as a custom
-// openai-compatible provider `local`; model ids are `local/<vllm-model-id>`.
+// ── Local LLM (LM Studio on Moria) ─────────────────────────────────────────
+// The "Local" engine talks DIRECTLY to LM Studio's on-box OpenAI-compatible
+// endpoint (default http://localhost:1234/v1). We register whatever text model
+// LM Studio currently has loaded as a custom openai-compatible provider
+// `local`; model ids are `local/<lmstudio-model-id>`. No serve/download — load
+// models in the LM Studio app and they show up here automatically.
 const LOCAL_VLLM_BASE_URL =
-  process.env.RIVENDELL_VLLM_BASE_URL?.trim() || 'http://localhost:8000/v1';
+  process.env.RIVENDELL_LOCAL_LLM_BASE_URL?.trim() ||
+  process.env.RIVENDELL_VLLM_BASE_URL?.trim() ||
+  'http://localhost:1234/v1';
 
 type LocalVllmModel = { id: string; maxLen: number };
 
