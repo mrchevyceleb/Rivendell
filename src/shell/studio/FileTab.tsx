@@ -11,7 +11,8 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { css } from '@codemirror/lang-css';
 import { html } from '@codemirror/lang-html';
-import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput } from '@codemirror/language';
+import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput, HighlightStyle } from '@codemirror/language';
+import { tags as t } from '@lezer/highlight';
 import { Button, Chip } from '../../components/Primitives';
 import { fetchWorkspaceFileForEdit, saveWorkspaceFile } from '../../data/api';
 import type { WorkspaceEditFileResponse } from '../../data/types';
@@ -31,17 +32,46 @@ function languageExtension(lang: string) {
 }
 
 const editorTheme = EditorView.theme({
-  '&': { fontSize: '13px', fontFamily: 'var(--r-mono, ui-monospace, monospace)', background: 'var(--r-bg)', color: 'var(--r-ink)', height: '100%' },
-  '.cm-content': { padding: '16px 24px', caretColor: 'var(--r-gold)', overflowWrap: 'anywhere' },
+  '&': { fontSize: '13.5px', fontFamily: 'var(--r-mono, ui-monospace, monospace)', background: 'var(--r-bg)', color: 'var(--r-ink-soft)', height: '100%' },
+  '.cm-content': { padding: '18px 28px', caretColor: 'var(--r-gold)', overflowWrap: 'anywhere', lineHeight: '1.7', maxWidth: '900px' },
   '.cm-scroller': { overflowX: 'hidden' },
   '.cm-cursor': { borderLeftColor: 'var(--r-gold)' },
   '.cm-focused': { outline: 'none' },
   '.cm-gutters': { background: 'var(--r-bg)', borderRight: '1px solid var(--r-line)', color: 'var(--r-ink-faint)' },
-  '.cm-activeLineGutter': { background: 'color-mix(in srgb, var(--r-gold) 8%, transparent)' },
-  '.cm-activeLine': { background: 'color-mix(in srgb, var(--r-gold) 5%, transparent)' },
+  '.cm-activeLineGutter': { background: 'transparent' },
+  '.cm-activeLine': { background: 'color-mix(in srgb, var(--r-gold) 4%, transparent)' },
   '.cm-selectionBackground': { background: 'color-mix(in srgb, var(--r-elf-blue) 25%, transparent)' },
   '&.cm-focused .cm-selectionBackground': { background: 'color-mix(in srgb, var(--r-elf-blue) 30%, transparent)' },
 }, { dark: true });
+
+// Calm, document-friendly highlighting — clean headings (no underline), muted
+// markdown markers, and a tasteful code palette. Replaces CodeMirror's default,
+// which underlines headings and paints separators a harsh blue.
+const rivendellHighlight = HighlightStyle.define([
+  { tag: t.heading1, fontSize: '1.55em', fontWeight: '700', color: 'var(--r-star)', textDecoration: 'none' },
+  { tag: t.heading2, fontSize: '1.3em', fontWeight: '700', color: 'var(--r-star)', textDecoration: 'none' },
+  { tag: t.heading3, fontSize: '1.12em', fontWeight: '600', color: 'var(--r-star)', textDecoration: 'none' },
+  { tag: [t.heading4, t.heading5, t.heading6, t.heading], fontWeight: '600', color: 'var(--r-star)', textDecoration: 'none' },
+  { tag: t.strong, fontWeight: '700', color: 'var(--r-ink)' },
+  { tag: t.emphasis, fontStyle: 'italic', color: 'var(--r-ink)' },
+  { tag: t.strikethrough, textDecoration: 'line-through' },
+  { tag: [t.link, t.url], color: 'var(--r-elf-blue)' },
+  { tag: t.monospace, color: 'var(--r-gold)' },
+  { tag: t.contentSeparator, color: 'var(--r-ink-ghost)' },
+  { tag: [t.processingInstruction, t.meta, t.labelName], color: 'var(--r-ink-faint)' },
+  { tag: t.list, color: 'var(--r-gold-soft)' },
+  { tag: t.quote, color: 'var(--r-ink-mute)', fontStyle: 'italic' },
+  // ── code palette (for non-markdown files) ──
+  { tag: t.comment, color: 'var(--r-ink-mute)', fontStyle: 'italic' },
+  { tag: t.keyword, color: 'var(--r-elf-blue)' },
+  { tag: [t.string, t.special(t.string)], color: 'var(--r-emerald)' },
+  { tag: [t.number, t.bool, t.null], color: 'var(--r-amber)' },
+  { tag: [t.function(t.variableName), t.definition(t.function(t.variableName))], color: 'var(--r-gold)' },
+  { tag: [t.typeName, t.className], color: 'var(--r-star)' },
+  { tag: t.propertyName, color: 'var(--r-elf-glow)' },
+  { tag: [t.tagName, t.angleBracket], color: 'var(--r-elf-blue)' },
+  { tag: t.attributeName, color: 'var(--r-gold)' },
+]);
 
 function CodeEditor({ value, language, onChange, onSave, readOnly }: {
   value: string; language: string; onChange: (v: string) => void; onSave: () => void; readOnly?: boolean;
@@ -62,6 +92,7 @@ function CodeEditor({ value, language, onChange, onSave, readOnly }: {
       history(),
       indentOnInput(),
       bracketMatching(),
+      syntaxHighlighting(rivendellHighlight),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
       saveKeymap,
