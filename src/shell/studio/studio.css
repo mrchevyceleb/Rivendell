@@ -165,12 +165,28 @@
 /* ---------- Body ---------- */
 .studio-body {
   display: grid;
-  grid-template-columns: var(--studio-tree-w, 300px) 1fr;
+  grid-template-columns: var(--studio-tree-w, 300px) 6px 1fr;
   min-height: 0;
   position: relative;
   z-index: 2;
 }
 .studio-body.tree-collapsed { grid-template-columns: 0 1fr; }
+
+/* Draggable divider between the tree and the content */
+.studio-divider {
+  position: relative;
+  cursor: col-resize;
+  background: transparent;
+}
+.studio-divider::after {
+  content: '';
+  position: absolute;
+  inset: 0 2px;
+  background: var(--r-line);
+  transition: background 0.14s ease;
+}
+.studio-divider:hover::after,
+.studio-divider:active::after { background: var(--r-line-gold); }
 
 .studio-tree {
   display: flex;
@@ -370,6 +386,7 @@
   /* Single column: the file tree slides OVER the content instead of squeezing it */
   .studio-body,
   .studio-body.tree-collapsed { grid-template-columns: 1fr; }
+  .studio-divider { display: none; }
   .studio-tree {
     position: absolute;
     z-index: 40;

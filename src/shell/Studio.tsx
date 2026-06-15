@@ -68,7 +68,33 @@ export function Studio() {
     return v >= 0.7 && v <= 2 ? v : 1;
   });
   const [dirtyById, setDirtyById] = useState<Record<string, boolean>>({});
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem('rivendell:studio-tree-w'));
+    return v >= 180 && v <= 640 ? v : 300;
+  });
   const stepZoom = (d: number) => setZoom((z) => Math.min(2, Math.max(0.7, Math.round((z + d) * 100) / 100)));
+
+  // Drag the divider between the file tree and the content to resize.
+  const startTreeResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = treeWidth;
+    const z = zoom || 1;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(640, Math.max(180, startW + (ev.clientX - startX) / z));
+      setTreeWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
 
   const { repos } = useRepos();
   const assistantHubRepo = repos.find((r) => r.isAssistantHub) ?? repos[0];
@@ -81,6 +107,7 @@ export function Studio() {
   // ── persistence ──
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('rivendell:theme', theme); }, [theme]);
   useEffect(() => { localStorage.setItem('rivendell:zoom', String(zoom)); }, [zoom]);
+  useEffect(() => { localStorage.setItem('rivendell:studio-tree-w', String(Math.round(treeWidth))); }, [treeWidth]);
   useEffect(() => { localStorage.setItem(STUDIO_TABS_KEY, JSON.stringify(tabs)); }, [tabs]);
   useEffect(() => { localStorage.setItem(STUDIO_ACTIVE_KEY, active); }, [active]);
   useEffect(() => { localStorage.setItem(STUDIO_TREE_KEY, String(treeCollapsed)); }, [treeCollapsed]);
@@ -241,8 +268,11 @@ export function Studio() {
         </div>
       </header>
 
-      {/* ── Body: tree | content ── */}
-      <div className={`studio-body ${treeCollapsed ? 'tree-collapsed' : ''}`}>
+      {/* ── Body: tree | divider | content ── */}
+      <div
+        className={`studio-body ${treeCollapsed ? 'tree-collapsed' : ''}`}
+        style={{ ['--studio-tree-w' as string]: `${Math.round(treeWidth)}px` } as React.CSSProperties}
+      >
         <aside className="studio-tree">
           {!treeCollapsed && (
             <FileTree
@@ -253,6 +283,10 @@ export function Studio() {
             />
           )}
         </aside>
+
+        {!treeCollapsed && (
+          <div className="studio-divider" onMouseDown={startTreeResize} title="Drag to resize" />
+        )}
 
         <main className="studio-content">
           {tabs.map((tab) => (
