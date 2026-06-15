@@ -13,10 +13,12 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
+import { CLAUDE_MODELS } from '../chat/components/CodexEnginePicker';
+import { ZAI_MODELS } from '../chat/hooks/useCompanionPicker';
 import type { CronAiModel, CronJob } from '../data/types';
 import { Button, Chip, EmptyState, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
@@ -26,6 +28,10 @@ type CronDraft = {
   name: string;
   engine: string;
   model: string;
+  schedMode: 'simple' | 'custom';
+  freq: string;
+  schedTime: string;
+  schedDow: string;
   schedule: string;
   prompt: string;
   repo: string;
@@ -36,7 +42,11 @@ const emptyDraft: CronDraft = {
   name: '',
   engine: 'assistant',
   model: 'claude-opus-4-8',
-  schedule: 'daily 9am',
+  schedMode: 'simple',
+  freq: 'daily',
+  schedTime: '09:00',
+  schedDow: '1',
+  schedule: '0 9 * * *',
   prompt: '',
   repo: '',
   status: 'active',
@@ -72,12 +82,6 @@ const CRON_ENGINES: { id: string; label: string }[] = [
 function engineLabel(id: string): string {
   return CRON_ENGINES.find((e) => e.id === id)?.label ?? id;
 }
-function engineDefaultModel(engine: string): string {
-  if (engine === 'zai') return 'glm-5.2';
-  if (engine === 'codex' || engine === 'codex-personal') return 'gpt-5.5';
-  if (engine === 'assistant' || engine === 'claude') return 'claude-opus-4-8';
-  return '';
-}
 function coarseAiModel(engine: string): CronAiModel {
   if (engine === 'codex' || engine === 'codex-personal') return 'codex';
   if (engine === 'banana' || engine === 'banana-local') return 'mandrill';
@@ -89,6 +93,107 @@ function engineFromAiModel(m: CronAiModel): string {
   return 'assistant';
 }
 
+// ── Per-engine model menus (no typing). Local LM Studio models are fetched live.
+type ModelOpt = { id: string; label: string };
+const CODEX_MODELS: ModelOpt[] = [
+  { id: 'gpt-5.5', label: 'GPT-5.5' },
+  { id: 'gpt-5.3-codex', label: 'Codex 5.3' },
+  { id: 'gpt-5.3-codex-spark', label: 'Spark 5.3' },
+];
+const OPENROUTER_MODELS: ModelOpt[] = [
+  { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini' },
+  { id: 'openai/gpt-4o', label: 'GPT-4o' },
+  { id: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
+  { id: 'google/gemini-flash-1.5', label: 'Gemini Flash 1.5' },
+  { id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat' },
+  { id: 'meta-llama/llama-3.3-70b-instruct', label: 'Llama 3.3 70B' },
+];
+function staticModelsForEngine(engine: string): ModelOpt[] {
+  if (engine === 'zai') return ZAI_MODELS;
+  if (engine === 'codex' || engine === 'codex-personal') return CODEX_MODELS;
+  if (engine === 'assistant' || engine === 'claude') return CLAUDE_MODELS;
+  if (engine === 'banana') return OPENROUTER_MODELS;
+  return []; // banana-local: fetched live
+}
+
+// ── Schedule builder: pick frequency + time + day, never type a cron string ──
+const FREQ_OPTIONS: ModelOpt[] = [
+  { id: 'every-5-min', label: 'Every 5 minutes' },
+  { id: 'every-15-min', label: 'Every 15 minutes' },
+  { id: 'every-30-min', label: 'Every 30 minutes' },
+  { id: 'hourly', label: 'Hourly' },
+  { id: 'daily', label: 'Daily' },
+  { id: 'weekdays', label: 'Weekdays (Mon–Fri)' },
+  { id: 'weekly', label: 'Weekly' },
+];
+const DAY_OPTIONS: ModelOpt[] = [
+  { id: '0', label: 'Sunday' }, { id: '1', label: 'Monday' }, { id: '2', label: 'Tuesday' },
+  { id: '3', label: 'Wednesday' }, { id: '4', label: 'Thursday' }, { id: '5', label: 'Friday' },
+  { id: '6', label: 'Saturday' },
+];
+const TIME_OPTIONS: ModelOpt[] = (() => {
+  const out: ModelOpt[] = [];
+  for (let h = 0; h < 24; h++) {
+    for (const m of [0, 30]) {
+      const id = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+      const suffix = h >= 12 ? 'PM' : 'AM';
+      const hr12 = h % 12 || 12;
+      out.push({ id, label: `${hr12}:${String(m).padStart(2, '0')} ${suffix}` });
+    }
+  }
+  return out;
+})();
+function freqNeedsTime(freq: string): boolean {
+  return freq === 'daily' || freq === 'weekdays' || freq === 'weekly';
+}
+function describeSimple(freq: string, time: string, dow: string): string {
+  const t = TIME_OPTIONS.find((o) => o.id === time)?.label ?? time;
+  switch (freq) {
+    case 'every-5-min': return 'every 5 minutes';
+    case 'every-15-min': return 'every 15 minutes';
+    case 'every-30-min': return 'every 30 minutes';
+    case 'hourly': return 'hourly';
+    case 'daily': return `daily at ${t}`;
+    case 'weekdays': return `weekdays at ${t}`;
+    case 'weekly': return `every ${DAY_OPTIONS.find((d) => d.id === dow)?.label ?? 'day'} at ${t}`;
+    default: return '';
+  }
+}
+function buildCron(freq: string, time: string, dow: string): string {
+  const [h, m] = time.split(':').map((n) => Number(n) || 0);
+  switch (freq) {
+    case 'every-5-min': return '*/5 * * * *';
+    case 'every-15-min': return '*/15 * * * *';
+    case 'every-30-min': return '*/30 * * * *';
+    case 'hourly': return '0 * * * *';
+    case 'daily': return `${m} ${h} * * *`;
+    case 'weekdays': return `${m} ${h} * * 1-5`;
+    case 'weekly': return `${m} ${h} * * ${dow}`;
+    default: return '';
+  }
+}
+type SchedParts = { freq: string; time: string; dow: string };
+/** Best-effort parse of a 5-field cron back into builder selections. null = custom. */
+function parseCron(cron: string): SchedParts | null {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [m, h, dom, mon, dow] = parts;
+  const def = { time: '09:00', dow: '1' };
+  if (h === '*' && dom === '*' && mon === '*' && dow === '*') {
+    if (m === '*/5') return { freq: 'every-5-min', ...def };
+    if (m === '*/15') return { freq: 'every-15-min', ...def };
+    if (m === '*/30') return { freq: 'every-30-min', ...def };
+    if (m === '0') return { freq: 'hourly', ...def };
+  }
+  if (/^\d+$/.test(m) && /^\d+$/.test(h) && dom === '*' && mon === '*') {
+    const time = `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
+    if (dow === '*') return { freq: 'daily', time, dow: '1' };
+    if (dow === '1-5') return { freq: 'weekdays', time, dow: '1' };
+    if (/^[0-6]$/.test(dow)) return { freq: 'weekly', time, dow };
+  }
+  return null;
+}
+
 const defaultNoRepoCwd = '/Users/mjohnst/ASSISTANT-HUB';
 
 export function Forge() {
@@ -98,7 +203,32 @@ export function Forge() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<CronDraft>(emptyDraft);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const scheduleInputRef = useRef<HTMLInputElement | null>(null);
+  const [localModels, setLocalModels] = useState<ModelOpt[]>([]);
+
+  // Pull LM Studio's loaded models so the "Local" engine offers a dropdown, not a text box.
+  useEffect(() => {
+    let cancelled = false;
+    apiJson<{ data?: { id: string; name: string }[] }>('/api/local/models')
+      .then((res) => {
+        if (cancelled) return;
+        setLocalModels((res.data ?? []).map((m) => ({ id: m.id.replace(/^local\//, ''), label: m.name })));
+      })
+      .catch(() => { /* LM Studio offline — dropdown shows a placeholder */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // When LM Studio models arrive and the Local engine is selected with no model yet, pick the first.
+  useEffect(() => {
+    if (draft.engine === 'banana-local' && !draft.model && localModels.length) {
+      setDraft((d) => ({ ...d, model: localModels[0].id }));
+    }
+  }, [localModels, draft.engine, draft.model]);
+
+  const modelOptions = draft.engine === 'banana-local' ? localModels : staticModelsForEngine(draft.engine);
+  const firstModelFor = (engine: string): string => {
+    const list = engine === 'banana-local' ? localModels : staticModelsForEngine(engine);
+    return list[0]?.id ?? '';
+  };
 
   // Active first, then paused, then failed; stable within each group.
   const sortedJobs = useMemo(() => {
@@ -118,7 +248,6 @@ export function Forge() {
   const failedCount = jobs.filter((job) => job.status === 'failed').length;
   const resolvedSchedule = resolveScheduleInput(draft.schedule);
   const cannotSave = !draft.name.trim() || !draft.prompt.trim() || !resolvedSchedule.valid;
-  const customSchedule = !isPresetSchedule(draft.schedule);
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['cron'] });
@@ -326,7 +455,7 @@ export function Forge() {
                   value={draft.engine}
                   onChange={(event) => {
                     const engine = event.target.value;
-                    setDraft({ ...draft, engine, model: engineDefaultModel(engine) });
+                    setDraft({ ...draft, engine, model: firstModelFor(engine) });
                   }}
                 >
                   {CRON_ENGINES.map((e) => (
@@ -335,48 +464,85 @@ export function Forge() {
                 </select>
               </div>
 
-              <label className="cron-field">
+              <div className="cron-field">
                 Model
-                <input
+                <select
+                  className="cron-engine-select"
                   value={draft.model}
                   onChange={(event) => setDraft({ ...draft, model: event.target.value })}
-                  placeholder={engineDefaultModel(draft.engine) || 'model id (OpenRouter / LM Studio)'}
-                />
-              </label>
+                >
+                  {modelOptions.length === 0 && (
+                    <option value="">{draft.engine === 'banana-local' ? 'LM Studio offline' : 'No models'}</option>
+                  )}
+                  {modelOptions.map((m) => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
 
-              <label className="cron-field">
+              <div className="cron-field">
                 Schedule
-                <input
-                  ref={scheduleInputRef}
-                  value={draft.schedule}
-                  onChange={(event) => setDraft({ ...draft, schedule: event.target.value })}
-                  placeholder="every 10 minutes, daily 6am, weekdays 8:30am"
-                />
-                <small className="cron-schedule-hint">{describeSchedule(draft.schedule)}</small>
-              </label>
-
-              <div className="cron-presets" aria-label="Schedule presets">
-                {schedulePresets.map((preset) => (
-                  <button
-                    type="button"
-                    key={preset.cron}
-                    className={resolvedSchedule.cron === preset.cron ? 'is-active' : ''}
-                    onClick={() => setDraft({ ...draft, schedule: preset.value })}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  className={customSchedule ? 'is-active is-custom' : 'is-custom'}
-                  onClick={() => {
-                    if (!customSchedule) setDraft({ ...draft, schedule: '' });
-                    window.requestAnimationFrame(() => scheduleInputRef.current?.focus());
+                <select
+                  className="cron-engine-select"
+                  value={draft.schedMode === 'custom' ? 'custom' : draft.freq}
+                  onChange={(event) => {
+                    const val = event.target.value;
+                    if (val === 'custom') { setDraft({ ...draft, schedMode: 'custom' }); return; }
+                    setDraft({ ...draft, schedMode: 'simple', freq: val, schedule: buildCron(val, draft.schedTime, draft.schedDow) });
                   }}
                 >
-                  Custom
-                </button>
+                  {FREQ_OPTIONS.map((f) => (
+                    <option key={f.id} value={f.id}>{f.label}</option>
+                  ))}
+                  <option value="custom">Custom…</option>
+                </select>
               </div>
+
+              {draft.schedMode === 'simple' && freqNeedsTime(draft.freq) && (
+                <div className="cron-field">
+                  Time
+                  <select
+                    className="cron-engine-select"
+                    value={draft.schedTime}
+                    onChange={(event) => setDraft({ ...draft, schedTime: event.target.value, schedule: buildCron(draft.freq, event.target.value, draft.schedDow) })}
+                  >
+                    {TIME_OPTIONS.map((t) => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {draft.schedMode === 'simple' && draft.freq === 'weekly' && (
+                <div className="cron-field">
+                  Day
+                  <select
+                    className="cron-engine-select"
+                    value={draft.schedDow}
+                    onChange={(event) => setDraft({ ...draft, schedDow: event.target.value, schedule: buildCron(draft.freq, draft.schedTime, event.target.value) })}
+                  >
+                    {DAY_OPTIONS.map((d) => (
+                      <option key={d.id} value={d.id}>{d.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {draft.schedMode === 'custom' && (
+                <label className="cron-field">
+                  Custom schedule
+                  <input
+                    value={draft.schedule}
+                    onChange={(event) => setDraft({ ...draft, schedule: event.target.value })}
+                    placeholder="every 10 minutes, daily 6am, or a cron expression"
+                    autoFocus
+                  />
+                </label>
+              )}
+
+              <small className="cron-schedule-hint">
+                Runs {draft.schedMode === 'custom' ? describeSchedule(draft.schedule).toLowerCase() : describeSimple(draft.freq, draft.schedTime, draft.schedDow)}
+              </small>
 
               <label className="cron-field">
                 Prompt
@@ -529,11 +695,17 @@ function ModelChip({ model }: { model: CronAiModel }) {
 
 function draftFromJob(job: CronJob): CronDraft {
   const engine = job.engine || engineFromAiModel(job.aiModel || inferAiModel(job));
+  const cron = job.schedule || '';
+  const parsed = parseCron(cron);
   return {
     name: job.name,
     engine,
-    model: job.modelId || engineDefaultModel(engine),
-    schedule: cronToInput(job.schedule),
+    model: job.modelId || staticModelsForEngine(engine)[0]?.id || '',
+    schedMode: parsed ? 'simple' : 'custom',
+    freq: parsed?.freq ?? 'daily',
+    schedTime: parsed?.time ?? '09:00',
+    schedDow: parsed?.dow ?? '1',
+    schedule: parsed ? cron : cronToInput(cron),
     prompt: job.prompt || '',
     repo: displayRepo(job),
     status: job.status === 'failed' ? 'paused' : job.status,
@@ -582,11 +754,6 @@ function describeSchedule(schedule: string): string {
 function inferAiModel(job: CronJob): CronAiModel {
   if (job.runtime === 'local') return 'claude';
   return 'mandrill';
-}
-
-function isPresetSchedule(schedule: string): boolean {
-  const resolved = resolveScheduleInput(schedule);
-  return resolved.valid && schedulePresets.some((preset) => preset.cron === resolved.cron);
 }
 
 function displayRepo(job: CronJob): string {
