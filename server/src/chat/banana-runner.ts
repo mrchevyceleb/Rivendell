@@ -1167,7 +1167,7 @@ export async function listLocalModels(): Promise<{ id: string; name: string }[]>
 // off a detached docker run that downloads the model from HF if needed; a
 // background watcher then reloads the banana serve once vLLM is up, so the new
 // model re-registers automatically (no Rivendell restart).
-const VLLM_BIN = join(homedir(), 'samwise', '.bin', 'vllm');
+const LMS_BIN = join(homedir(), '.lmstudio', 'bin', 'lms');
 const HF_HUB_DIR = join(homedir(), '.cache', 'huggingface', 'hub');
 const LOCAL_MODEL_ID_RE = /^[A-Za-z0-9._/-]+$/;
 const LOCAL_CURATED: { id: string; label: string; note: string }[] = [
@@ -1192,27 +1192,19 @@ export async function localVllmStatus(): Promise<{
 const LOCAL_CTX_CEILING = 131072;
 const LOCAL_CTX_HARD_MAX = 262144;
 
-/** The model's native context window, read from its HF config.json (so we can
- *  default to it instead of a fixed 32k). Null if unreachable. */
-async function fetchHfNativeContext(model: string): Promise<number | null> {
+/** The model's max context window from LM Studio's native API (so we can load it
+ *  at its full window instead of a small default). 0 if unknown/unreachable. */
+async function lmStudioMaxContext(key: string): Promise<number> {
   try {
-    const r = await fetch(`https://huggingface.co/${model}/resolve/main/config.json`, {
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!r.ok) return null;
-    const c = (await r.json()) as {
-      max_position_embeddings?: unknown;
-      max_seq_len?: unknown;
-      text_config?: { max_position_embeddings?: unknown };
-    };
-    const n =
-      (typeof c.max_position_embeddings === 'number' && c.max_position_embeddings) ||
-      (typeof c.text_config?.max_position_embeddings === 'number' && c.text_config.max_position_embeddings) ||
-      (typeof c.max_seq_len === 'number' && c.max_seq_len) ||
-      0;
-    return n > 0 ? n : null;
+    const host = LOCAL_VLLM_BASE_URL.replace(/\/v1\/?$/, '');
+    const r = await fetch(`${host}/api/v0/models`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return 0;
+    const data = (await r.json()) as { data?: Array<{ id?: string; max_context_length?: number }> };
+    const m = (data.data ?? []).find((x) => x.id === key);
+    const n = Number(m?.max_context_length);
+    return Number.isFinite(n) && n > 0 ? n : 0;
   } catch {
-    return null;
+    return 0;
   }
 }
 
@@ -1273,9 +1265,10 @@ let localServeGeneration = 0;
 // Reject concurrent local serves so two swaps can't race the docker run / reload.
 let localServeInFlight = false;
 
-/** Swap vLLM to `model` (downloading from HF if needed) via the vllm helper,
- *  then reload the banana serve once it's live. Returns immediately; the load
- *  runs in the background — poll localVllmStatus() to track it. */
+/** (Re)load `model` in LM Studio at a chosen context via the `lms` CLI, then
+ *  reload the banana serve so it re-registers. Defaults to the model's MAX
+ *  context window — the whole point: a local model should get its full context
+ *  (256k for the qwen family), not LM Studio's small default. */
 export async function serveLocalModel(
   model: string,
   opts?: { util?: string; maxLen?: string },
@@ -1285,58 +1278,40 @@ export async function serveLocalModel(
     return { ok: false, error: 'a local model load is already in progress — wait for it to finish' };
   }
   localServeInFlight = true;
-
-  // GPU memory fraction: finite, 0 < util <= 0.95 (leave headroom), else default.
-  const utilNum = opts?.util != null ? Number(opts.util) : NaN;
-  const util = Number.isFinite(utilNum) && utilNum > 0 && utilNum <= 0.95 ? String(utilNum) : '0.85';
-
-  // Context: an explicit value is floored, must be positive, and hard-capped.
-  // Blank => the model's native window, capped to the memory-safe auto ceiling.
-  const explicitLen = opts?.maxLen != null && opts.maxLen !== '' ? Number(opts.maxLen) : NaN;
-  let maxLen: string;
-  if (Number.isFinite(explicitLen) && explicitLen > 0) {
-    maxLen = String(Math.min(Math.floor(explicitLen), LOCAL_CTX_HARD_MAX));
-  } else {
-    const native = await fetchHfNativeContext(model);
-    maxLen = String(Math.min(native ?? 32768, LOCAL_CTX_CEILING));
-  }
-
   const gen = ++localServeGeneration;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      execFile(VLLM_BIN, ['serve', model, util, maxLen], { timeout: 90_000 }, (err) =>
-        err ? reject(err) : resolve(),
-      );
-    });
-  } catch (error) {
-    localServeInFlight = false;
-    return { ok: false, error: errorText(error) };
+  const key = model.replace(/^local\//, '');
+
+  // Context: explicit value floored + hard-capped; blank => the model's MAX
+  // window (the Spark's unified memory holds 256k for the qwen family), capped.
+  const explicitLen = opts?.maxLen != null && opts.maxLen !== '' ? Number(opts.maxLen) : NaN;
+  let ctx = 0;
+  if (Number.isFinite(explicitLen) && explicitLen > 0) {
+    ctx = Math.min(Math.floor(explicitLen), LOCAL_CTX_HARD_MAX);
+  } else {
+    const max = await lmStudioMaxContext(key);
+    ctx = max > 0 ? Math.min(max, LOCAL_CTX_HARD_MAX) : 0;
   }
-  // Background: wait until vLLM reports the new model, then reload banana (once
-  // idle) so it re-registers. ~20 min budget for a first-time HF download +
-  // sm121 kernel compile. A newer serve supersedes this watcher.
-  void (async () => {
-    try {
-      for (let i = 0; i < 240; i++) {
-        if (gen !== localServeGeneration) {
-          console.log(`[local-vllm] watcher for ${model} superseded by a newer serve`);
-          return;
-        }
-        await new Promise((r) => setTimeout(r, 5000));
-        const status = await localVllmStatus();
-        if (status.ready && status.loaded === model) {
-          if (gen !== localServeGeneration) return;
-          await reloadBananaServeWhenIdle();
-          console.log(`[local-vllm] ${model} ready; reloaded banana serve`);
-          return;
-        }
-      }
-      console.warn(`[local-vllm] ${model} did not come up within the load budget`);
-    } finally {
-      localServeInFlight = false;
-    }
-  })();
-  return { ok: true };
+
+  try {
+    // Unload the running instance (ignore if not loaded), then load fresh at the
+    // chosen context with full GPU offload. `lms load` blocks until ready.
+    await new Promise<void>((resolve) => {
+      execFile(LMS_BIN, ['unload', key], { timeout: 30_000 }, () => resolve());
+    });
+    const args = ['load', key, '--gpu', 'max', '-y'];
+    if (ctx > 0) args.push('-c', String(ctx));
+    await new Promise<void>((resolve, reject) => {
+      execFile(LMS_BIN, args, { timeout: 240_000 }, (err) => (err ? reject(err) : resolve()));
+    });
+    if (gen !== localServeGeneration) return { ok: true }; // a newer load superseded us
+    await reloadBananaServeWhenIdle();
+    console.log(`[local-lms] loaded ${key} at ctx=${ctx || 'default'}; reloaded banana serve`);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: errorText(error) };
+  } finally {
+    localServeInFlight = false;
+  }
 }
 
 /** Which MCP servers (if any) to mirror into Banana for a given project. Banana
