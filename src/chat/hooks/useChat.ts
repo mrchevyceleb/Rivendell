@@ -20,22 +20,26 @@ const LARGE_WINDOW_TOKENS = 1_000_000;
 const CODEX_WINDOW_TOKENS = 400_000; // GPT-5 family default
 const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 
-// Pick the starting context window for a given CLI before we've seen any
-// model id from a system/init event. Codex's GPT-5 family is 400K; Claude
-// defaults to 200K and ratchets to 1M when the model id reveals the [1m]
-// beta; banana defaults to a 200K window.
+// Pick the starting context window for a given CLI before we've seen any model
+// id. Codex's GPT-5 family is 400K; current Claude (Opus 4.6/4.7/4.8, Sonnet
+// 4.6) is 1M; banana/OpenRouter and Z.ai GLM default to 200K.
 function defaultWindowForCli(cli: CompanionId): number {
   if (cli === 'codex' || cli === 'codex-personal') return CODEX_WINDOW_TOKENS;
   if (cli === 'banana' || cli === 'banana-local') return BANANA_WINDOW_TOKENS;
-  return DEFAULT_WINDOW_TOKENS;
+  if (cli === 'zai') return BANANA_WINDOW_TOKENS; // GLM ~200K
+  return LARGE_WINDOW_TOKENS; // Claude (assistant/claude) — current models are 1M
 }
 
-// Map a claude model id to its real context window. Opus 4.7 with the `[1m]`
-// beta suffix is 1M; everything else is the 200K default.
+// Map a model id to its real context window. Current Opus (4.6/4.7/4.8),
+// Sonnet 4.6, and Fable/Mythos 5 are all 1M; Haiku and older models are 200K;
+// GLM (Z.ai) is ~200K. The `[1m]` beta suffix forces 1M for anything else.
 function windowForClaudeModel(model: string | undefined): number {
-  if (!model) return DEFAULT_WINDOW_TOKENS;
+  if (!model) return LARGE_WINDOW_TOKENS;
   const m = model.toLowerCase();
   if (m.includes('[1m]') || m.includes('-1m')) return LARGE_WINDOW_TOKENS;
+  if (m.includes('haiku')) return DEFAULT_WINDOW_TOKENS;
+  if (m.includes('glm')) return DEFAULT_WINDOW_TOKENS;
+  if (m.includes('opus') || m.includes('sonnet') || m.includes('fable') || m.includes('mythos')) return LARGE_WINDOW_TOKENS;
   return DEFAULT_WINDOW_TOKENS;
 }
 
