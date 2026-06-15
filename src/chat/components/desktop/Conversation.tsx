@@ -279,7 +279,6 @@ export function Conversation({
         lastActivityRef={lastActivityRef}
         turnStartRef={turnStartRef}
         compactingRef={compactingRef}
-        onStop={onStop}
       />
 
       <div
@@ -290,6 +289,38 @@ export function Conversation({
         }}
       >
         <div style={{ maxWidth: contentMax, margin: '0 auto', padding: sidePad }}>
+          {(usage || onFreshStart || (onStop && status === 'streaming')) && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+              {usage && (
+                <ContextMeter
+                  fraction={usage.fraction}
+                  inputTokens={usage.inputTokens + usage.cacheReadTokens + usage.cacheCreateTokens}
+                  windowTokens={usage.windowTokens}
+                />
+              )}
+              <span style={{ marginLeft: 'auto' }} />
+              {onStop && status === 'streaming' && (
+                <button
+                  onClick={onStop}
+                  title="Stop generating"
+                  className="sw-btn sw-btn-ember"
+                  style={{ fontSize: 12, padding: '4px 12px', minHeight: 0 }}
+                >
+                  stop
+                </button>
+              )}
+              {onFreshStart && (
+                <button
+                  onClick={onFreshStart}
+                  title="Start a new thread"
+                  className="sw-btn"
+                  style={{ fontSize: 12, padding: '4px 12px', minHeight: 0, fontFamily: 'var(--serif-display)', fontStyle: 'italic', color: 'var(--ink-soft)' }}
+                >
+                  fresh thread
+                </button>
+              )}
+            </div>
+          )}
           <ChatInput
             compact={compact}
             agent={agent}
@@ -368,14 +399,12 @@ function ActiveToolBanner({
   lastActivityRef,
   turnStartRef,
   compactingRef,
-  onStop,
 }: {
   blocks: ChatBlock[];
   streaming: boolean;
   lastActivityRef?: { current: number };
   turnStartRef?: { current: number };
   compactingRef?: { current: boolean };
-  onStop?: () => void;
 }) {
   // Tick every second while streaming so the timer is visibly alive and the
   // "last reply Ns ago" gap updates even during a silent phase (compaction,
@@ -449,16 +478,6 @@ function ActiveToolBanner({
         <span></span>
         <span></span>
       </span>
-      {onStop && (
-        <button
-          onClick={onStop}
-          title="Stop generating"
-          className="sw-btn sw-btn-ember"
-          style={{ marginLeft: 14, fontSize: 11, padding: '3px 12px', minHeight: 0, verticalAlign: 'middle' }}
-        >
-          stop
-        </button>
-      )}
     </div>
   );
 }
