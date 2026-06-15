@@ -274,6 +274,13 @@ class ClaudeSession {
       '--output-format', 'stream-json',
       '--verbose',
       '--include-partial-messages',
+      // In -p (non-interactive) stream-json mode the CLI auto-fails an
+      // AskUserQuestion call within milliseconds with a `{content:"Answer
+      // questions?",is_error:true}` result the host can't answer in time — so the
+      // question silently collapses and the model thinks the user "declined".
+      // Block the tool so the model asks inline in plain text, which the user can
+      // actually reply to in the composer. (Same fix as samwise-2.)
+      '--disallowedTools', 'AskUserQuestion',
       '--dangerously-skip-permissions',
       '--model', this.spawnModel,
       '--effort', this.spawnEffort,
