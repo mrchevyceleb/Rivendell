@@ -37,6 +37,11 @@ type ConversationProps = {
    *  room). Drops the full-page hero (portrait, giant headline, date) and
    *  tightens horizontal padding so the chat fits a ~380px column. */
   compact?: boolean;
+  /** Live-activity refs from useChat — power the "working" banner so the user
+   *  can tell active work (and compaction) from a hang. */
+  lastActivityRef?: { current: number };
+  turnStartRef?: { current: number };
+  compactingRef?: { current: boolean };
 };
 
 const statusToneByStatus: Record<Status, 'ember' | 'moss' | 'gold' | 'neutral'> = {
@@ -75,6 +80,9 @@ export function Conversation({
   onStop,
   acceptImages = true,
   compact = false,
+  lastActivityRef,
+  turnStartRef,
+  compactingRef,
 }: ConversationProps) {
   const { scrollRef, bottomRef, contentRef, onScroll } = useStickyScroll();
   const sidePad = compact ? '0 16px' : '0 48px';
@@ -265,7 +273,14 @@ export function Conversation({
         </div>
       </div>
 
-      <ActiveToolBanner blocks={blocks} streaming={status === 'streaming'} />
+      <ActiveToolBanner
+        blocks={blocks}
+        streaming={status === 'streaming'}
+        lastActivityRef={lastActivityRef}
+        turnStartRef={turnStartRef}
+        compactingRef={compactingRef}
+        onStop={onStop}
+      />
 
       <div
         style={{
@@ -347,26 +362,63 @@ function renderBlocks(blocks: ChatBlock[], agent: string) {
   });
 }
 
-function ActiveToolBanner({ blocks, streaming }: { blocks: ChatBlock[]; streaming: boolean }) {
-  // Find the most recent block. If it's a still-running tool, show it. We
-  // intentionally don't search the whole history — a closed tool followed by
-  // new text means the agent is back to talking, and the banner should fade.
-  const last = blocks.length ? blocks[blocks.length - 1] : null;
-  const activeTool =
-    last && last.kind === 'tool' && last.running
-      ? { tool: last.tool, startedAt: last.ts }
-      : null;
+function ActiveToolBanner({
+  blocks,
+  streaming,
+  lastActivityRef,
+  turnStartRef,
+  compactingRef,
+  onStop,
+}: {
+  blocks: ChatBlock[];
+  streaming: boolean;
+  lastActivityRef?: { current: number };
+  turnStartRef?: { current: number };
+  compactingRef?: { current: boolean };
+  onStop?: () => void;
+}) {
+  // Tick every second while streaming so the timer is visibly alive and the
+  // "last reply Ns ago" gap updates even during a silent phase (compaction,
+  // a slow tool, model thinking) — the thing that used to look like a hang.
   const [, force] = useState(0);
   useEffect(() => {
-    if (!activeTool) return;
+    if (!streaming) return;
     const id = setInterval(() => force((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [activeTool?.tool, activeTool?.startedAt]);
+  }, [streaming]);
   if (!streaming) return null;
-  const elapsed = activeTool ? Math.max(0, Math.floor((Date.now() - activeTool.startedAt) / 1000)) : null;
-  const label = activeTool ? `running ${activeTool.tool}` : 'thinking';
-  const elapsedLabel = elapsed === null ? '' : ` · ${formatElapsedShort(elapsed)}`;
-  const isSlow = elapsed !== null && elapsed >= 8;
+
+  const now = Date.now();
+  const last = blocks.length ? blocks[blocks.length - 1] : null;
+  const activeTool = last && last.kind === 'tool' && last.running ? last : null;
+  const writing = !!(last && last.kind === 'text' && 'open' in last && last.open);
+  const compacting = compactingRef?.current ?? false;
+
+  // Elapsed: the tool's own runtime when a tool is active, else the whole turn.
+  const turnStart = turnStartRef?.current || 0;
+  const elapsed = activeTool
+    ? Math.max(0, Math.floor((now - activeTool.ts) / 1000))
+    : turnStart
+      ? Math.max(0, Math.floor((now - turnStart) / 1000))
+      : 0;
+
+  // Seconds since the last real server event — the true liveness signal. Tool
+  // runs are expected to be quiet, so only flag the gap outside a tool.
+  const sinceActivity = lastActivityRef?.current
+    ? Math.max(0, Math.floor((now - lastActivityRef.current) / 1000))
+    : 0;
+  const quiet = !activeTool && sinceActivity >= 4;
+
+  const label = compacting
+    ? 'compacting context'
+    : activeTool
+      ? `running ${activeTool.tool}`
+      : writing
+        ? 'writing'
+        : 'thinking';
+  const elapsedLabel = elapsed ? ` · ${formatElapsedShort(elapsed)}` : '';
+  const quietLabel = quiet && !compacting ? ` · last reply ${formatElapsedShort(sinceActivity)} ago` : '';
+  const isSlow = (activeTool && elapsed >= 8) || (quiet && sinceActivity >= 12);
   return (
     <div
       style={{
@@ -390,13 +442,23 @@ function ActiveToolBanner({ blocks, streaming }: { blocks: ChatBlock[]; streamin
           fontVariantNumeric: 'tabular-nums',
         }}
       >
-        {label}{elapsedLabel}
+        {label}{elapsedLabel}{quietLabel}
       </span>
       <span className="sw-thinking" style={{ marginLeft: 10, verticalAlign: 'middle' }}>
         <span></span>
         <span></span>
         <span></span>
       </span>
+      {onStop && (
+        <button
+          onClick={onStop}
+          title="Stop generating"
+          className="sw-btn sw-btn-ember"
+          style={{ marginLeft: 14, fontSize: 11, padding: '3px 12px', minHeight: 0, verticalAlign: 'middle' }}
+        >
+          stop
+        </button>
+      )}
     </div>
   );
 }

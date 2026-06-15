@@ -63,6 +63,9 @@ export function ChatTab({
         onStop={chat.stop}
         onFreshStart={chat.freshStart}
         acceptImages={false}
+        lastActivityRef={chat.lastActivityRef}
+        turnStartRef={chat.turnStartRef}
+        compactingRef={chat.compactingRef}
       />
     </div>
   );

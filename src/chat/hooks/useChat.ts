@@ -349,8 +349,14 @@ export function useChat(opts: {
   const teardownRef = useRef(false);
   const connectionIdRef = useRef(0);
   /** Wall-clock of the last server message on the current socket. The stream
-   *  watchdog uses it to detect a silently stalled turn. */
+   *  watchdog uses it to detect a silently stalled turn, and the live "working"
+   *  banner uses it to show "last token Ns ago". */
   const lastMessageAtRef = useRef<number>(Date.now());
+  /** When the current turn started — drives the live elapsed timer. */
+  const turnStartRef = useRef<number>(0);
+  /** True while the CLI is compacting context (a quiet phase that would
+   *  otherwise look like a hang). */
+  const compactingRef = useRef<boolean>(false);
   const turnIdRef = useRef('');
   /** Set by the connection effect so the returned `reconnect()` can force a
    *  close-and-reopen even when auto-reconnect is mid-backoff. */
@@ -520,11 +526,14 @@ export function useChat(opts: {
             onInitialMessageSentRef.current?.();
           }
           pendingSendRef.current = false;
+          turnStartRef.current = Date.now();
+          compactingRef.current = false;
           setError(null);
           setStatus('streaming');
         }
         else if (msg.type === 'turnEnd') {
           pendingSendRef.current = false;
+          compactingRef.current = false;
           setStatus('ready');
         }
         else if (msg.type === 'freshStarted') {
@@ -548,6 +557,15 @@ export function useChat(opts: {
           window.setTimeout(() => forceReconnectRef.current(), 250);
         }
         else if (msg.type === 'stream') {
+          // Track compaction so the working banner can say "compacting context"
+          // instead of looking hung. The CLI emits a system event for it; real
+          // content (text/tool deltas) means compaction is over.
+          const evType = msg.event?.type;
+          if (evType === 'system' && typeof msg.event?.subtype === 'string' && /compact/i.test(msg.event.subtype)) {
+            compactingRef.current = true;
+          } else if (evType === 'content_block_start' || evType === 'content_block_delta') {
+            compactingRef.current = false;
+          }
           setBlocks((prev) => reduce(prev, msg.event, turnIdRef));
           // Pick up the model id from claude's system/init event so the
           // context meter knows which window to divide against. Opus 4.7
@@ -785,6 +803,9 @@ export function useChat(opts: {
     // Show the thinking/working indicator immediately. A slow local model (e.g.
     // a 30B reasoning model) can take many seconds before turnStart arrives,
     // which otherwise looks frozen. turnStart/turnEnd/result/error reset this.
+    turnStartRef.current = Date.now();
+    lastMessageAtRef.current = Date.now();
+    compactingRef.current = false;
     setStatus('streaming');
   };
 
@@ -825,10 +846,16 @@ export function useChat(opts: {
     pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));
+    turnStartRef.current = Date.now();
+    lastMessageAtRef.current = Date.now();
+    compactingRef.current = false;
     setStatus('streaming');
   };
 
   const reconnect = () => forceReconnectRef.current();
 
-  return { blocks, status, error, send, steer, freshStart, stop, reconnect, usage };
+  return {
+    blocks, status, error, send, steer, freshStart, stop, reconnect, usage,
+    lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,
+  };
 }
