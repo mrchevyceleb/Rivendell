@@ -1109,6 +1109,31 @@ const LOCAL_VLLM_BASE_URL =
 type LocalVllmModel = { id: string; maxLen: number };
 
 async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
+  // Prefer LM Studio's native API: it reports each model's REAL loaded context
+  // window. The OpenAI /v1/models endpoint omits it, which forced a 32k guess.
+  try {
+    const host = LOCAL_VLLM_BASE_URL.replace(/\/v1\/?$/, '');
+    const r = await fetch(`${host}/api/v0/models`, { signal: AbortSignal.timeout(2500) });
+    if (r.ok) {
+      const json = (await r.json()) as {
+        data?: Array<{ id?: unknown; type?: unknown; state?: unknown; loaded_context_length?: unknown; max_context_length?: unknown }>;
+      };
+      const loaded = (json.data ?? [])
+        .filter((m) => m.state === 'loaded' && m.type !== 'embeddings')
+        .map((m) => ({
+          id: typeof m.id === 'string' ? m.id : '',
+          maxLen:
+            (typeof m.loaded_context_length === 'number' && m.loaded_context_length > 0 && m.loaded_context_length) ||
+            (typeof m.max_context_length === 'number' && m.max_context_length > 0 && m.max_context_length) ||
+            32768,
+        }))
+        .filter((m): m is LocalVllmModel => m.id.length > 0);
+      if (loaded.length) return loaded;
+    }
+  } catch {
+    // fall through to the OpenAI-compatible endpoint
+  }
+  // Fallback: OpenAI-compatible /v1/models (no per-model context info).
   try {
     const response = await fetch(`${LOCAL_VLLM_BASE_URL}/models`, {
       signal: AbortSignal.timeout(2500),
@@ -1124,8 +1149,7 @@ async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
       }))
       .filter((m): m is LocalVllmModel => m.id.length > 0);
   } catch {
-    // vLLM not running / unreachable: no local models registered (the Local
-    // engine simply has nothing to offer until vLLM is up + the serve rebuilds).
+    // LM Studio not running / unreachable: no local models registered.
     return [];
   }
 }
