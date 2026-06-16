@@ -80,7 +80,7 @@ export function ChatTab({
         onStop={chat.stop}
         onFreshStart={chat.freshStart}
         pathSuggestions={pathSuggestions}
-        acceptImages={false}
+        acceptImages
         lastActivityRef={chat.lastActivityRef}
         turnStartRef={chat.turnStartRef}
         compactingRef={chat.compactingRef}
