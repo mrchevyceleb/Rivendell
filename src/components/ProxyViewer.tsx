@@ -34,7 +34,9 @@ type LoadedInline = {
 
 type Loaded = LoadedDoc | LoadedArtifact | LoadedInline;
 
-const RENDERABLE_BINARY = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif']);
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico']);
+const VIDEO_EXTS = new Set(['mp4', 'mov', 'webm']);
+const AUDIO_EXTS = new Set(['mp3', 'wav', 'm4a', 'ogg']);
 
 export function ProxyViewerProvider({ children }: { children: ReactNode }) {
   const [request, setRequest] = useState<ProxyViewerRequest | null>(null);
@@ -205,14 +207,32 @@ function ProxyViewerContent({ loaded }: { loaded: Loaded }) {
 
   const file = loaded.file;
   const ext = file.language || extensionFromName(file.name);
+  const rawUrl = `/api/files/raw?path=${encodeURIComponent(file.path)}`;
 
-  if (RENDERABLE_BINARY.has(ext)) {
+  if (ext === 'pdf') {
     return (
-      <div className="proxy-viewer-binary">
-        <p>Binary asset preview is limited. Open through OneDrive on this device for the full file.</p>
-        <CopyOneDrivePathBlock path={file.path} />
+      <iframe
+        className="proxy-viewer-frame"
+        title={file.name}
+        src={rawUrl}
+      />
+    );
+  }
+
+  if (IMAGE_EXTS.has(ext)) {
+    return (
+      <div className="proxy-viewer-media">
+        <img className="proxy-viewer-image" src={rawUrl} alt={file.name} />
       </div>
     );
+  }
+
+  if (VIDEO_EXTS.has(ext)) {
+    return <video className="proxy-viewer-video" src={rawUrl} controls />;
+  }
+
+  if (AUDIO_EXTS.has(ext)) {
+    return <audio className="proxy-viewer-audio" src={rawUrl} controls />;
   }
 
   if (file.tooLarge) {
@@ -313,4 +333,3 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
-

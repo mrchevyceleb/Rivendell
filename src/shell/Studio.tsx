@@ -14,11 +14,13 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Forge } from '../rooms/Forge';
 import { useRepos } from '../chat/hooks/useRepos';
+import { normalizeWorkspacePath } from '../chat/utils/proxyLinks';
 import { useWorkspaceTree } from '../hooks/useRoomData';
 import { Evenstar, StarField } from '../theme/Ornaments';
 import { FileTree } from './studio/FileTree';
 import { FileTab } from './studio/FileTab';
 import { ChatTab, type ChatTabApi } from './studio/ChatTab';
+import { StudioFilesContext, type StudioFileActions } from './studio/studioFiles';
 import { STUDIO_ACTIVE_KEY, STUDIO_TABS_KEY, STUDIO_TREE_KEY, type StudioTab } from './studio/types';
 import './studio/studio.css';
 
@@ -68,6 +70,8 @@ export function Studio() {
     return v >= 0.7 && v <= 2 ? v : 1;
   });
   const [dirtyById, setDirtyById] = useState<Record<string, boolean>>({});
+  const [reveal, setReveal] = useState<{ path: string; n: number } | null>(null);
+  const revealSeq = useRef(0);
   const [treeWidth, setTreeWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem('rivendell:studio-tree-w'));
     return v >= 180 && v <= 640 ? v : 300;
@@ -135,6 +139,25 @@ export function Studio() {
     // On phones the tree overlays the content — close it so the file is visible.
     if (typeof window !== 'undefined' && window.innerWidth <= 760) setTreeCollapsed(true);
   }, []);
+
+  // Reveal a folder in the tree: open the tree if collapsed, then ask FileTree
+  // to expand the ancestor chain and scroll the target into view.
+  const revealFolder = useCallback((path: string) => {
+    const normalizedPath = normalizeWorkspacePath(path);
+    if (normalizedPath === null) return;
+    setTreeCollapsed(false);
+    setReveal({ path: normalizedPath, n: ++revealSeq.current });
+  }, []);
+
+  // Actions chat (and link cards) call to open workspace links inside Rivendell.
+  const fileActions = useMemo<StudioFileActions>(() => ({
+    openFile: (path: string, name?: string) => {
+      const normalizedPath = normalizeWorkspacePath(path);
+      if (normalizedPath === null) return;
+      openFileTab(normalizedPath, name ?? fileName(normalizedPath));
+    },
+    revealFolder,
+  }), [openFileTab, revealFolder]);
 
   const openChatTab = useCallback(() => {
     const chatId = `studio-${Date.now()}-${chatSeq++}`;
@@ -217,110 +240,114 @@ export function Studio() {
     zoom !== 1 ? { zoom, width: `calc(100vw / ${zoom})`, height: `calc(100dvh / ${zoom})` } : undefined;
 
   return (
-    <div className="studio" data-theme={theme} style={rootStyle}>
-      <StarField />
+    <StudioFilesContext.Provider value={fileActions}>
+      <div className="studio" data-theme={theme} style={rootStyle}>
+        <StarField />
 
-      {/* ── Top bar ── */}
-      <header className="studio-topbar">
-        <div className="studio-brand">
-          <Evenstar size={22} color="var(--r-gold)" glow />
-          <strong>Rivendell</strong>
-        </div>
+        {/* ── Top bar ── */}
+        <header className="studio-topbar">
+          <div className="studio-brand">
+            <Evenstar size={22} color="var(--r-gold)" glow />
+            <strong>Rivendell</strong>
+          </div>
 
-        <button
-          className="studio-tree-toggle"
-          onClick={() => setTreeCollapsed((c) => !c)}
-          title={treeCollapsed ? 'Show files' : 'Hide files'}
-        >
-          {treeCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
-        </button>
-
-        <nav className="studio-tabs r-scroll" role="tablist">
-          {tabs.map((tab) => {
-            const isActive = tab.id === active;
-            const dirty = tab.kind === 'file' && dirtyById[tab.id];
-            return (
-              <div key={tab.id} className={`studio-tab ${isActive ? 'active' : ''}`} role="tab" aria-selected={isActive}>
-                <button className="studio-tab-main" onClick={() => activate(tab.id)} title={tab.path ?? tab.title}>
-                  {tabIcon(tab.kind)}
-                  <span className="tab-title">{tab.title}</span>
-                  {dirty ? <span className="tab-dirty">●</span> : null}
-                </button>
-                <button className="studio-tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }} title="Close" aria-label={`Close ${tab.title}`}>
-                  <X size={12} />
-                </button>
-              </div>
-            );
-          })}
-        </nav>
-
-        <div className="studio-topbar-actions">
-          <button onClick={openChatTab} title="New chat with Elrond"><MessageSquarePlus size={16} /></button>
-          <button onClick={openForgeTab} title="Open Forge (cron & deploy)"><Hammer size={16} /></button>
-          <span className="studio-zoom">
-            <button onClick={() => stepZoom(-0.1)} title="Smaller"><ZoomOut size={16} /></button>
-            <button className="studio-zoom-pct" onClick={() => setZoom(1)} title="Reset size">{Math.round(zoom * 100)}%</button>
-            <button onClick={() => stepZoom(0.1)} title="Bigger"><ZoomIn size={16} /></button>
-          </span>
-          <button onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} title="Toggle theme">
-            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+          <button
+            className="studio-tree-toggle"
+            onClick={() => setTreeCollapsed((c) => !c)}
+            title={treeCollapsed ? 'Show files' : 'Hide files'}
+          >
+            {treeCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
           </button>
-        </div>
-      </header>
 
-      {/* ── Body: tree | divider | content ── */}
-      <div
-        className={`studio-body ${treeCollapsed ? 'tree-collapsed' : ''}`}
-        style={{ ['--studio-tree-w' as string]: `${Math.round(treeWidth)}px` } as React.CSSProperties}
-      >
-        <aside className="studio-tree">
+          <nav className="studio-tabs r-scroll" role="tablist">
+            {tabs.map((tab) => {
+              const isActive = tab.id === active;
+              const dirty = tab.kind === 'file' && dirtyById[tab.id];
+              return (
+                <div key={tab.id} className={`studio-tab ${isActive ? 'active' : ''}`} role="tab" aria-selected={isActive}>
+                  <button className="studio-tab-main" onClick={() => activate(tab.id)} title={tab.path ?? tab.title}>
+                    {tabIcon(tab.kind)}
+                    <span className="tab-title">{tab.title}</span>
+                    {dirty ? <span className="tab-dirty">●</span> : null}
+                  </button>
+                  <button className="studio-tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }} title="Close" aria-label={`Close ${tab.title}`}>
+                    <X size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </nav>
+
+          <div className="studio-topbar-actions">
+            <button onClick={openChatTab} title="New chat with Elrond"><MessageSquarePlus size={16} /></button>
+            <button onClick={openForgeTab} title="Open Forge (cron & deploy)"><Hammer size={16} /></button>
+            <span className="studio-zoom">
+              <button onClick={() => stepZoom(-0.1)} title="Smaller"><ZoomOut size={16} /></button>
+              <button className="studio-zoom-pct" onClick={() => setZoom(1)} title="Reset size">{Math.round(zoom * 100)}%</button>
+              <button onClick={() => stepZoom(0.1)} title="Bigger"><ZoomIn size={16} /></button>
+            </span>
+            <button onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} title="Toggle theme">
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          </div>
+        </header>
+
+        {/* ── Body: tree | divider | content ── */}
+        <div
+          className={`studio-body ${treeCollapsed ? 'tree-collapsed' : ''}`}
+          style={{ ['--studio-tree-w' as string]: `${Math.round(treeWidth)}px` } as React.CSSProperties}
+        >
+          <aside className="studio-tree">
+            {!treeCollapsed && (
+              <FileTree
+                selectedPath={activeTab?.kind === 'file' ? activeTab.path : undefined}
+                dirtyPaths={dirtyPaths}
+                onOpenFile={openFileTab}
+                onAskElrond={askElrond}
+                revealPath={reveal?.path}
+                revealNonce={reveal?.n}
+              />
+            )}
+          </aside>
+
           {!treeCollapsed && (
-            <FileTree
-              selectedPath={activeTab?.kind === 'file' ? activeTab.path : undefined}
-              dirtyPaths={dirtyPaths}
-              onOpenFile={openFileTab}
-              onAskElrond={askElrond}
-            />
+            <div className="studio-divider" onMouseDown={startTreeResize} title="Drag to resize" />
           )}
-        </aside>
 
-        {!treeCollapsed && (
-          <div className="studio-divider" onMouseDown={startTreeResize} title="Drag to resize" />
-        )}
+          <main className="studio-content">
+            {tabs.map((tab) => (
+              <div key={tab.id} className="studio-pane" hidden={tab.id !== active}>
+                {tab.kind === 'file' && tab.path ? (
+                  <FileTab id={tab.id} path={tab.path} onDirtyChange={onDirtyChange} onAskElrond={askElrond} />
+                ) : tab.kind === 'chat' && tab.chatId ? (
+                  <ChatTab chatId={tab.chatId} repo={assistantHubRepo} registerApi={registerChatApi} />
+                ) : tab.kind === 'forge' ? (
+                  <Forge />
+                ) : null}
+              </div>
+            ))}
+          </main>
+        </div>
 
-        <main className="studio-content">
-          {tabs.map((tab) => (
-            <div key={tab.id} className="studio-pane" hidden={tab.id !== active}>
-              {tab.kind === 'file' && tab.path ? (
-                <FileTab id={tab.id} path={tab.path} onDirtyChange={onDirtyChange} onAskElrond={askElrond} />
-              ) : tab.kind === 'chat' && tab.chatId ? (
-                <ChatTab chatId={tab.chatId} repo={assistantHubRepo} registerApi={registerChatApi} />
-              ) : tab.kind === 'forge' ? (
-                <Forge />
-              ) : null}
-            </div>
-          ))}
-        </main>
+        {/* ── Status bar ── */}
+        <footer className="studio-statusbar">
+          <span className="studio-status-left">
+            <span className="r-pulse-dot green" />
+            Elrond awake
+            <span className="studio-status-sep">·</span>
+            {treeData?.displayPath ?? '~/ASSISTANT-HUB'}
+          </span>
+          <span className="studio-status-right">
+            {treeData ? <>{treeData.fileCount ?? 0} files · {treeData.dirCount ?? 0} folders</> : null}
+            {activeTab?.kind === 'file' ? (
+              <>
+                <span className="studio-status-sep">·</span>
+                {activeFileDirty ? <span className="studio-status-dirty">unsaved</span> : 'saved'}
+              </>
+            ) : null}
+          </span>
+        </footer>
       </div>
-
-      {/* ── Status bar ── */}
-      <footer className="studio-statusbar">
-        <span className="studio-status-left">
-          <span className="r-pulse-dot green" />
-          Elrond awake
-          <span className="studio-status-sep">·</span>
-          {treeData?.displayPath ?? '~/ASSISTANT-HUB'}
-        </span>
-        <span className="studio-status-right">
-          {treeData ? <>{treeData.fileCount ?? 0} files · {treeData.dirCount ?? 0} folders</> : null}
-          {activeTab?.kind === 'file' ? (
-            <>
-              <span className="studio-status-sep">·</span>
-              {activeFileDirty ? <span className="studio-status-dirty">unsaved</span> : 'saved'}
-            </>
-          ) : null}
-        </span>
-      </footer>
-    </div>
+    </StudioFilesContext.Provider>
   );
 }

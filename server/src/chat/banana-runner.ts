@@ -9,6 +9,7 @@ import { createOpencodeClient } from '@opencode-ai/sdk/v2';
 import type { Event, PermissionRequest, PermissionRuleset } from '@opencode-ai/sdk/v2';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
+import { adaptImagesForTextModel, getVisionMode } from './vision-adapter.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import {
   ASSISTANT_HUB_PATH,
@@ -691,6 +692,28 @@ async function fetchMonkeyModelCatalog(): Promise<unknown[]> {
   return monkeyModelCatalogInflight;
 }
 
+// Does the model the next turn will run natively accept image input? Local
+// (LM Studio chat) models are always registered text-only here, so they never
+// do. OpenRouter models are looked up in the live catalog by their image input
+// modality. Anything we can't resolve is treated as text-only (safer: the
+// vision adapter kicks in rather than silently dropping the image).
+async function bananaModelSupportsImages(cli: CliKind, modelId: string | undefined): Promise<boolean> {
+  if (cli === 'banana-local') return false;
+  const id = (modelId || '').trim();
+  if (!id) return false;
+  try {
+    const rows = await fetchMonkeyModelCatalog();
+    const row = rows
+      .map((r) => recordOf(r))
+      .find((r) => (typeof r.id === 'string' ? r.id.trim() : '') === id);
+    if (!row) return false;
+    const architecture = recordOf(row.architecture);
+    return normalizedModalities(architecture.input_modalities).includes('image');
+  } catch {
+    return false;
+  }
+}
+
 function toPickerModel(model: unknown): BananaPickerModel | null {
   const row = recordOf(model);
   const id = typeof row.id === 'string' ? row.id.trim() : '';
@@ -847,6 +870,14 @@ function enabledByEnv(raw: string | undefined): boolean {
   return value === 'true' || value === '1' || value === 'yes' || value === 'on';
 }
 
+function remoteBananaMcpEnabled(): boolean {
+  return enabledByEnv(process.env.RIVENDELL_BANANA_REMOTE_MCP ?? process.env.BANANA_REMOTE_MCP);
+}
+
+function projectBananaMcpEnabled(): boolean {
+  return enabledByEnv(process.env.RIVENDELL_BANANA_PROJECT_MCP ?? process.env.BANANA_PROJECT_MCP);
+}
+
 function shouldMirrorMcpServer(name: string): boolean {
   const raw = process.env.RIVENDELL_BANANA_MCP_MIRROR_SERVERS ?? process.env.BANANA_MCP_MIRROR_SERVERS;
   if (!raw?.trim()) return DEFAULT_MCP_MIRROR_SERVERS.has(name);
@@ -992,7 +1023,10 @@ function mapClaudeMcpServer(name: string, value: unknown, sourceDir: string): Ba
   return null;
 }
 
-function readClaudeMcpServers(projectPathHint?: string): Record<string, BananaMcpConfig> {
+function readClaudeMcpServers(
+  projectPathHint?: string,
+  opts: { includeProjectMcp?: boolean } = {},
+): Record<string, BananaMcpConfig> {
   if (enabledByEnv(process.env.RIVENDELL_BANANA_MCP_MIRROR_DISABLED ?? process.env.BANANA_MCP_MIRROR_DISABLED)) {
     return {};
   }
@@ -1025,24 +1059,26 @@ function readClaudeMcpServers(projectPathHint?: string): Record<string, BananaMc
   const projects = claudeConfig && isRecord(claudeConfig.projects) ? claudeConfig.projects : undefined;
   const envProjectHint =
     process.env.RIVENDELL_BANANA_MCP_PROJECT_PATH ?? process.env.BANANA_MCP_PROJECT_PATH;
-  const fallbackProjectHints = projectPathHint
-    ? []
-    : [process.env.ELROND_WORKSPACE_PATH, process.cwd()];
-  const projectCandidates = [
-    envProjectHint,
-    projectPathHint,
-    ...fallbackProjectHints,
-  ].flatMap((item) => {
-    if (typeof item !== 'string') return [];
-    const trimmed = item.trim();
-    return trimmed ? [trimmed] : [];
-  });
+  if (opts.includeProjectMcp || envProjectHint) {
+    const fallbackProjectHints = projectPathHint
+      ? []
+      : [process.env.ELROND_WORKSPACE_PATH, process.cwd()];
+    const projectCandidates = [
+      envProjectHint,
+      projectPathHint,
+      ...(opts.includeProjectMcp ? fallbackProjectHints : []),
+    ].flatMap((item) => {
+      if (typeof item !== 'string') return [];
+      const trimmed = item.trim();
+      return trimmed ? [trimmed] : [];
+    });
 
-  for (const projectPath of Array.from(new Set(projectCandidates))) {
-    const mcpJson = readJson(join(projectPath, '.mcp.json'));
-    if (mcpJson) addServers(mcpJson.mcpServers, projectPath);
-    const project = projects?.[projectPath];
-    if (isRecord(project)) addServers(project.mcpServers, projectPath);
+    for (const projectPath of Array.from(new Set(projectCandidates))) {
+      const mcpJson = readJson(join(projectPath, '.mcp.json'));
+      if (mcpJson) addServers(mcpJson.mcpServers, projectPath);
+      const project = projects?.[projectPath];
+      if (isRecord(project)) addServers(project.mcpServers, projectPath);
+    }
   }
 
   const names = Object.keys(merged);
@@ -1338,38 +1374,21 @@ export async function serveLocalModel(
   }
 }
 
-/** Which MCP servers (if any) to mirror into Banana for a given project. Banana
- *  stays MCP-free by default; a full mirror is an explicit opt-in (BANANA_MIRROR_MCP=1).
- *  The one standing exception is ASSISTANT-HUB, whose persona (AGENTS.md) boots by
- *  calling assistant-mcp tools (session_start_context, memory). There we mirror ONLY
- *  that one server, so the persona works without re-stuffing every other repo's chats
- *  with the full MCP tool surface (the bloat the default suppresses). */
-function resolveMirroredMcp(projectPathHint?: string): Record<string, BananaMcpConfig> {
-  if (process.env.BANANA_MIRROR_MCP === '1') return readClaudeMcpServers(projectPathHint);
-  if (isAssistantHubProject(projectPathHint)) {
-    const servers = readClaudeMcpServers(projectPathHint);
-    return servers['assistant-mcp'] ? { 'assistant-mcp': servers['assistant-mcp'] } : {};
-  }
-  return {};
+/** Which MCP servers to mirror into Banana. Local models can receive the global
+ *  tool surface by default. Remote OpenRouter models require an explicit deploy
+ *  flag because those tools can touch privileged local/data systems. Project
+ *  MCPs are also opt-in: banana serve is shared globally, so project-scoped MCP
+ *  config would otherwise restart or stale the shared process across chats. */
+function resolveMirroredMcp(opts: { projectPathHint?: string; cli?: CliKind } = {}): Record<string, BananaMcpConfig> {
+  if ((opts.cli ?? 'banana') === 'banana' && !remoteBananaMcpEnabled()) return {};
+  return readClaudeMcpServers(opts.projectPathHint, { includeProjectMcp: projectBananaMcpEnabled() });
 }
 
-function isAssistantHubProject(projectPathHint?: string): boolean {
-  if (!projectPathHint) return false;
-  try {
-    const norm = (value: string) => resolve(value).replace(/[\\/]+$/, '');
-    return norm(projectPathHint) === norm(ASSISTANT_HUB_PATH);
-  } catch {
-    return false;
-  }
-}
-
-async function bananaConfigContent(projectPathHint?: string): Promise<string | null> {
+async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKind } = {}): Promise<string | null> {
   const includeOpenrouterProxy = openrouterViaMonkeyEnabled();
-  // De-bloat: do NOT mirror Claude's MCP servers into Banana by default — that
-  // stuffs every assistant-mcp/playwright/etc. tool schema into the context of
-  // every chat turn (the bloat that slows token gen). Full mirror is opt-in via
-  // BANANA_MIRROR_MCP=1; ASSISTANT-HUB gets just assistant-mcp (see resolveMirroredMcp).
-  const mirroredMcp = resolveMirroredMcp(projectPathHint);
+  // Mirror the configured MCP set into Banana so OpenRouter and Local models
+  // keep the same tool surface as the Claude/Codex-backed companions.
+  const mirroredMcp = resolveMirroredMcp(opts);
   const override: any = {
     $schema: 'https://banana-code.dev/config.json',
   };
@@ -1859,7 +1878,7 @@ class BananaServer {
    *  on the serve); it is excluded from the "is a sibling turn live?" check so a
    *  chat can still pick up a config change for its OWN next turn. */
   async ensure(projectPathHint?: string, caller?: BananaSession): Promise<void> {
-    const inlineConfig = await bananaConfigContent(projectPathHint);
+    const inlineConfig = await bananaConfigContent({ projectPathHint, cli: caller?.cli });
     // Compare on a canonical signature: ~/.claude.json and OpenRouter's catalog
     // can return semantically identical content with shuffled key/row order,
     // which would otherwise restart the serve and wipe every chat's context.
@@ -2599,6 +2618,32 @@ export class BananaSession {
       });
     }
 
+    // Vision adapter: a text-only OpenRouter model (or any local LM Studio chat
+    // model) can't read a native image, so route pasted images through the local
+    // LM Studio vision model and inject a text description instead. Done BEFORE
+    // the turn state / stall watchdog is armed so the (up to 90s) describe call
+    // can't trip the watchdog. When adapted, `visionPromptText` carries the
+    // rewritten prompt and we skip writing the native file:// parts entirely.
+    let visionPromptText: string | null = null;
+    if (images?.length && getVisionMode() !== 'off') {
+      const supportsImages = await bananaModelSupportsImages(this.cli, opts.model);
+      const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: supportsImages });
+      if (result.adapted) {
+        visionPromptText = result.text;
+        if (result.note) {
+          console.log(`[chat banana] vision adapter: ${result.note}`);
+          this.emit({
+            type: 'event',
+            event: { type: '_vision_adapter', images: images.length, note: result.note, ts: Date.now() },
+          });
+        }
+      }
+      if (this.dead) {
+        this.busy = false;
+        return;
+      }
+    }
+
     // Write image attachments to temp files; banana's prompt parts reference
     // them by file:// URL (the same mechanism the run path uses). The temp dir
     // is torn down when this turn ends. `cleanupImages` is idempotent (the
@@ -2622,7 +2667,7 @@ export class BananaSession {
 
     const fileParts: Array<{ type: 'file'; url: string; filename: string; mime: string }> = [];
     try {
-      if (images?.length) {
+      if (images?.length && visionPromptText === null) {
         imageTempDir = await mkdtemp(join(tmpdir(), 'rivendell-banana-images-'));
         for (const [index, image] of images.entries()) {
           if (!image.mediaType.startsWith('image/')) {
@@ -2769,7 +2814,11 @@ export class BananaSession {
     const model = parseModel(requestedModelId);
     const slashCommand = await parseBananaSlashCommand(text, this.cwd);
     const needsContextRecovery = this.wipedThisTurn || recoverContextThisTurn;
-    const commandExpandedText = slashCommand ? expandBananaSlashCommand(slashCommand) : text;
+    // Vision-adapted text wins over raw text. (A slash command + pasted image in
+    // the same turn is vanishingly rare; if it happens the image description is
+    // preserved and the command stays literal rather than silently dropping the
+    // image.)
+    const commandExpandedText = visionPromptText ?? (slashCommand ? expandBananaSlashCommand(slashCommand) : text);
     const recap = needsContextRecovery && preTurnRecap ? preTurnRecap : '';
     const effectiveText = recap ? `${recap}\n\n${commandExpandedText}` : commandExpandedText;
     if (recap) {

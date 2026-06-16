@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { SamPortrait } from './atoms';
 import type { CommandEntry } from '../../data/types';
-import { commandText, getCommandSuggestion, getCommandSuggestionMulti, type CommandSet } from '../../utils/commandAutocomplete';
+import { commandText, getCommandSuggestion, getCommandSuggestionMulti, getPathSuggestion, type CommandSet } from '../../utils/commandAutocomplete';
 
 // ─────────────────────────────────────────────
 // Sam's message bubble — vellum, left-aligned, with avatar
@@ -440,6 +440,7 @@ export function ChatInput({
   commands = [],
   commandPrefix = '/',
   commandSets,
+  pathSuggestions,
   busy = false,
   placeholder = 'Speak, master.',
   agent = 'Claude Code',
@@ -458,6 +459,8 @@ export function ChatInput({
   // Multi-prefix autocomplete: e.g. [{prefix:'/',commands:claude},{prefix:'$',commands:codex}].
   // When provided, takes precedence over commands/commandPrefix.
   commandSets?: CommandSet[];
+  // Workspace file/folder paths for `@`-triggered path autocomplete.
+  pathSuggestions?: string[];
   busy?: boolean;
   placeholder?: string;
   agent?: string;
@@ -473,9 +476,11 @@ export function ChatInput({
   const taRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [images, setImages] = useState<ChatImage[]>([]);
-  const suggestion = commandSets && commandSets.length
-    ? getCommandSuggestionMulti(v, commandSets)
-    : getCommandSuggestion(v, commandPrefix, commands);
+  const suggestion =
+    (commandSets && commandSets.length
+      ? getCommandSuggestionMulti(v, commandSets)
+      : getCommandSuggestion(v, commandPrefix, commands))
+    ?? (pathSuggestions && pathSuggestions.length ? getPathSuggestion(v, pathSuggestions) : null);
 
   // Auto-grow with content. Reset to auto so scrollHeight reflects natural
   // content size, then size to that, capped by computed max-height. Toggle
@@ -520,6 +525,26 @@ export function ChatInput({
     requestAnimationFrame(() => {
       taRef.current?.focus();
       taRef.current?.setSelectionRange(suggestion.fullText.length, suggestion.fullText.length);
+    });
+  };
+
+  // Insert text at the caret (used when a file is dragged in from the tree),
+  // padding with spaces so it doesn't fuse onto adjacent words.
+  const insertAtCursor = (text: string) => {
+    const el = taRef.current;
+    const start = el?.selectionStart ?? v.length;
+    const end = el?.selectionEnd ?? v.length;
+    const before = v.slice(0, start);
+    const after = v.slice(end);
+    const lead = before.length && !/\s$/.test(before) ? ' ' : '';
+    const trail = after.length && !/^\s/.test(after) ? ' ' : after.length ? '' : ' ';
+    const chunk = `${lead}${text}${trail}`;
+    const next = before + chunk + after;
+    const caret = (before + chunk).length;
+    setV(next);
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(caret, caret);
     });
   };
 
@@ -738,6 +763,30 @@ export function ChatInput({
             if (files.length) {
               e.preventDefault();
               void ingestFiles(files);
+            }
+          }}
+          onDragOver={(e) => {
+            const types = Array.from(e.dataTransfer.types);
+            if (types.includes('application/x-rivendell-path') || (acceptImages && types.includes('Files'))) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+            }
+          }}
+          onDrop={(e) => {
+            if (acceptImages) {
+              const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+              if (files.length) {
+                e.preventDefault();
+                void ingestFiles(files);
+                return;
+              }
+            }
+            // A path dragged from the file tree -> insert @path at the caret.
+            // Generic text drops fall through to the textarea's native handling.
+            const treePath = e.dataTransfer.getData('application/x-rivendell-path');
+            if (treePath) {
+              e.preventDefault();
+              insertAtCursor(`@${treePath}`);
             }
           }}
           placeholder={placeholder}

@@ -22,22 +22,22 @@ const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 
 // Pick the starting context window for a given CLI before we've seen any model
 // id. Codex's GPT-5 family is 400K; current Claude (Opus 4.6/4.7/4.8, Sonnet
-// 4.6) is 1M; banana/OpenRouter and Z.ai GLM default to 200K.
-function defaultWindowForCli(cli: CompanionId): number {
+// 4.6) is 1M; GLM 5.2 is 1M; banana/OpenRouter defaults to 200K.
+function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (cli === 'codex' || cli === 'codex-personal') return CODEX_WINDOW_TOKENS;
   if (cli === 'banana' || cli === 'banana-local') return BANANA_WINDOW_TOKENS;
-  if (cli === 'zai') return BANANA_WINDOW_TOKENS; // GLM ~200K
-  return LARGE_WINDOW_TOKENS; // Claude (assistant/claude) — current models are 1M
+  return windowForClaudeModel(model); // Claude/Z.ai model ids carry the real window.
 }
 
 // Map a model id to its real context window. Current Opus (4.6/4.7/4.8),
 // Sonnet 4.6, and Fable/Mythos 5 are all 1M; Haiku and older models are 200K;
-// GLM (Z.ai) is ~200K. The `[1m]` beta suffix forces 1M for anything else.
+// GLM 5.2 is 1M on Z.ai's coding API; GLM 5.1 stays 200K.
 function windowForClaudeModel(model: string | undefined): number {
   if (!model) return LARGE_WINDOW_TOKENS;
   const m = model.toLowerCase();
   if (m.includes('[1m]') || m.includes('-1m')) return LARGE_WINDOW_TOKENS;
   if (m.includes('haiku')) return DEFAULT_WINDOW_TOKENS;
+  if (m.includes('glm-5.2')) return LARGE_WINDOW_TOKENS;
   if (m.includes('glm')) return DEFAULT_WINDOW_TOKENS;
   if (m.includes('opus') || m.includes('sonnet') || m.includes('fable') || m.includes('mythos')) return LARGE_WINDOW_TOKENS;
   return DEFAULT_WINDOW_TOKENS;
@@ -342,7 +342,7 @@ export function useChat(opts: {
   // Window size for the active CLI. Seeded from the per-CLI default and
   // refined by the `system/init` event (claude) or by the safety ratchet
   // when observed usage exceeds the assumed window.
-  const windowTokensRef = useRef<number>(defaultWindowForCli(cli));
+  const windowTokensRef = useRef<number>(defaultWindowForCli(cli, model));
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -373,6 +373,20 @@ export function useChat(opts: {
    *  storage. Writes are gated on this so we don't wipe a saved chat with the
    *  empty initial state on the first render after repos load. */
   const restoredKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const nextWindow = defaultWindowForCli(cli, model);
+    windowTokensRef.current = nextWindow;
+    setUsage((prev) => {
+      if (!prev) return prev;
+      const total = prev.inputTokens + prev.cacheReadTokens + prev.cacheCreateTokens;
+      return {
+        ...prev,
+        windowTokens: nextWindow,
+        fraction: Math.min(total / nextWindow, 1),
+      };
+    });
+  }, [cli, model]);
 
   useEffect(() => {
     if (initialMessage) {
@@ -425,7 +439,7 @@ export function useChat(opts: {
     // Reset the assumed context window to the per-CLI default each time we
     // (re)connect. The system/init event will refine it for claude; codex
     // sticks at 400K unless usage forces a ratchet.
-    windowTokensRef.current = defaultWindowForCli(cli);
+    windowTokensRef.current = defaultWindowForCli(cli, modelRef.current);
     setUsage(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
@@ -558,12 +572,24 @@ export function useChat(opts: {
         }
         else if (msg.type === 'stream') {
           // Track compaction so the working banner can say "compacting context"
-          // instead of looking hung. The CLI emits a system event for it; real
-          // content (text/tool deltas) means compaction is over.
-          const evType = msg.event?.type;
-          if (evType === 'system' && typeof msg.event?.subtype === 'string' && /compact/i.test(msg.event.subtype)) {
+          // instead of looking hung. The claude CLI signals compaction START with
+          // a system/status event (status:"compacting") and the END boundary with
+          // system/compact_boundary. CRUCIAL: with --include-partial-messages the
+          // CLI wraps real content under a `stream_event` envelope, so the content
+          // type lives at event.event.type, NOT event.type. The old code checked
+          // the top-level type, which is always 'stream_event' for content, so the
+          // flag NEVER cleared and "compacting context" stuck for the whole turn.
+          const ev = msg.event;
+          const evType = ev?.type;
+          const innerType = evType === 'stream_event' ? ev?.event?.type : evType;
+          if (evType === 'system' && ev?.subtype === 'status' && ev?.status === 'compacting') {
             compactingRef.current = true;
-          } else if (evType === 'content_block_start' || evType === 'content_block_delta') {
+          } else if (
+            (evType === 'system' && ev?.subtype === 'compact_boundary') ||
+            innerType === 'message_start' ||
+            innerType === 'content_block_start' ||
+            innerType === 'content_block_delta'
+          ) {
             compactingRef.current = false;
           }
           setBlocks((prev) => reduce(prev, msg.event, turnIdRef));
@@ -816,7 +842,14 @@ export function useChat(opts: {
       setError('Sam is not on the line. Please wait a moment.');
       return;
     }
-    ws.send(JSON.stringify({ type: 'freshStart', cli, repo: repo.path, chatId }));
+    ws.send(JSON.stringify({
+      type: 'freshStart',
+      cli,
+      repo: repo.path,
+      chatId,
+      model: modelRef.current,
+      effort: effortRef.current,
+    }));
   };
 
   const stop = () => {

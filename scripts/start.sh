@@ -16,5 +16,6 @@ fi
 
 export PORT="${PORT:-8091}"
 export HOST="${HOST:-0.0.0.0}"
+export RIVENDELL_BANANA_REMOTE_MCP="${RIVENDELL_BANANA_REMOTE_MCP:-1}"
 
 npm start

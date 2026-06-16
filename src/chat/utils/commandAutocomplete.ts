@@ -56,3 +56,30 @@ export function getCommandSuggestionMulti(
 export function commandText(prefix: string, name: string): string {
   return `${prefix}${name}`;
 }
+
+/**
+ * Ghost-text completion for a workspace file/folder path. Triggers on the last
+ * whitespace-delimited token when it starts with `@` (e.g. "look at @src/chat").
+ * Matches a path that starts with the typed query so the completion is a pure
+ * append (the ghost-text renderer requires fullText === value + tail). Reuses
+ * the CommandSuggestion shape (prefix '@', command.name = the matched path).
+ */
+export function getPathSuggestion(value: string, paths: string[]): CommandSuggestion | null {
+  const m = /(?:^|\s)@([^\s@]*)$/.exec(value);
+  if (!m) return null;
+  const query = m[1];
+  if (!query) return null;
+  const lower = query.toLowerCase();
+  const match = paths.find((p) => {
+    const pl = p.toLowerCase();
+    return pl.startsWith(lower) && pl !== lower;
+  });
+  if (!match) return null;
+  const fullText = value.slice(0, value.length - query.length) + match;
+  return {
+    command: { name: match },
+    prefix: '@',
+    fullText,
+    tail: fullText.slice(value.length),
+  };
+}

@@ -22,14 +22,48 @@ export const WORKSPACE_COMPANIONS: { id: CompanionId; label: string }[] = [
 ];
 
 // Z.ai coding-plan models (Anthropic-compatible, run through the claude CLI).
+// GLM 5.2's id MUST carry the `[1m]` suffix to get its 1M context window; bare
+// `glm-5.2` serves the 200K variant and compacts far too early.
+export const DEFAULT_ZAI_MODEL = 'glm-5.2[1m]';
+export const DEFAULT_ZAI_EFFORT = 'high';
 export const ZAI_MODELS: { id: string; label: string }[] = [
-  { id: 'glm-5.2', label: 'GLM 5.2' },
-  { id: 'glm-5.1', label: 'GLM 5.1' },
+  { id: DEFAULT_ZAI_MODEL, label: 'GLM 5.2 · 1M' },
+  { id: 'glm-5.1', label: 'GLM 5.1 · 200K' },
 ];
+// GLM-5.2's two real thinking-effort levels. Z.ai recommends Max for coding.
+// (Claude Code maps low/medium/high -> GLM "high", xhigh/max -> GLM "max", so
+// exposing more than these two would just be duplicate labels for the same two.)
+export const ZAI_EFFORTS = ['high', 'max'];
+
+export function normalizeZaiModel(model: string): string {
+  // Migrate the legacy bare `glm-5.2` to the 1M id.
+  const normalized = model === 'glm-5.2' ? DEFAULT_ZAI_MODEL : model;
+  return ZAI_MODELS.some((entry) => entry.id === normalized) ? normalized : DEFAULT_ZAI_MODEL;
+}
+
+export function normalizeZaiEffort(effort: string): string {
+  return ZAI_EFFORTS.includes(effort) ? effort : DEFAULT_ZAI_EFFORT;
+}
 
 function readLS(key: string, fallback: string): string {
   if (typeof window === 'undefined') return fallback;
   return localStorage.getItem(key) || fallback;
+}
+
+export function readStoredZaiModel(): string {
+  if (typeof window === 'undefined') return DEFAULT_ZAI_MODEL;
+  const raw = localStorage.getItem('rivendell:zai-model') || DEFAULT_ZAI_MODEL;
+  const model = normalizeZaiModel(raw);
+  if (model !== raw) localStorage.setItem('rivendell:zai-model', model);
+  return model;
+}
+
+export function readStoredZaiEffort(): string {
+  if (typeof window === 'undefined') return DEFAULT_ZAI_EFFORT;
+  const raw = localStorage.getItem('rivendell:zai-effort') || DEFAULT_ZAI_EFFORT;
+  const effort = normalizeZaiEffort(raw);
+  if (effort !== raw) localStorage.setItem('rivendell:zai-effort', effort);
+  return effort;
 }
 
 export type CompanionPicker = ReturnType<typeof useCompanionPicker>;
@@ -49,7 +83,8 @@ export function useCompanionPicker(storageKey: string) {
   const [claudeEffort, setClaudeEffortState] = useState(() => readLS('rivendell:claude-effort', 'xhigh'));
   const [codexModel, setCodexModelState] = useState(() => readLS('rivendell:codex-model', 'gpt-5.5'));
   const [codexEffort, setCodexEffortState] = useState(() => readLS('rivendell:codex-effort', 'xhigh'));
-  const [zaiModel, setZaiModelState] = useState(() => readLS('rivendell:zai-model', 'glm-5.2'));
+  const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);
+  const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
   const [bananaEffort, setBananaEffortState] = useState(() => readLS('rivendell:banana-effort', 'medium'));
   const [localModel, setLocalModelState] = useState(() => readLS('rivendell:local-model', ''));
 
@@ -61,7 +96,16 @@ export function useCompanionPicker(storageKey: string) {
   const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState);
   const setCodexModel = persist('rivendell:codex-model', setCodexModelState);
   const setCodexEffort = persist('rivendell:codex-effort', setCodexEffortState);
-  const setZaiModel = persist('rivendell:zai-model', setZaiModelState);
+  const setZaiModel = (v: string) => {
+    const model = normalizeZaiModel(v);
+    setZaiModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-model', model);
+  };
+  const setZaiEffort = (v: string) => {
+    const effort = normalizeZaiEffort(v);
+    setZaiEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
+  };
   const setBananaEffort = persist('rivendell:banana-effort', setBananaEffortState);
   const setLocalModel = persist('rivendell:local-model', setLocalModelState);
 
@@ -81,7 +125,8 @@ export function useCompanionPicker(storageKey: string) {
     : undefined;
   const effort =
     isCodex ? codexEffort
-    : (isClaude || isZai) ? claudeEffort
+    : isZai ? zaiEffort
+    : isClaude ? claudeEffort
     : (isOpenRouter || isLocal) ? bananaEffort
     : undefined;
 
@@ -92,7 +137,7 @@ export function useCompanionPicker(storageKey: string) {
     bananaModel,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
-    zaiModel, setZaiModel,
+    zaiModel, setZaiModel, zaiEffort, setZaiEffort,
     bananaEffort, setBananaEffort,
     localModel, setLocalModel,
   };

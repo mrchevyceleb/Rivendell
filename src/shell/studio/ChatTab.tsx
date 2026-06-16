@@ -1,9 +1,21 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { CompanionControls } from '../../chat/components/CompanionControls';
 import { Conversation } from '../../chat/components/desktop/Conversation';
 import { useChat } from '../../chat/hooks/useChat';
 import { useCompanionPicker } from '../../chat/hooks/useCompanionPicker';
 import type { Repo } from '../../chat/data/types';
+import type { FileTreeNode } from '../../data/types';
+import { useWorkspaceTree } from '../../hooks/useRoomData';
+
+// Flatten the (already-loaded) workspace tree into a sorted list of relative
+// paths for `@`-path autocomplete in the composer. The tree is fetched once and
+// cached by TanStack Query, so calling useWorkspaceTree here is a shared read.
+function flattenTreePaths(node: FileTreeNode | undefined, out: string[] = []): string[] {
+  if (!node) return out;
+  if (node.path) out.push(node.path);
+  node.children?.forEach((child) => flattenTreePaths(child, out));
+  return out;
+}
 
 export function companionAgentLabel(cli: string): string {
   switch (cli) {
@@ -30,6 +42,11 @@ export function ChatTab({
   registerApi: (chatId: string, api: ChatTabApi | null) => void;
 }) {
   const picker = useCompanionPicker(`rivendell:studio-companion:${chatId}`);
+  const tree = useWorkspaceTree();
+  const pathSuggestions = useMemo(
+    () => flattenTreePaths(tree.data?.tree).sort((a, b) => a.localeCompare(b)),
+    [tree.data],
+  );
 
   const chat = useChat({
     repo,
@@ -62,6 +79,7 @@ export function ChatTab({
         onSteer={chat.steer}
         onStop={chat.stop}
         onFreshStart={chat.freshStart}
+        pathSuggestions={pathSuggestions}
         acceptImages={false}
         lastActivityRef={chat.lastActivityRef}
         turnStartRef={chat.turnStartRef}

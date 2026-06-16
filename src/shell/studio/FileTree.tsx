@@ -1,11 +1,13 @@
 import {
   ChevronRight,
+  ClipboardCopy,
   File,
   FilePlus,
   FileText,
   Folder,
   FolderOpen,
   FolderPlus,
+  Link2,
   MessageSquare,
   RefreshCcw,
   Search,
@@ -94,6 +96,18 @@ function ContextMenu({
           </button>
         </>
       )}
+      <button
+        className="ctx-item"
+        onClick={() => { void navigator.clipboard?.writeText(menu.node.path); onClose(); }}
+      >
+        <ClipboardCopy size={13} /> Copy path
+      </button>
+      <button
+        className="ctx-item"
+        onClick={() => { void navigator.clipboard?.writeText(`ASSISTANT-HUB/${menu.node.path}`); onClose(); }}
+      >
+        <Link2 size={13} /> Copy as workspace link
+      </button>
       <button className="ctx-item" onClick={() => { onRename(menu.node); onClose(); }}>
         <Type size={13} /> Rename
       </button>
@@ -164,6 +178,16 @@ function TreeNode({
         />
       ) : (
         <button
+          data-tree-path={node.path}
+          draggable
+          onDragStart={(e) => {
+            // Drag a tree row into the chat composer to insert its path. The
+            // custom type lets the composer format it (@path); text/plain is the
+            // raw path for any other drop target.
+            e.dataTransfer.setData('text/plain', node.path);
+            e.dataTransfer.setData('application/x-rivendell-path', node.path);
+            e.dataTransfer.effectAllowed = 'copy';
+          }}
           className={`${selectedPath === node.path ? 'selected' : ''} ${isDirectory ? 'directory' : 'file'} ${isLoading ? 'loading' : ''}`}
           style={{ paddingLeft: 10 + depth * 16 }}
           onClick={() => void (isDirectory ? onToggle(node) : onOpenFile(node))}
@@ -209,11 +233,15 @@ export function FileTree({
   dirtyPaths,
   onOpenFile,
   onAskElrond,
+  revealPath,
+  revealNonce,
 }: {
   selectedPath?: string;
   dirtyPaths?: Set<string>;
   onOpenFile: (path: string, name: string) => void;
   onAskElrond: (path: string) => void;
+  revealPath?: string;
+  revealNonce?: number;
 }) {
   const { data, refetch, isFetching } = useWorkspaceTree();
   const [tree, setTree] = useState<FileTreeNode | null>(null);
@@ -224,6 +252,9 @@ export function FileTree({
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [newEntryParent, setNewEntryParent] = useState<{ parent: string; kind: 'file' | 'directory' } | null>(null);
   const newEntryRef = useRef<HTMLInputElement>(null);
+
+  const treeRef = useRef<FileTreeNode | null>(null);
+  treeRef.current = tree;
 
   useEffect(() => {
     if (data?.tree) setTree(data.tree);
@@ -254,6 +285,49 @@ export function FileTree({
       return next;
     });
   }, [expanded, loadChildren]);
+
+  // Reveal a path on request (a folder link clicked in chat): walk the ancestor
+  // chain, loading deferred children level by level and expanding each, then
+  // scroll the target node into view. Keyed on revealNonce so re-clicking the
+  // same path re-triggers.
+  useEffect(() => {
+    if (revealPath === undefined) return;
+    let cancelled = false;
+    let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+    setQuery('');
+    void (async () => {
+      const root = treeRef.current;
+      if (!root) return;
+      const segments = revealPath.split('/').filter(Boolean);
+      let node: FileTreeNode = root;
+      setExpanded((prev) => new Set(prev).add(''));
+      let acc = '';
+      for (const seg of segments) {
+        if (cancelled) return;
+        acc = acc ? `${acc}/${seg}` : seg;
+        let children = node.children;
+        if (!children) children = await loadChildren(node);
+        const child = children?.find((c) => c.path === acc || c.name === seg);
+        if (!child) break;
+        if (child.type === 'directory') {
+          setExpanded((prev) => new Set(prev).add(child.path));
+        }
+        node = child;
+      }
+      if (cancelled) return;
+      // Let the newly expanded rows render before scrolling to the target.
+      scrollTimer = setTimeout(() => {
+        if (cancelled) return;
+        const safe = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(revealPath) : revealPath;
+        document.querySelector(`[data-tree-path="${safe}"]`)?.scrollIntoView({ block: 'center' });
+      }, 80);
+    })();
+    return () => {
+      cancelled = true;
+      if (scrollTimer) clearTimeout(scrollTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealPath, revealNonce]);
 
   // Live-refetch when Elrond changes the tree (not our own human writes).
   const { events } = useScribeSocket();

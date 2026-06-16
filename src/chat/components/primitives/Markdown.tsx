@@ -1,11 +1,14 @@
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { memo, type ReactNode } from 'react';
+import { memo, useCallback, useContext, type MouseEvent, type ReactNode } from 'react';
 import {
   annotateWorkspaceMentions,
   openWorkspaceLink,
   parseProxyHref,
+  parseWorkspaceMentionText,
 } from '../../utils/proxyLinks';
+import { ProxyViewerContext } from '../../../hooks/useProxyViewer';
+import { useStudioFiles, viewerPreferred } from '../../../shell/studio/studioFiles';
 
 // Literary-styled wrapper around react-markdown. Agent replies arrive as
 // markdown; this renderer leans on the gold/silver theme tokens so emphasis
@@ -30,6 +33,136 @@ function proxyUrlTransform(url: string): string {
 }
 
 const REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }]] as const;
+
+type WorkspaceTarget = { kind: 'doc' | 'folder'; path: string };
+
+const INLINE_CODE_STYLE = {
+  fontFamily: 'var(--r-mono)',
+  fontSize: '0.92em',
+  color: 'var(--r-gold)',
+  background: 'rgba(212, 175, 99, 0.10)',
+  border: '1px solid var(--r-line-gold)',
+  borderRadius: 4,
+  padding: '0 5px',
+  wordBreak: 'break-all' as const,
+};
+
+function textFromReactNode(value: ReactNode): string {
+  if (typeof value === 'string' || typeof value === 'number') return String(value);
+  if (Array.isArray(value)) return value.map(textFromReactNode).join('');
+  return '';
+}
+
+function useWorkspaceTargetOpener(target: WorkspaceTarget | null): () => void {
+  const studio = useStudioFiles();
+  const viewer = useContext(ProxyViewerContext);
+  const kind = target?.kind;
+  const path = target?.path;
+
+  return useCallback(() => {
+    if (!kind || path === undefined) return;
+
+    // Inside the Studio shell, keep it in-app: folders reveal in the file tree,
+    // renderable docs (html/pdf/images/media) open in the overlay, and text,
+    // code, markdown, config, and data files open in the editor.
+    if (studio) {
+      if (kind === 'folder') { studio.revealFolder(path); return; }
+      if (viewer && viewerPreferred(path)) { viewer.open({ source: 'doc', path }); return; }
+      studio.openFile(path);
+      return;
+    }
+
+    openWorkspaceLink(path, kind);
+  }, [kind, path, studio, viewer]);
+}
+
+function MarkdownCode(props: any) {
+  const { inline, children, className } = props;
+  const isInline = inline ?? !className;
+  const inlineTarget = isInline ? parseWorkspaceMentionText(textFromReactNode(children)) : null;
+  const openTarget = useWorkspaceTargetOpener(inlineTarget);
+
+  if (isInline) {
+    if (inlineTarget) {
+      const href = `rivendell-${inlineTarget.kind}:${encodeURIComponent(inlineTarget.path)}`;
+      const onClick = (event: MouseEvent<HTMLAnchorElement>) => {
+        event.preventDefault();
+        openTarget();
+      };
+
+      return (
+        <a
+          href={href}
+          onClick={onClick}
+          className="sw-md-proxy-link sw-md-proxy-code-link"
+          data-proxy-kind={inlineTarget.kind}
+          title={inlineTarget.kind === 'folder' ? 'Reveal in Rivendell' : 'Open in Rivendell'}
+        >
+          <code style={INLINE_CODE_STYLE}>{inlineTarget.display}</code>
+        </a>
+      );
+    }
+
+    return <code style={INLINE_CODE_STYLE}>{children}</code>;
+  }
+
+  return (
+    <pre style={{
+      background: 'var(--r-bg-deep)',
+      border: '1px solid var(--r-line)',
+      borderLeft: '2px solid var(--r-gold-soft)',
+      borderRadius: 6,
+      padding: '10px 12px',
+      margin: '10px 0',
+      overflowX: 'auto',
+      maxWidth: '100%',
+      fontFamily: 'var(--r-mono)',
+      fontSize: 12.5,
+      lineHeight: 1.55,
+      color: 'var(--r-ink)',
+      whiteSpace: 'pre',
+    }}><code>{children}</code></pre>
+  );
+}
+
+function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNode }) {
+  const proxyTarget = parseProxyHref(href);
+  const openTarget = useWorkspaceTargetOpener(proxyTarget);
+
+  if (proxyTarget) {
+    const onClick = (event: MouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+      openTarget();
+    };
+
+    return (
+      <a
+        href={href}
+        onClick={onClick}
+        className="sw-md-proxy-link"
+        data-proxy-kind={proxyTarget.kind}
+      >
+        {children}
+      </a>
+    );
+  }
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{
+        color: 'var(--r-elf-glow)',
+        textDecoration: 'underline',
+        textUnderlineOffset: 2,
+        textDecorationColor: 'rgba(106, 163, 255, 0.5)',
+      }}
+    >
+      {children}
+    </a>
+  );
+}
 
 const MD_COMPONENTS: Components = {
   p: ({ children }) => (
@@ -80,78 +213,8 @@ const MD_COMPONENTS: Components = {
       fontStyle: 'italic',
     }}>{children}</h5>
   ),
-  code: (props: any) => {
-    const { inline, children, className } = props;
-    if (inline ?? !className) {
-      return (
-        <code
-          style={{
-            fontFamily: 'var(--r-mono)',
-            fontSize: '0.92em',
-            color: 'var(--r-gold)',
-            background: 'rgba(212, 175, 99, 0.10)',
-            border: '1px solid var(--r-line-gold)',
-            borderRadius: 4,
-            padding: '0 5px',
-            wordBreak: 'break-all',
-          }}
-        >
-          {children}
-        </code>
-      );
-    }
-    return (
-      <pre style={{
-        background: 'var(--r-bg-deep)',
-        border: '1px solid var(--r-line)',
-        borderLeft: '2px solid var(--r-gold-soft)',
-        borderRadius: 6,
-        padding: '10px 12px',
-        margin: '10px 0',
-        overflowX: 'auto',
-        maxWidth: '100%',
-        fontFamily: 'var(--r-mono)',
-        fontSize: 12.5,
-        lineHeight: 1.55,
-        color: 'var(--r-ink)',
-        whiteSpace: 'pre',
-      }}><code>{children}</code></pre>
-    );
-  },
-  a: ({ href, children }: { href?: string; children?: ReactNode }) => {
-    const proxyTarget = parseProxyHref(href);
-    if (proxyTarget) {
-      const onClick = (event: React.MouseEvent) => {
-        event.preventDefault();
-        openWorkspaceLink(proxyTarget.path, proxyTarget.kind);
-      };
-      return (
-        <a
-          href={href}
-          onClick={onClick}
-          className="sw-md-proxy-link"
-          data-proxy-kind={proxyTarget.kind}
-        >
-          {children}
-        </a>
-      );
-    }
-    return (
-      <a
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        style={{
-          color: 'var(--r-elf-glow)',
-          textDecoration: 'underline',
-          textUnderlineOffset: 2,
-          textDecorationColor: 'rgba(106, 163, 255, 0.5)',
-        }}
-      >
-        {children}
-      </a>
-    );
-  },
+  code: MarkdownCode,
+  a: MarkdownAnchor,
   blockquote: ({ children }) => (
     <blockquote style={{
       borderLeft: '2px solid var(--r-gold-soft)',

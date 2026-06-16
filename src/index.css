@@ -6033,6 +6033,30 @@ button {
   line-height: 1.55;
 }
 
+.proxy-viewer-media {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.proxy-viewer-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.proxy-viewer-video {
+  width: 100%;
+  max-height: 100%;
+  border-radius: 6px;
+}
+
+.proxy-viewer-audio {
+  width: min(620px, 100%);
+}
+
 .proxy-viewer-binary-actions {
   display: flex;
   flex-direction: column;
@@ -6184,6 +6208,14 @@ button {
   text-decoration-color: var(--r-gold);
   background: rgba(212, 175, 99, 0.08);
   border-radius: 3px;
+}
+
+.sw-md-proxy-code-link {
+  text-decoration: none;
+}
+
+.sw-md-proxy-code-link:hover code {
+  background: rgba(212, 175, 99, 0.16);
 }
 
 .sw-md-proxy-link[data-proxy-kind='folder']::before {

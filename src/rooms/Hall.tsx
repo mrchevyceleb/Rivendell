@@ -23,6 +23,14 @@ import { commandText, getCommandSuggestionMulti } from '../chat/utils/commandAut
 import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
 import { useBananaModel } from '../chat/hooks/useBananaModel';
+import {
+  normalizeZaiEffort,
+  normalizeZaiModel,
+  readStoredZaiEffort,
+  readStoredZaiModel,
+  ZAI_EFFORTS,
+  ZAI_MODELS,
+} from '../chat/hooks/useCompanionPicker';
 import { ModelPicker } from '../chat/components/ModelPicker';
 import { LocalModelPicker } from '../chat/components/LocalModelPicker';
 import { CodexEnginePicker, CLAUDE_MODELS, CLAUDE_EFFORTS } from '../chat/components/CodexEnginePicker';
@@ -84,14 +92,15 @@ const companionSub: Record<CompanionId, string> = {
   banana: 'OpenRouter via Banana Code',
   'codex-personal': 'personal-account Codex',
   'banana-local': 'local LM Studio model, direct',
-  zai: 'GLM 5.2 / 5.1 via Z.ai',
+  zai: 'GLM 5.2 1M / 5.1 via Z.ai',
 };
 
 // Banana is an engine multiplexer: the picked engine selects the wire cli
 // (and thus the account / provider) the session actually runs on.
-type BananaEngine = 'personal-claude' | 'personal-codex' | 'openrouter' | 'local';
+type BananaEngine = 'personal-claude' | 'personal-codex' | 'openrouter' | 'local' | 'zai';
 const BANANA_ENGINES: { id: BananaEngine; label: string }[] = [
   { id: 'openrouter', label: 'OpenRouter' },
+  { id: 'zai', label: 'Z.ai GLM' },
   { id: 'personal-claude', label: 'Personal Claude' },
   { id: 'personal-codex', label: 'Personal Codex' },
   { id: 'local', label: 'Local (vLLM)' },
@@ -104,6 +113,8 @@ function bananaEngineToCli(engine: string): CompanionId {
       return 'codex-personal';
     case 'local':
       return 'banana-local';
+    case 'zai':
+      return 'zai';
     default:
       return 'banana';
   }
@@ -267,6 +278,18 @@ export function Hall() {
     setBananaEngineState(e);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:banana-engine', e);
   };
+  const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);
+  const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
+  const changeZaiModel = (m: string) => {
+    const model = normalizeZaiModel(m);
+    setZaiModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-model', model);
+  };
+  const changeZaiEffort = (e: string) => {
+    const effort = normalizeZaiEffort(e);
+    setZaiEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
+  };
   // Local (vLLM) catalog — fetched live from /api/local/models when the Local
   // engine is active. vLLM serves one model at a time; swapping it on the box
   // (then reopening the picker) repopulates this.
@@ -286,6 +309,7 @@ export function Hall() {
   const isCodexEngine = effectiveCli === 'codex' || effectiveCli === 'codex-personal';
   const isLocalEngine = effectiveCli === 'banana-local';
   const isOpenRouterEngine = effectiveCli === 'banana';
+  const isZaiEngine = effectiveCli === 'zai';
   const isBananaEngine = isOpenRouterEngine || isLocalEngine;
 
   const chat = useChat({
@@ -298,11 +322,13 @@ export function Hall() {
     model:
       isLocalEngine ? (localModel || undefined)
       : isOpenRouterEngine ? bananaModel.model
+      : isZaiEngine ? zaiModel
       : isCodexEngine ? codexModel
       : isClaudeEngine ? claudeModel
       : undefined,
     effort:
       isCodexEngine ? codexEffort
+      : isZaiEngine ? zaiEffort
       : isClaudeEngine ? claudeEffort
       : isBananaEngine ? bananaEffort
       : undefined,
@@ -586,6 +612,7 @@ export function Hall() {
             modelPicker={isOpenRouterEngine ? bananaModel : null}
             codexPicker={isCodexEngine ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
             claudePicker={isClaudeEngine ? { model: claudeModel, effort: claudeEffort, setModel: changeClaudeModel, setEffort: changeClaudeEffort } : null}
+            zaiPicker={isZaiEngine ? { model: zaiModel, effort: zaiEffort, setModel: changeZaiModel, setEffort: changeZaiEffort } : null}
             bananaEffort={isBananaEngine ? bananaEffort : null}
             onBananaEffortChange={changeBananaEffort}
           />
@@ -675,6 +702,7 @@ function Composer({
   modelPicker,
   codexPicker,
   claudePicker,
+  zaiPicker,
   bananaEffort,
   onBananaEffortChange,
 }: {
@@ -696,6 +724,8 @@ function Composer({
   codexPicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
   /** Non-null only for Claude/assistant — renders the model+effort selector. */
   claudePicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
+  /** Non-null only for Z.ai — renders the GLM model+thinking selector. */
+  zaiPicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
   /** OpenRouter reasoning effort (non-null only for the Banana companion). */
   bananaEffort: string | null;
   onBananaEffortChange: (e: string) => void;
@@ -928,6 +958,19 @@ function Composer({
               onEffortChange={claudePicker.setEffort}
               models={CLAUDE_MODELS}
               efforts={CLAUDE_EFFORTS}
+            />
+          ) : null}
+          {zaiPicker ? (
+            <CodexEnginePicker
+              model={zaiPicker.model}
+              onModelChange={zaiPicker.setModel}
+              effort={zaiPicker.effort}
+              onEffortChange={zaiPicker.setEffort}
+              models={ZAI_MODELS}
+              efforts={ZAI_EFFORTS}
+              modelAriaLabel="GLM model"
+              effortAriaLabel="GLM thinking level"
+              effortLabel="thinking"
             />
           ) : null}
           <button type="button" onClick={onFreshStart} title="Start a fresh thread">

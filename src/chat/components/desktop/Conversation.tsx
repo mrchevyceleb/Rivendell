@@ -27,6 +27,7 @@ type ConversationProps = {
   commands?: CommandEntry[];
   commandPrefix?: string;
   commandSets?: CommandSet[];
+  pathSuggestions?: string[];
   onSend?: (message: string, images?: Array<{ mediaType: string; base64: string }>) => void;
   onSteer?: (message: string, images?: Array<{ mediaType: string; base64: string }>) => void;
   onBack?: () => void;
@@ -73,6 +74,7 @@ export function Conversation({
   commands = [],
   commandPrefix = '/',
   commandSets,
+  pathSuggestions,
   onSend,
   onSteer,
   onBack,
@@ -332,6 +334,7 @@ export function Conversation({
             commands={commands}
             commandPrefix={commandPrefix}
             commandSets={commandSets}
+            pathSuggestions={pathSuggestions}
             busy={status === 'streaming'}
             acceptImages={acceptImages}
           />

@@ -11,6 +11,7 @@ import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnvForAccount } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
+import { adaptImagesForTextModel } from './vision-adapter.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -126,30 +127,71 @@ const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', '
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token
 // redirected and a dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the GLM token
-// authenticates (never Matt's Anthropic subscription). Model id (glm-5.2 /
-// glm-5.1) comes from the picker; the spawn validates it like any claude model.
+// authenticates (never Matt's Anthropic subscription). GLM 5.2's API model id
+// is bare `glm-5.2`; the 1M behavior comes from the model plus Claude Code's
+// auto-compact window set to 1M.
 const ZAI_BASE_URL = process.env.RIVENDELL_ZAI_BASE_URL?.trim() || 'https://api.z.ai/api/anthropic';
-const ZAI_MODEL = process.env.RIVENDELL_ZAI_MODEL?.trim() || 'glm-5.2';
+// GLM 5.2's 1M context REQUIRES the `[1m]` model-id suffix on Z.ai. Bare
+// `glm-5.2` serves the standard 200K variant, which made Claude Code auto-compact
+// far too early (observed ~109K) even with CLAUDE_CODE_AUTO_COMPACT_WINDOW=1M.
+// Per Z.ai's Claude Code docs the id itself must carry `[1m]`.
+const ZAI_GLM52_MODEL = 'glm-5.2[1m]';
+const ZAI_GLM51_MODEL = 'glm-5.1';
+const ZAI_GLM52_COMPACT_WINDOW = '1000000';
+const ZAI_GLM51_COMPACT_WINDOW = '200000';
 const ZAI_CONFIG_DIR = join(homedir(), '.claude-zai');
 
-function zaiEnv(): NodeJS.ProcessEnv {
+// Validate WS/env model/effort against allow-lists; fall back to the config
+// default on anything unexpected. Used both for spawn args and for the recycle
+// comparison in getOrCreateSession (must resolve identically, or an invalid
+// value would loop: spawn falls back but the compare never matches).
+const VALID_CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+// GLM-5.2 exposes two real thinking-effort levels — High and Max. Z.ai's
+// Anthropic endpoint maps Claude Code's effort onto them: low/medium/high -> GLM
+// "high", xhigh/max -> GLM "max". The old {low,medium,high} set stripped `max`,
+// so every GLM turn collapsed to High and Max was unreachable. Accept the full
+// claude range (Z.ai collapses it); the UI offers just High and Max.
+const VALID_ZAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const VALID_ZAI_MODELS = new Set([ZAI_GLM52_MODEL, ZAI_GLM51_MODEL]);
+const VALID_MODEL_ID = /^[A-Za-z0-9._-]+$/;
+function normalizeZaiModelId(model?: string): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed) return undefined;
+  // Canonicalize GLM 5.2 to its 1M id; migrate the legacy bare `glm-5.2`.
+  return trimmed === 'glm-5.2' || trimmed === 'glm-5.2[1m]' ? ZAI_GLM52_MODEL : trimmed;
+}
+const resolveZaiModel = (m?: string, fallback = ZAI_GLM52_MODEL): string => {
+  const model = normalizeZaiModelId(m);
+  if (model && VALID_ZAI_MODELS.has(model)) return model;
+  const fallbackModel = normalizeZaiModelId(fallback);
+  return fallbackModel && VALID_ZAI_MODELS.has(fallbackModel) ? fallbackModel : ZAI_GLM52_MODEL;
+};
+const resolveZaiEffort = (e?: string, fallback = 'high'): string => {
+  const effort = e?.trim();
+  return effort && VALID_ZAI_EFFORTS.has(effort) ? effort : fallback;
+};
+const ZAI_MODEL = resolveZaiModel(process.env.RIVENDELL_ZAI_MODEL);
+const ZAI_EFFORT = resolveZaiEffort(process.env.RIVENDELL_ZAI_EFFORT);
+const zaiCompactWindowForModel = (model: string): string =>
+  resolveZaiModel(model, ZAI_MODEL) === ZAI_GLM51_MODEL ? ZAI_GLM51_COMPACT_WINDOW : ZAI_GLM52_COMPACT_WINDOW;
+
+function zaiEnv(model: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.OPENAI_API_KEY;
   delete env.ANTHROPIC_API_KEY; // force token-based auth to Z.ai, not a metered Anthropic key
   env.CLAUDE_CONFIG_DIR = ZAI_CONFIG_DIR;
   env.ANTHROPIC_BASE_URL = ZAI_BASE_URL;
   env.ANTHROPIC_AUTH_TOKEN = process.env.Z_AI_API_KEY || '';
+  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = zaiCompactWindowForModel(model);
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
 }
-// Validate WS-supplied model/effort against an allow-list; fall back to the
-// config default on anything unexpected. Used both for spawn args and for the
-// recycle comparison in getOrCreateSession (must resolve identically, or an
-// invalid value would loop: spawn falls back but the compare never matches).
-const VALID_CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-const VALID_MODEL_ID = /^[A-Za-z0-9._-]+$/;
-const resolveClaudeModel = (m?: string): string => (m && VALID_MODEL_ID.test(m) ? m : CLAUDE_MODEL);
-const resolveClaudeEffort = (e?: string): string => (e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT);
+const resolveClaudeModel = (cli: CliKind, m?: string): string => {
+  if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
+  return m && VALID_MODEL_ID.test(m) ? m : CLAUDE_MODEL;
+};
+const resolveClaudeEffort = (cli: CliKind, e?: string): string =>
+  cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT) : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
 
 // assistant-mcp is defined in the personal-account config (~/.claude.json) but NOT
 // in the kim-account config (~/.claude/.claude.json) that Elrond (cli='assistant')
@@ -235,8 +277,8 @@ class ClaudeSession {
     this.key = keyOf(cli, cwd, chatId);
     this.pendingResumeId = resumeId;
     this.startedResumeId = resumeId;
-    this.spawnModel = model ?? (cli === 'zai' ? ZAI_MODEL : CLAUDE_MODEL);
-    this.spawnEffort = effort ?? CLAUDE_EFFORT;
+    this.spawnModel = resolveClaudeModel(cli, model);
+    this.spawnEffort = resolveClaudeEffort(cli, effort);
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
 
     // Restore any prior emitted events from disk so a server restart (manual
@@ -297,7 +339,7 @@ class ClaudeSession {
       cwd,
       // Rivendell: the companion (not the directory) picks the account —
       // assistant=Kim (Elrond), claude=personal (Banana → Personal Claude).
-      env: cli === 'zai' ? zaiEnv() : accountEnvForAccount(cliAccount(cli), cwd),
+      env: cli === 'zai' ? zaiEnv(this.spawnModel) : accountEnvForAccount(cliAccount(cli), cwd),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
@@ -370,7 +412,7 @@ class ClaudeSession {
   private turnStartedAt: number | null = null;
 
   /** Send a user message into the running CLI as one turn. */
-  send(text: string, images?: Array<{ mediaType: string; base64: string }>): void {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>): Promise<void> {
     if (this.child.exitCode !== null) {
       this.emit({ type: 'error', message: 'session has exited' });
       return;
@@ -378,7 +420,9 @@ class ClaudeSession {
     this.turnStartedAt = Date.now();
     // Echo the user message into our event log so reconnecting clients can
     // replay the full conversation, not just Sam's responses (claude doesn't
-    // re-emit the user turn in its stream).
+    // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
+    // so the UI still shows Matt's message and thumbnails even when the vision
+    // adapter rewrites the prompt below.
     this.emit({
       type: 'event',
       event: {
@@ -388,16 +432,42 @@ class ClaudeSession {
         ts: Date.now(),
       },
     });
+    // Z.ai GLM models are text-only over the Anthropic-compatible endpoint, so a
+    // native image payload is dropped (or errors). Route pasted images through
+    // the local LM Studio vision model and inject a text description instead.
+    // claude/assistant keep full native vision — they never adapt.
+    let promptText = text;
+    let outImages = images;
+    if (this.cli === 'zai' && images && images.length) {
+      const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
+      if (result.adapted) {
+        promptText = result.text;
+        outImages = undefined;
+        if (result.note) {
+          console.log(`[chat zai] vision adapter: ${result.note}`);
+          this.emit({
+            type: 'event',
+            event: { type: '_vision_adapter', images: images.length, note: result.note, ts: Date.now() },
+          });
+        }
+      }
+      // shutdown()/interrupt during the (up to 90s) adapter await sets disposed
+      // but may leave exitCode null momentarily — don't write to a dying stdin.
+      if (this.disposed || this.child.exitCode !== null) {
+        this.emit({ type: 'error', message: 'session has exited' });
+        return;
+      }
+    }
     // The model occasionally drops the body when a user message is
     // `/<skill> <body>` and invokes the Skill tool with empty args. Wrap any
     // body in `<command-args>` so the args are structurally obvious before the
     // text reaches claude stdin. The UI echo above keeps the original visible.
-    const stdinText = wrapSlashArgs(text);
+    const stdinText = wrapSlashArgs(promptText);
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
-    if (images && images.length) {
-      for (const img of images) {
+    if (outImages && outImages.length) {
+      for (const img of outImages) {
         content.push({
           type: 'image',
           source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
@@ -409,7 +479,7 @@ class ClaudeSession {
       type: 'user',
       message: {
         role: 'user',
-        content: content.length === 1 && content[0].type === 'text' && !images?.length
+        content: content.length === 1 && content[0].type === 'text' && !outImages?.length
           ? stdinText
           : content,
       },
@@ -613,8 +683,8 @@ export async function getOrCreateSession(opts: {
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
-  const wantModel = resolveClaudeModel(opts.model);
-  const wantEffort = resolveClaudeEffort(opts.effort);
+  const wantModel = resolveClaudeModel(opts.cli, opts.model);
+  const wantEffort = resolveClaudeEffort(opts.cli, opts.effort);
 
   while (true) {
     const existing = sessions.get(key);
@@ -765,7 +835,13 @@ export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number
 // Drop the warm process AND the stored session id so the next spawn starts a
 // fresh thread. Picks up any `claude update` you've run since the process
 // last spawned.
-export async function freshStart(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<AnySession> {
+export async function freshStart(opts: {
+  cli: CliKind;
+  repoPath: string;
+  chatId?: string;
+  model?: string;
+  effort?: string;
+}): Promise<AnySession> {
   const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { freshStartCodex } = await import('./codex-runner.ts');
@@ -786,7 +862,7 @@ export async function freshStart(opts: { cli: CliKind; repoPath: string; chatId?
   // Wipe the durable log too — otherwise a client whose cache is empty would
   // pull the old thread back via a full (sinceSeq=0) replay after the reset.
   await clearEventLog(key);
-  return spawnSession(opts.cli, cwd, chatId, null, key);
+  return spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
 }
 
 export function dropSession(cli: CliKind, repoPath: string, chatId = 'main'): void {

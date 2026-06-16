@@ -38,7 +38,7 @@ type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string;
 // `model` is the Banana model id (e.g. `monkey/silverback`). It rides on every
 // send/steer and is forwarded into BananaSession.send. Elrond and Codex ignore it.
 type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string };
-type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string };
+type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string; model?: string; effort?: string };
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
 type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string };
 type ClientMsg = ClientHello | ClientSend | ClientFresh | ClientStop | ClientSteer;
@@ -390,7 +390,20 @@ export async function registerChat(app: express.Express, server: Server): Promis
         busy = true;
         safeSend({ type: 'sessionRebound' });
         safeSend({ type: 'turnStart' });
-        if ('send' in retrySession) (retrySession as any).send(text, images, { model });
+        // send() is async (ClaudeSession runs the vision adapter); this retry is
+        // fire-and-forget, so guard the promise or a rejection escapes the outer
+        // try/catch as an unhandled rejection.
+        if ('send' in retrySession) {
+          void Promise.resolve((retrySession as any).send(text, images, { model })).catch((e: Error) => {
+            // Don't just log: a rejected retry-send would otherwise strand the
+            // client with busy=true and no turnEnd. Clean up the turn like the
+            // synchronous catch below.
+            console.warn(`[chat ws#${wsId}] retry send failed:`, e?.message ?? e);
+            busy = false;
+            safeSend({ type: 'error', message: String(e?.message ?? e) });
+            safeSend({ type: 'turnEnd' });
+          });
+        }
         return true;
       } catch (error) {
         console.warn(`[chat ws#${wsId}] stale resume retry failed:`, (error as Error).message);
@@ -436,7 +449,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
           chatId = normalizeChatId(msg.chatId);
           console.warn(`[chat ws#${wsId}] freshStart from ${peer} cli=${msg.cli} repo=${msg.repo} chatId=${chatId}`);
           detachCurrentSession();
-          const session = await bindSession(freshStart({ cli: msg.cli, repoPath: msg.repo, chatId }));
+          const session = await bindSession(
+            freshStart({ cli: msg.cli, repoPath: msg.repo, chatId, model: msg.model, effort: msg.effort }),
+          );
           cliKind = msg.cli;
           repoPath = msg.repo;
           busy = false;
@@ -500,7 +515,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // with the current pick before an idle turn. getOrCreateSession recycles
           // an IDLE session whose model/effort differ (busy sessions left intact),
           // preserving session_id so the replacement --resumes the conversation.
-          if (!wasBusy && (cliKind === 'claude' || cliKind === 'assistant') && repoPath) {
+          if (!wasBusy && (cliKind === 'claude' || cliKind === 'assistant' || cliKind === 'zai') && repoPath) {
             const reconciled = await getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort, recycleOnMismatch: true });
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
           } else if (!session && cliKind && repoPath) {

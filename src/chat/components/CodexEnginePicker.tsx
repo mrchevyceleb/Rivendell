@@ -22,6 +22,9 @@ export function CodexEnginePicker(props: {
   disabled?: boolean;
   models?: { id: string; label: string }[];
   efforts?: string[];
+  modelAriaLabel?: string;
+  effortAriaLabel?: string;
+  effortLabel?: string;
 }) {
   const models = props.models ?? CODEX_MODELS;
   const efforts = props.efforts ?? CODEX_EFFORTS;
@@ -38,7 +41,7 @@ export function CodexEnginePicker(props: {
   return (
     <>
       <select
-        aria-label="Codex model"
+        aria-label={props.modelAriaLabel ?? 'Codex model'}
         style={base}
         disabled={props.disabled}
         value={props.model}
@@ -49,14 +52,14 @@ export function CodexEnginePicker(props: {
         ))}
       </select>
       <select
-        aria-label="Reasoning effort"
+        aria-label={props.effortAriaLabel ?? 'Reasoning effort'}
         style={base}
         disabled={props.disabled}
         value={props.effort}
         onChange={(e) => props.onEffortChange(e.target.value)}
       >
         {efforts.map((e) => (
-          <option key={e} value={e}>{`effort · ${e}`}</option>
+          <option key={e} value={e}>{`${props.effortLabel ?? 'effort'} · ${e}`}</option>
         ))}
       </select>
     </>

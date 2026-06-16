@@ -97,6 +97,27 @@ const TRAILING_PUNCT = /[\s).,;:!?\]'"`>]+$/;
 
 export function annotateWorkspaceMentions(input: string): string {
   if (!mentionsWorkspace(input)) return input;
+  return annotateMarkdownOutsideCode(input);
+}
+
+export function parseWorkspaceMentionText(value: string): { kind: 'doc' | 'folder'; path: string; display: string } | null {
+  const trimmed = value.trim();
+  const proxyMarkdownLink = trimmed.match(/^\[([^\]]+)]\((rivendell-(?:doc|folder):[^)]+)\)$/);
+  if (proxyMarkdownLink) {
+    const target = parseProxyHref(proxyMarkdownLink[2]);
+    if (!target) return null;
+    return { ...target, display: proxyMarkdownLink[1] || toWindowsDisplay(target.path) };
+  }
+
+  const clean = trimmed.replace(TRAILING_PUNCT, '');
+  const rel = extractRelativePath(normalizeHrefPath(clean));
+  if (rel === null) return null;
+  const path = normalizeWorkspacePath(rel);
+  if (path === null) return null;
+  return { kind: inferKind(path), path, display: toWindowsDisplay(path) };
+}
+
+function annotatePlainWorkspaceMentions(input: string): string {
   return input.replace(MENTION_PATTERN, (match) => {
     const trailingMatch = match.match(TRAILING_PUNCT);
     const trailing = trailingMatch ? trailingMatch[0] : '';
@@ -106,12 +127,85 @@ export function annotateWorkspaceMentions(input: string): string {
     if (rel === null) return match;
 
     const pathParts = splitPathAndTrailingText(rel);
-    const finalRel = pathParts.path;
+    const finalRel = normalizeWorkspacePath(pathParts.path);
+    if (finalRel === null) return match;
     const looksLikeFile = finalRel.length > 0 && /\.[A-Za-z0-9]+$/.test(finalRel.split('/').pop() ?? '');
     const protocol = looksLikeFile ? 'rivendell-doc' : 'rivendell-folder';
     const display = toWindowsDisplay(finalRel);
     return `[${display}](${protocol}:${encodeURIComponent(finalRel)})${pathParts.trailingText}${trailing}`;
   });
+}
+
+function annotateMarkdownOutsideCode(input: string): string {
+  const chunks = input.split(/(\r?\n)/);
+  let output = '';
+  let fence: { char: '`' | '~'; length: number } | null = null;
+
+  for (let i = 0; i < chunks.length; i += 2) {
+    const line = chunks[i] ?? '';
+    const newline = chunks[i + 1] ?? '';
+
+    if (fence) {
+      output += line + newline;
+      const close = line.match(/^(?: {0,3})(`{3,}|~{3,})\s*$/);
+      if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+      continue;
+    }
+
+    const open = line.match(/^(?: {0,3})(`{3,}|~{3,})/);
+    if (open) {
+      fence = { char: open[1][0] as '`' | '~', length: open[1].length };
+      output += line + newline;
+      continue;
+    }
+
+    output += annotateInlineOutsideCodeSpans(line) + newline;
+  }
+
+  return output;
+}
+
+function annotateInlineOutsideCodeSpans(line: string): string {
+  let output = '';
+  let cursor = 0;
+
+  while (cursor < line.length) {
+    const start = line.indexOf('`', cursor);
+    if (start < 0) {
+      output += annotatePlainWorkspaceMentions(line.slice(cursor));
+      break;
+    }
+
+    let ticksEnd = start;
+    while (line[ticksEnd] === '`') ticksEnd += 1;
+    const tickCount = ticksEnd - start;
+    const close = findClosingTickRun(line, ticksEnd, tickCount);
+
+    if (close < 0) {
+      output += annotatePlainWorkspaceMentions(line.slice(cursor));
+      break;
+    }
+
+    output += annotatePlainWorkspaceMentions(line.slice(cursor, start));
+    output += line.slice(start, close + tickCount);
+    cursor = close + tickCount;
+  }
+
+  return output;
+}
+
+function findClosingTickRun(line: string, from: number, tickCount: number): number {
+  const needle = '`'.repeat(tickCount);
+  let pos = line.indexOf(needle, from);
+
+  while (pos >= 0) {
+    const before = line[pos - 1];
+    const after = line[pos + tickCount];
+    if (before !== '`' && after !== '`') return pos;
+    pos = line.indexOf(needle, pos + 1);
+  }
+
+  return -1;
 }
 
 function extractRelativePath(value: string): string | null {
@@ -137,10 +231,20 @@ function toWindowsDisplay(rel: string): string {
 
 export function parseProxyHref(href: string | undefined): { kind: 'doc' | 'folder'; path: string } | null {
   if (!href) return null;
-  if (href.startsWith('rivendell-doc:')) return { kind: 'doc', path: decodeProxyPath(href.slice('rivendell-doc:'.length)) };
-  if (href.startsWith('rivendell-folder:')) return { kind: 'folder', path: decodeProxyPath(href.slice('rivendell-folder:'.length)) };
+  if (href.startsWith('rivendell-doc:')) {
+    const path = normalizeWorkspacePath(decodeProxyPath(href.slice('rivendell-doc:'.length)));
+    return path === null ? null : { kind: 'doc', path };
+  }
+  if (href.startsWith('rivendell-folder:')) {
+    const path = normalizeWorkspacePath(decodeProxyPath(href.slice('rivendell-folder:'.length)));
+    return path === null ? null : { kind: 'folder', path };
+  }
   const rel = extractRelativePath(normalizeHrefPath(href));
-  if (rel !== null) return { kind: inferKind(rel), path: rel };
+  if (rel !== null) {
+    const path = normalizeWorkspacePath(rel);
+    if (path === null) return null;
+    return { kind: inferKind(path), path };
+  }
   return null;
 }
 
@@ -174,6 +278,14 @@ function normalizeHrefPath(href: string): string {
   const decoded = decodeProxyPath(href);
   if (decoded.startsWith('file://')) return decoded.slice('file://'.length);
   return decoded;
+}
+
+export function normalizeWorkspacePath(path: string): string | null {
+  const extracted = extractRelativePath(path);
+  const candidate = (extracted ?? path).replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/g, '');
+  const parts = candidate.split('/').filter(Boolean);
+  if (parts.some((part) => part === '.' || part === '..')) return null;
+  return parts.join('/');
 }
 
 function inferKind(rel: string): 'doc' | 'folder' {
