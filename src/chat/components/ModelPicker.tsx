@@ -1,11 +1,12 @@
 import { Check, ChevronDown, Cpu, Search, Star } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { MONKEY_TIERS, useBananaModel } from '../hooks/useBananaModel';
+import { useBananaModel } from '../hooks/useBananaModel';
 
-// Model selector for the Banana companion. Renders a trigger button + a
-// dropdown with the monkey-tier quick-picks and a searchable OpenRouter list.
-// The picked model id is owned by useBananaModel (localStorage-backed); this
-// component only surfaces it.
+// Model selector for the Banana companions (OpenRouter / Fireworks). Renders a
+// trigger button + a dropdown with the provider's quick-pick tiers and a
+// searchable catalogue. The picked model id is owned by useBananaModel
+// (localStorage-backed, per provider); this component only surfaces it and is
+// provider-agnostic — all provider specifics ride on the passed-in state.
 
 type ModelPickerState = ReturnType<typeof useBananaModel>;
 
@@ -13,13 +14,17 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
   const {
     model,
     setModel,
-    openRouter,
+    models,
     favorites,
     toggleFavorite,
     loading,
     error,
     loadOpenRouter,
     triggerLabel,
+    tiers,
+    tiersHeading,
+    listHeading,
+    searchPlaceholder,
   } = state;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -51,26 +56,26 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
     });
   };
 
-  // Filter the OpenRouter list as the user types — match id or label.
+  // Filter the catalogue as the user types — match id or label.
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return openRouter.slice(0, 60);
-    return openRouter
+    if (!q) return models.slice(0, 60);
+    return models
       .filter((m) => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))
       .slice(0, 60);
-  }, [query, openRouter]);
+  }, [query, models]);
 
   // Resolve favorited ids to full model options. Favorites whose model is not
-  // in the OpenRouter list yet (e.g. catalogue still loading) are kept, falling
-  // back to a bare-id label so the row still renders and stays selectable.
+  // in the catalogue yet (e.g. still loading) are kept, falling back to a
+  // bare-id label so the row still renders and stays selectable.
   const favoriteModels = useMemo(() => {
     return favorites.map((id) => {
-      const match = openRouter.find((m) => m.id === id);
+      const match = models.find((m) => m.id === id);
       if (match) return match;
       const slash = id.indexOf('/');
       return { id, label: slash >= 0 ? id.slice(slash + 1) : id };
     });
-  }, [favorites, openRouter]);
+  }, [favorites, models]);
 
   const pick = (id: string) => {
     setModel(id);
@@ -102,25 +107,27 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
 
       {open ? (
         <div className="model-picker-menu" role="listbox" aria-label="Choose a Banana model">
-          <div className="model-picker-section">
-            <p className="model-picker-heading">Monkey tiers</p>
-            <div className="model-picker-tiers">
-              {MONKEY_TIERS.map((tier) => (
-                <button
-                  key={tier.id}
-                  type="button"
-                  role="option"
-                  aria-selected={model === tier.id}
-                  className={`model-picker-tier ${model === tier.id ? 'is-active' : ''}`}
-                  onClick={() => pick(tier.id)}
-                >
-                  <span className="model-picker-tier-label">{tier.label}</span>
-                  {tier.detail ? <span className="model-picker-tier-detail">{tier.detail}</span> : null}
-                  {model === tier.id ? <Check size={13} className="model-picker-tier-check" /> : null}
-                </button>
-              ))}
+          {tiers.length > 0 ? (
+            <div className="model-picker-section">
+              <p className="model-picker-heading">{tiersHeading}</p>
+              <div className="model-picker-tiers">
+                {tiers.map((tier) => (
+                  <button
+                    key={tier.id}
+                    type="button"
+                    role="option"
+                    aria-selected={model === tier.id}
+                    className={`model-picker-tier ${model === tier.id ? 'is-active' : ''}`}
+                    onClick={() => pick(tier.id)}
+                  >
+                    <span className="model-picker-tier-label">{tier.label}</span>
+                    {tier.detail ? <span className="model-picker-tier-detail">{tier.detail}</span> : null}
+                    {model === tier.id ? <Check size={13} className="model-picker-tier-check" /> : null}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          ) : null}
 
           {favoriteModels.length > 0 ? (
             <div className="model-picker-section">
@@ -162,14 +169,14 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
           ) : null}
 
           <div className="model-picker-section">
-            <p className="model-picker-heading">OpenRouter</p>
+            <p className="model-picker-heading">{listHeading}</p>
             <div className="model-picker-search">
               <Search size={13} />
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search OpenRouter models..."
+                placeholder={searchPlaceholder}
                 autoFocus
               />
             </div>

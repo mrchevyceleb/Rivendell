@@ -67,6 +67,22 @@ export function CompanionControls({ picker }: { picker: CompanionPicker }) {
 
       {picker.isOpenRouter && <ModelPicker state={picker.bananaModel} />}
 
+      {picker.isFireworks && (
+        <>
+          <ModelPicker state={picker.fireworksModel} />
+          <select
+            aria-label="Reasoning effort"
+            style={selectStyle}
+            value={picker.bananaEffort}
+            onChange={(e) => picker.setBananaEffort(e.target.value)}
+          >
+            {['low', 'medium', 'high'].map((e) => (
+              <option key={e} value={e}>{`effort · ${e}`}</option>
+            ))}
+          </select>
+        </>
+      )}
+
       {picker.isLocal && <LocalModelPicker onActiveChange={(m) => picker.setLocalModel(m ?? '')} />}
 
       {picker.isZai && (

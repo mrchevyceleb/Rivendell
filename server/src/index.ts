@@ -22,6 +22,7 @@ import { summaryRouter } from './routes/summary.ts';
 import { artifactsRouter } from './routes/artifacts.ts';
 import { mcpRouter } from './routes/mcp.ts';
 import { filesRouter } from './routes/files.ts';
+import { internalRouter } from './routes/internal.ts';
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -51,6 +52,8 @@ app.use('/api/scribe', scribeRouter);
 app.use('/api/artifacts', artifactsRouter);
 app.use('/api/mcp', mcpRouter);
 app.use('/api/files', filesRouter);
+// Localhost-only headless runner (cron agentic loop). Gated by MCP_AUTH_TOKEN.
+app.use('/internal', internalRouter);
 
 const server = createServer(app);
 const stopChat = await registerChat(app, server);

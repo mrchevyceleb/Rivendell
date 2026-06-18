@@ -25,7 +25,7 @@ const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 // 4.6) is 1M; GLM 5.2 is 1M; banana/OpenRouter defaults to 200K.
 function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (cli === 'codex' || cli === 'codex-personal') return CODEX_WINDOW_TOKENS;
-  if (cli === 'banana' || cli === 'banana-local') return BANANA_WINDOW_TOKENS;
+  if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
   return windowForClaudeModel(model); // Claude/Z.ai model ids carry the real window.
 }
 

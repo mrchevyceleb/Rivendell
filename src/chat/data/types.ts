@@ -12,6 +12,7 @@ export type CompanionId =
   | 'banana'
   | 'codex-personal'
   | 'banana-local'
+  | 'banana-fireworks'
   | 'zai';
 
 // A live session reported by /api/live — used to mark "running now" entries

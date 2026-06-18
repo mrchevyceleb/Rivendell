@@ -22,7 +22,7 @@ import type { ChatBlock, ChatImagePreview, CommandEntry, CompanionId, LiveSessio
 import { commandText, getCommandSuggestionMulti } from '../chat/utils/commandAutocomplete';
 import type { ContextUsage } from '../chat/hooks/useChat';
 import { useChat } from '../chat/hooks/useChat';
-import { useBananaModel } from '../chat/hooks/useBananaModel';
+import { useBananaModel, useFireworksModel } from '../chat/hooks/useBananaModel';
 import {
   normalizeZaiEffort,
   normalizeZaiModel,
@@ -72,6 +72,7 @@ const companionLabel: Record<CompanionId, string> = {
   banana: 'Banana',
   'codex-personal': 'Personal Codex',
   'banana-local': 'Local LLM',
+  'banana-fireworks': 'Fireworks',
   zai: 'Z.ai GLM',
 };
 
@@ -82,6 +83,7 @@ const companionTitle: Record<CompanionId, string> = {
   banana: 'Banana Code emissary',
   'codex-personal': 'personal-account Codex',
   'banana-local': 'local model on the Spark',
+  'banana-fireworks': 'Fireworks emissary',
   zai: 'GLM via Z.ai coding plan',
 };
 
@@ -92,14 +94,16 @@ const companionSub: Record<CompanionId, string> = {
   banana: 'OpenRouter via Banana Code',
   'codex-personal': 'personal-account Codex',
   'banana-local': 'local LM Studio model, direct',
+  'banana-fireworks': 'Fireworks models, direct',
   zai: 'GLM 5.2 1M / 5.1 via Z.ai',
 };
 
 // Banana is an engine multiplexer: the picked engine selects the wire cli
 // (and thus the account / provider) the session actually runs on.
-type BananaEngine = 'personal-claude' | 'personal-codex' | 'openrouter' | 'local' | 'zai';
+type BananaEngine = 'personal-claude' | 'personal-codex' | 'openrouter' | 'fireworks' | 'local' | 'zai';
 const BANANA_ENGINES: { id: BananaEngine; label: string }[] = [
   { id: 'openrouter', label: 'OpenRouter' },
+  { id: 'fireworks', label: 'Fireworks' },
   { id: 'zai', label: 'Z.ai GLM' },
   { id: 'personal-claude', label: 'Personal Claude' },
   { id: 'personal-codex', label: 'Personal Codex' },
@@ -113,6 +117,8 @@ function bananaEngineToCli(engine: string): CompanionId {
       return 'codex-personal';
     case 'local':
       return 'banana-local';
+    case 'fireworks':
+      return 'banana-fireworks';
     case 'zai':
       return 'zai';
     default:
@@ -236,6 +242,7 @@ export function Hall() {
   // Banana model picker — only the Banana companion threads a model id into
   // its sends. Elrond and Codex ignore the field server-side.
   const bananaModel = useBananaModel();
+  const fireworksModel = useFireworksModel();
   const [codexModel, setCodexModel] = useState<string>(
     () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:codex-model')) || 'gpt-5.5',
   );
@@ -309,8 +316,9 @@ export function Hall() {
   const isCodexEngine = effectiveCli === 'codex' || effectiveCli === 'codex-personal';
   const isLocalEngine = effectiveCli === 'banana-local';
   const isOpenRouterEngine = effectiveCli === 'banana';
+  const isFireworksEngine = effectiveCli === 'banana-fireworks';
   const isZaiEngine = effectiveCli === 'zai';
-  const isBananaEngine = isOpenRouterEngine || isLocalEngine;
+  const isBananaEngine = isOpenRouterEngine || isLocalEngine || isFireworksEngine;
 
   const chat = useChat({
     repo,
@@ -322,6 +330,7 @@ export function Hall() {
     model:
       isLocalEngine ? (localModel || undefined)
       : isOpenRouterEngine ? bananaModel.model
+      : isFireworksEngine ? fireworksModel.model
       : isZaiEngine ? zaiModel
       : isCodexEngine ? codexModel
       : isClaudeEngine ? claudeModel
@@ -609,7 +618,7 @@ export function Hall() {
             codexCommands={commands.codex}
             agentName={companionLabel[companion]}
             usage={chat.usage}
-            modelPicker={isOpenRouterEngine ? bananaModel : null}
+            modelPicker={isOpenRouterEngine ? bananaModel : isFireworksEngine ? fireworksModel : null}
             codexPicker={isCodexEngine ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
             claudePicker={isClaudeEngine ? { model: claudeModel, effort: claudeEffort, setModel: changeClaudeModel, setEffort: changeClaudeEffort } : null}
             zaiPicker={isZaiEngine ? { model: zaiModel, effort: zaiEffort, setModel: changeZaiModel, setEffort: changeZaiEffort } : null}
@@ -1400,7 +1409,7 @@ async function interruptLiveSession(session: LiveSession, repoPath: string, chat
 function clearStoredTab(tab: ChatTab, repo: Repo | undefined): void {
   if (!repo) return;
   const suffix = tab.id === MAIN_CHAT_ID ? '' : `|${tab.id}`;
-  const allClis: CompanionId[] = ['assistant', 'claude', 'codex', 'codex-personal', 'banana', 'banana-local'];
+  const allClis: CompanionId[] = ['assistant', 'claude', 'codex', 'codex-personal', 'banana', 'banana-local', 'banana-fireworks', 'zai'];
   for (const cli of allClis) {
     const key = `rivendell:chat-blocks:${cli}|${repo.path}${suffix}`;
     localStorage.removeItem(key);

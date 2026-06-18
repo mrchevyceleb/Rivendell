@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-// Model picker state for the Banana companion. Quick-picks are the monkey
-// tiers; the searchable list is every OpenRouter model. The last pick
-// is persisted in localStorage and reused as the default.
+// Model picker state for the Banana companions. One hook drives BOTH the
+// OpenRouter and Fireworks engines — pass the matching provider config. The
+// quick-pick "tiers" + searchable catalogue are provider-specific; the last
+// pick is persisted in localStorage (per provider) and reused as the default.
 
 export type BananaModelOption = {
-  /** The id sent to the runner, e.g. `monkey/silverback` or
-   *  `openrouter/anthropic/claude-3.7-sonnet`. */
+  /** The id sent to the runner, e.g. `openrouter/anthropic/claude-sonnet-4.6`
+   *  or `fireworks/accounts/fireworks/models/glm-5p2`. */
   id: string;
   /** Human-friendly label for the picker UI. */
   label: string;
@@ -14,37 +15,88 @@ export type BananaModelOption = {
   detail?: string;
 };
 
-// The monkey tiers, biggest to smallest. These are always offered as
-// quick-picks regardless of network state.
-export const MONKEY_TIERS: BananaModelOption[] = [
-  { id: 'monkey/silverback', label: 'Silverback', detail: 'top tier' },
-  { id: 'monkey/mandrill', label: 'Mandrill', detail: 'balanced' },
-  { id: 'monkey/tamarin', label: 'Tamarin', detail: 'lightweight' },
+// A provider config wires the hook to one engine's catalogue endpoint, id
+// prefix, storage keys, quick-pick tiers, and default.
+export type ModelProviderConfig = {
+  /** API route returning `{ data: [{ id, name, context_length }] }` (bare ids). */
+  endpoint: string;
+  /** Provider prefix prepended to bare catalogue ids (e.g. `openrouter`). */
+  idPrefix: string;
+  storageKey: string;
+  favoritesKey: string;
+  /** Fallback/default model id (already prefixed). */
+  defaultModel: string;
+  /** Always-offered quick-picks (already prefixed). May be empty. */
+  tiers: BananaModelOption[];
+  tiersHeading: string;
+  listHeading: string;
+  searchPlaceholder: string;
+};
+
+// OpenRouter quick-picks — real model ids routed DIRECT through OpenRouter
+// (the old `monkey/*` tiers died with the monkey-models proxy). Verified
+// present in the live OpenRouter catalogue.
+const OPENROUTER_TIERS: BananaModelOption[] = [
+  { id: 'openrouter/anthropic/claude-opus-4.6', label: 'Claude Opus 4.6', detail: 'top tier' },
+  { id: 'openrouter/anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6', detail: 'balanced' },
+  { id: 'openrouter/openai/gpt-5', label: 'GPT-5', detail: 'OpenAI' },
+  { id: 'openrouter/z-ai/glm-5.2', label: 'GLM 5.2', detail: 'long context' },
 ];
 
-export const DEFAULT_BANANA_MODEL = 'monkey/silverback';
-const STORAGE_KEY = 'rivendell:banana-model';
-const FAVORITES_KEY = 'banana-model-favorites';
-const OPENROUTER_URL = '/api/banana/models';
-const OPENROUTER_CACHE_TTL_MS = 60 * 1000;
+export const OPENROUTER_PROVIDER: ModelProviderConfig = {
+  endpoint: '/api/banana/models',
+  idPrefix: 'openrouter',
+  storageKey: 'rivendell:banana-model',
+  favoritesKey: 'banana-model-favorites',
+  defaultModel: 'openrouter/anthropic/claude-sonnet-4.6',
+  tiers: OPENROUTER_TIERS,
+  tiersHeading: 'Quick picks',
+  listHeading: 'OpenRouter',
+  searchPlaceholder: 'Search OpenRouter models...',
+};
 
-// Cache briefly so long-lived Rivendell tabs notice OpenRouter adds, removals,
-// and metadata changes without needing a browser refresh.
-let openRouterCache: BananaModelOption[] | null = null;
-let openRouterCacheAt = 0;
-let openRouterInflight: Promise<BananaModelOption[]> | null = null;
+export const FIREWORKS_PROVIDER: ModelProviderConfig = {
+  endpoint: '/api/fireworks/models',
+  idPrefix: 'fireworks',
+  storageKey: 'rivendell:fireworks-model',
+  favoritesKey: 'fireworks-model-favorites',
+  defaultModel: 'fireworks/accounts/fireworks/models/glm-5p2',
+  tiers: [],
+  tiersHeading: '',
+  listHeading: 'Fireworks',
+  searchPlaceholder: 'Search Fireworks models...',
+};
+
+// Back-compat: some callers still import MONKEY_TIERS / DEFAULT_BANANA_MODEL.
+export const MONKEY_TIERS = OPENROUTER_TIERS;
+export const DEFAULT_BANANA_MODEL = OPENROUTER_PROVIDER.defaultModel;
+
+const CACHE_TTL_MS = 60 * 1000;
+
+// Cache briefly, PER endpoint, so long-lived Rivendell tabs notice catalogue
+// adds, removals, and metadata changes without a browser refresh.
+type CacheEntry = { models: BananaModelOption[] | null; at: number; inflight: Promise<BananaModelOption[]> | null };
+const caches = new Map<string, CacheEntry>();
+function cacheFor(endpoint: string): CacheEntry {
+  let entry = caches.get(endpoint);
+  if (!entry) {
+    entry = { models: null, at: 0, inflight: null };
+    caches.set(endpoint, entry);
+  }
+  return entry;
+}
 
 type RawModel = { id?: unknown; name?: unknown; context_length?: unknown };
 
-async function fetchOpenRouterModels(): Promise<BananaModelOption[]> {
-  const cached = openRouterCache;
-  const fresh = cached !== null && Date.now() - openRouterCacheAt < OPENROUTER_CACHE_TTL_MS;
-  if (fresh) return cached;
-  if (openRouterInflight) return openRouterInflight;
-  openRouterInflight = (async () => {
+async function fetchModels(config: ModelProviderConfig): Promise<BananaModelOption[]> {
+  const cache = cacheFor(config.endpoint);
+  const fresh = cache.models !== null && Date.now() - cache.at < CACHE_TTL_MS;
+  if (fresh) return cache.models as BananaModelOption[];
+  if (cache.inflight) return cache.inflight;
+  cache.inflight = (async () => {
     try {
-      const res = await fetch(OPENROUTER_URL);
-      if (!res.ok) throw new Error(`OpenRouter responded ${res.status}`);
+      const res = await fetch(config.endpoint);
+      if (!res.ok) throw new Error(`${config.listHeading} responded ${res.status}`);
       const body = (await res.json()) as { data?: RawModel[] };
       const list = Array.isArray(body.data) ? body.data : [];
       const mapped: BananaModelOption[] = list
@@ -52,26 +104,26 @@ async function fetchOpenRouterModels(): Promise<BananaModelOption[]> {
         .map((m) => {
           const ctx = typeof m.context_length === 'number' ? m.context_length : undefined;
           return {
-            id: `openrouter/${m.id}`,
+            id: `${config.idPrefix}/${m.id}`,
             label: typeof m.name === 'string' && m.name ? m.name : m.id,
             detail: ctx ? `${m.id} · ${formatContext(ctx)} ctx` : m.id,
           };
         })
         .sort((a, b) => a.label.localeCompare(b.label));
       if (mapped.length > 0) {
-        openRouterCache = mapped;
-        openRouterCacheAt = Date.now();
+        cache.models = mapped;
+        cache.at = Date.now();
       }
-      return mapped.length > 0 ? mapped : openRouterCache ?? [];
+      return mapped.length > 0 ? mapped : cache.models ?? [];
     } catch (error) {
-      if (openRouterCache) return openRouterCache;
+      if (cache.models) return cache.models;
       throw error;
     }
   })();
   try {
-    return await openRouterInflight;
+    return await cache.inflight;
   } finally {
-    openRouterInflight = null;
+    cache.inflight = null;
   }
 }
 
@@ -81,33 +133,32 @@ function formatContext(n: number): string {
   return String(n);
 }
 
-function readStoredModel(): string {
-  if (typeof window === 'undefined') return DEFAULT_BANANA_MODEL;
+function readStoredModel(config: ModelProviderConfig): string {
+  if (typeof window === 'undefined') return config.defaultModel;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    const stored = raw?.trim();
+    const stored = localStorage.getItem(config.storageKey)?.trim();
     if (stored) {
-      // A `monkey/<tier>` value that is no longer an offered tier (e.g. the
-      // retired `monkey/gibbon`) would dead-end at the runner — the proxy has
-      // no such model. Migrate any stale monkey tier to the default. Non-monkey
-      // ids (every `openrouter/...` pick) pass through untouched.
-      if (stored.startsWith('monkey/') && !MONKEY_TIERS.some((t) => t.id === stored)) {
+      // The stored id must belong to THIS provider. A stale id from another
+      // provider — or a retired `monkey/*` tier whose proxy is gone — would
+      // dead-end at the runner, so migrate it to the default.
+      const prefix = stored.split('/')[0];
+      if (prefix !== config.idPrefix) {
         try {
-          localStorage.setItem(STORAGE_KEY, DEFAULT_BANANA_MODEL);
+          localStorage.setItem(config.storageKey, config.defaultModel);
         } catch {}
-        return DEFAULT_BANANA_MODEL;
+        return config.defaultModel;
       }
       return stored;
     }
   } catch {}
-  return DEFAULT_BANANA_MODEL;
+  return config.defaultModel;
 }
 
-/** Read the persisted set of favorited OpenRouter model ids. */
-function readStoredFavorites(): string[] {
+/** Read the persisted set of favorited model ids for a provider. */
+function readStoredFavorites(config: ModelProviderConfig): string[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = localStorage.getItem(FAVORITES_KEY);
+    const raw = localStorage.getItem(config.favoritesKey);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {
@@ -119,81 +170,100 @@ function readStoredFavorites(): string[] {
 
 /** Resolve a model id to a friendly label for the trigger button. Falls back
  *  to the bare id when the model is not one of the known options. */
-export function labelForModel(id: string, openRouter: BananaModelOption[]): string {
-  const monkey = MONKEY_TIERS.find((m) => m.id === id);
-  if (monkey) return monkey.label;
-  const or = openRouter.find((m) => m.id === id);
-  if (or) return or.label;
-  // openrouter/<vendor>/<model> -> show the trailing model name.
+export function labelForModel(id: string, options: BananaModelOption[]): string {
+  const match = options.find((m) => m.id === id);
+  if (match) return match.label;
+  // <provider>/<vendor>/<model> -> show the trailing model name.
   const slash = id.indexOf('/');
   return slash >= 0 ? id.slice(slash + 1) : id;
 }
 
-export function useBananaModel() {
-  const [model, setModelState] = useState<string>(() => readStoredModel());
-  const [openRouter, setOpenRouter] = useState<BananaModelOption[]>(() => openRouterCache ?? []);
-  const [favorites, setFavorites] = useState<string[]>(() => readStoredFavorites());
+export function useBananaModel(config: ModelProviderConfig = OPENROUTER_PROVIDER) {
+  const [model, setModelState] = useState<string>(() => readStoredModel(config));
+  const [models, setModels] = useState<BananaModelOption[]>(() => cacheFor(config.endpoint).models ?? []);
+  const [favorites, setFavorites] = useState<string[]>(() => readStoredFavorites(config));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const setModel = useCallback((next: string) => {
-    setModelState(next);
-    try {
-      localStorage.setItem(STORAGE_KEY, next);
-    } catch {}
-  }, []);
-
-  // Toggle an OpenRouter model id in/out of the favorites set and persist it.
-  const toggleFavorite = useCallback((id: string) => {
-    setFavorites((current) => {
-      const next = current.includes(id)
-        ? current.filter((favId) => favId !== id)
-        : [...current, id];
+  const setModel = useCallback(
+    (next: string) => {
+      setModelState(next);
       try {
-        localStorage.setItem(FAVORITES_KEY, JSON.stringify(next));
+        localStorage.setItem(config.storageKey, next);
       } catch {}
-      return next;
-    });
-  }, []);
+    },
+    [config.storageKey],
+  );
 
-  // Lazily load the OpenRouter list — called when the picker opens so we do
-  // not pay the network cost unless the user actually wants to browse.
+  // Toggle a model id in/out of the favorites set and persist it.
+  const toggleFavorite = useCallback(
+    (id: string) => {
+      setFavorites((current) => {
+        const next = current.includes(id)
+          ? current.filter((favId) => favId !== id)
+          : [...current, id];
+        try {
+          localStorage.setItem(config.favoritesKey, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    },
+    [config.favoritesKey],
+  );
+
+  // Lazily load the catalogue — called when the picker opens so we don't pay
+  // the network cost unless the user actually wants to browse.
   const loadOpenRouter = useCallback(() => {
-    const cached = openRouterCache;
-    const fresh = cached !== null && Date.now() - openRouterCacheAt < OPENROUTER_CACHE_TTL_MS;
+    const cache = cacheFor(config.endpoint);
+    const fresh = cache.models !== null && Date.now() - cache.at < CACHE_TTL_MS;
     if (fresh) {
-      setOpenRouter(cached);
+      setModels(cache.models as BananaModelOption[]);
       return;
     }
-    if (openRouterCache) setOpenRouter(openRouterCache);
+    if (cache.models) setModels(cache.models);
     setLoading(true);
     setError(null);
-    fetchOpenRouterModels()
+    fetchModels(config)
       .then((list) => {
-        setOpenRouter(list);
+        setModels(list);
         setLoading(false);
       })
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : 'failed to load OpenRouter models');
+        setError(err instanceof Error ? err.message : `failed to load ${config.listHeading} models`);
         setLoading(false);
       });
-  }, []);
+  }, [config]);
 
   useEffect(() => {
-    if (openRouterCache) setOpenRouter(openRouterCache);
-  }, []);
+    const cache = cacheFor(config.endpoint);
+    if (cache.models) setModels(cache.models);
+  }, [config.endpoint]);
 
-  const triggerLabel = useMemo(() => labelForModel(model, openRouter), [model, openRouter]);
+  const triggerLabel = useMemo(
+    () => labelForModel(model, [...config.tiers, ...models]),
+    [model, models, config.tiers],
+  );
 
   return {
     model,
     setModel,
-    openRouter,
+    // `openRouter` kept as an alias of `models` for any legacy reader.
+    models,
+    openRouter: models,
     favorites,
     toggleFavorite,
     loading,
     error,
     loadOpenRouter,
     triggerLabel,
+    tiers: config.tiers,
+    tiersHeading: config.tiersHeading,
+    listHeading: config.listHeading,
+    searchPlaceholder: config.searchPlaceholder,
   };
+}
+
+/** Fireworks-engine model picker state. */
+export function useFireworksModel() {
+  return useBananaModel(FIREWORKS_PROVIDER);
 }

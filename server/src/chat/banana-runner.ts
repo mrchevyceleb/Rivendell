@@ -579,43 +579,60 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void
   }
 }
 
-// ── OpenRouter via monkey-models ─────────────────────────────────────────
+// ── OpenRouter (direct) + Fireworks ──────────────────────────────────────
 //
 // Banana's built-in `openrouter` provider only autoloads when it has an API
 // key. With no key it registers ZERO models, so any OpenRouter pick fails
-// with "model not found". The fix: override the `openrouter` provider's
-// baseURL + apiKey to point at the monkey-models proxy, which forwards any
-// model id straight to OpenRouter (no bundled model list) and supplies the
-// real OpenRouter key. We hand `banana serve` the override inline via the
-// BANANA_CONFIG_CONTENT env var.
+// with "model not found".
 //
-// The monkey base URL + default token are copied verbatim from banana-cli-2
-// packages/opencode/src/provider/provider.ts (MONKEY_BASE_URL /
-// MONKEY_DEFAULT_TOKEN), so the proxy key here matches the one Banana's
-// own `monkey` provider uses.
-const MONKEY_BASE_URL = 'https://monkey-models-production.up.railway.app/v1';
-const MONKEY_DEFAULT_TOKEN =
-  '086399eca157e4ad2fc0fecfb254da1118d226ac53371757267388b23bd10fa6';
+// History: this used to route through a `monkey-models` Railway proxy that
+// supplied a shared OpenRouter key. That proxy was deleted (every call now
+// 404s "Application not found"), which broke OpenRouter entirely AND killed
+// the `monkey/*` tiers (Silverback/Mandrill/Tamarin) that pointed at the same
+// dead app. We now go DIRECT to OpenRouter with Matt's own OPENROUTER_API_KEY,
+// overriding the `openrouter` provider's baseURL + apiKey inline via the
+// BANANA_CONFIG_CONTENT env var. Any model id is forwarded straight to
+// OpenRouter, so picks past the registered cap still route.
+const OPENROUTER_BASE_URL =
+  process.env.RIVENDELL_OPENROUTER_BASE_URL?.trim() || 'https://openrouter.ai/api/v1';
 
-/** Resolve the monkey-models auth token the SAME way Banana's own provider
- *  does (packages/opencode/src/provider/provider.ts):
- *  BANANA_MONKEY_TOKEN, then MONKEY_MODELS_TOKEN, then the bundled default.
- *  Missing the MONKEY_MODELS_TOKEN fallback would send a stale token (403)
- *  whenever a deploy rotates the proxy key via that var. */
-function resolveMonkeyToken(): string {
-  return (
-    process.env.BANANA_MONKEY_TOKEN?.trim() ||
-    process.env.MONKEY_MODELS_TOKEN?.trim() ||
-    MONKEY_DEFAULT_TOKEN
-  );
+/** Real OpenRouter API key (Doppler: OPENROUTER_API_KEY). Empty if unset —
+ *  the openrouter provider then registers no models and picks fail cleanly
+ *  instead of hammering a dead proxy. */
+function resolveOpenRouterKey(): string {
+  return process.env.OPENROUTER_API_KEY?.trim() || '';
 }
 
-const MONKEY_MODEL_CATALOG_TTL_MS = 60 * 1000;
-const MONKEY_MODEL_CATALOG_TIMEOUT_MS = 10_000;
+/** Default OpenRouter model used when the `banana` engine is sent an empty or
+ *  non-OpenRouter id (e.g. a stale `monkey/*` tier). Keeps a turn from silently
+ *  falling back to Banana's built-in (now dead) monkey default. */
+const OPENROUTER_DEFAULT_MODEL = 'openrouter/anthropic/claude-sonnet-4.6';
 
-let monkeyModelCatalogCache: unknown[] | null = null;
-let monkeyModelCatalogAt = 0;
-let monkeyModelCatalogInflight: Promise<unknown[]> | null = null;
+// ── Fireworks (direct, PERSONAL key) ─────────────────────────────────────
+// Fireworks AI exposes an OpenAI-compatible API. We register a custom
+// `fireworks` provider (baseURL + apiKey + auto-discovered models) so the
+// Fireworks engine routes `fireworks/<account-model-id>` picks directly. Auth
+// MUST use FIREWORKS_PERSONAL_API_KEY (Matt's personal account), never the
+// other FIREWORKS_API_KEY in the assistant Doppler project.
+const FIREWORKS_BASE_URL =
+  process.env.RIVENDELL_FIREWORKS_BASE_URL?.trim() || 'https://api.fireworks.ai/inference/v1';
+
+function resolveFireworksKey(): string {
+  return process.env.FIREWORKS_PERSONAL_API_KEY?.trim() || '';
+}
+
+/** Default Fireworks model when the `banana-fireworks` engine is sent an empty
+ *  or non-Fireworks id. GLM 5.2 (1M ctx) is the strongest in the current
+ *  serverless set; if it isn't available the request errors locally rather
+ *  than routing elsewhere. */
+const FIREWORKS_DEFAULT_MODEL = 'fireworks/accounts/fireworks/models/glm-5p2';
+
+const MODEL_CATALOG_TTL_MS = 60 * 1000;
+const MODEL_CATALOG_TIMEOUT_MS = 10_000;
+
+type CatalogCache = { rows: unknown[] | null; at: number; inflight: Promise<unknown[]> | null };
+const openrouterCatalog: CatalogCache = { rows: null, at: 0, inflight: null };
+const fireworksCatalog: CatalogCache = { rows: null, at: 0, inflight: null };
 
 type BananaPickerModel = {
   id: string;
@@ -649,47 +666,66 @@ function normalizedModalities(value: unknown): string[] {
   return out.length ? out : ['text'];
 }
 
-async function fetchMonkeyModelCatalog(): Promise<unknown[]> {
-  const cached = monkeyModelCatalogCache;
-  const fresh = cached !== null && Date.now() - monkeyModelCatalogAt < MONKEY_MODEL_CATALOG_TTL_MS;
-  if (fresh) return cached;
-  if (monkeyModelCatalogInflight) return monkeyModelCatalogInflight;
+/** Fetch an OpenAI-style `{data:[...]}` model catalog with a short TTL cache.
+ *  On any failure (no key, non-2xx, timeout) the prior cached rows are kept so
+ *  a transient blip doesn't empty the picker. */
+async function fetchModelCatalog(
+  label: string,
+  url: string,
+  apiKey: string,
+  cache: CatalogCache,
+): Promise<unknown[]> {
+  const fresh = cache.rows !== null && Date.now() - cache.at < MODEL_CATALOG_TTL_MS;
+  if (fresh) return cache.rows as unknown[];
+  if (cache.inflight) return cache.inflight;
 
-  monkeyModelCatalogInflight = (async () => {
+  cache.inflight = (async () => {
+    if (!apiKey) {
+      console.warn(`[banana-runner] ${label} catalog: no API key set, returning empty`);
+      return cache.rows ?? [];
+    }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), MONKEY_MODEL_CATALOG_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
     try {
-      const response = await fetch(`${MONKEY_BASE_URL}/models`, {
+      const response = await fetch(url, {
         headers: {
           Accept: 'application/json',
-          Authorization: `Bearer ${resolveMonkeyToken()}`,
+          Authorization: `Bearer ${apiKey}`,
         },
         signal: controller.signal,
       });
       if (!response.ok) {
-        console.warn(`[banana-runner] monkey model catalog returned ${response.status}, keeping prior catalog`);
-        return monkeyModelCatalogCache ?? [];
+        console.warn(`[banana-runner] ${label} catalog returned ${response.status}, keeping prior catalog`);
+        return cache.rows ?? [];
       }
       const body = await response.json() as { data?: unknown[] };
       const models = Array.isArray(body.data) ? body.data : [];
       if (models.length > 0) {
-        monkeyModelCatalogCache = models;
-        monkeyModelCatalogAt = Date.now();
+        cache.rows = models;
+        cache.at = Date.now();
       }
-      return monkeyModelCatalogCache ?? [];
+      return cache.rows ?? [];
     } catch (error) {
       const reason = (error as Error)?.name === 'AbortError'
         ? 'timeout'
         : ((error as Error)?.message || 'unknown error');
-      console.warn(`[banana-runner] monkey model catalog fetch failed (${reason}), keeping prior catalog`);
-      return monkeyModelCatalogCache ?? [];
+      console.warn(`[banana-runner] ${label} catalog fetch failed (${reason}), keeping prior catalog`);
+      return cache.rows ?? [];
     } finally {
       clearTimeout(timeout);
-      monkeyModelCatalogInflight = null;
+      cache.inflight = null;
     }
   })();
 
-  return monkeyModelCatalogInflight;
+  return cache.inflight;
+}
+
+function fetchOpenRouterCatalog(): Promise<unknown[]> {
+  return fetchModelCatalog('openrouter', `${OPENROUTER_BASE_URL}/models`, resolveOpenRouterKey(), openrouterCatalog);
+}
+
+function fetchFireworksCatalog(): Promise<unknown[]> {
+  return fetchModelCatalog('fireworks', `${FIREWORKS_BASE_URL}/models`, resolveFireworksKey(), fireworksCatalog);
 }
 
 // Does the model the next turn will run natively accept image input? Local
@@ -699,13 +735,22 @@ async function fetchMonkeyModelCatalog(): Promise<unknown[]> {
 // vision adapter kicks in rather than silently dropping the image).
 async function bananaModelSupportsImages(cli: CliKind, modelId: string | undefined): Promise<boolean> {
   if (cli === 'banana-local') return false;
-  const id = (modelId || '').trim();
-  if (!id) return false;
+  const parsed = parseModel((modelId || '').trim());
+  if (!parsed) return false;
   try {
-    const rows = await fetchMonkeyModelCatalog();
+    if (parsed.providerID === 'fireworks') {
+      const rows = await fetchFireworksCatalog();
+      const row = rows
+        .map((r) => recordOf(r))
+        .find((r) => (typeof r.id === 'string' ? r.id.trim() : '') === parsed.modelID);
+      return row?.supports_image_input === true;
+    }
+    // OpenRouter: match on the bare model id (catalog rows carry no provider
+    // prefix), keyed off the modality list in the row's architecture.
+    const rows = await fetchOpenRouterCatalog();
     const row = rows
       .map((r) => recordOf(r))
-      .find((r) => (typeof r.id === 'string' ? r.id.trim() : '') === id);
+      .find((r) => (typeof r.id === 'string' ? r.id.trim() : '') === parsed.modelID);
     if (!row) return false;
     const architecture = recordOf(row.architecture);
     return normalizedModalities(architecture.input_modalities).includes('image');
@@ -787,14 +832,14 @@ function toProviderModelConfig(model: unknown): [string, Record<string, unknown>
 // Cap how many models we embed into the Banana config. The whole catalog (300+
 // models) serialized into the BANANA_CONFIG_CONTENT *env var* exceeds Linux's
 // ~128KB per-arg limit and makes `spawn` fail with E2BIG. The baseURL+apiKey
-// override forwards ANY model id to the monkey proxy, so models past the cap
-// still route — they just aren't pre-registered in the provider config.
+// override forwards ANY model id to OpenRouter, so models past the cap still
+// route — they just aren't pre-registered in the provider config.
 const CONFIG_MODEL_CAP = 100;
-async function monkeyOpenRouterConfigModels(): Promise<Record<string, Record<string, unknown>>> {
+async function openrouterConfigModels(): Promise<Record<string, Record<string, unknown>>> {
   // Cap on catalog ROWS (deterministic) so the picker can advertise exactly this
   // registered set. 100 entries is ~50KB — comfortably under the ~128KB per-arg
   // limit that caused spawn E2BIG.
-  const rows = (await fetchMonkeyModelCatalog()).slice(0, CONFIG_MODEL_CAP);
+  const rows = (await fetchOpenRouterCatalog()).slice(0, CONFIG_MODEL_CAP);
   const out: Record<string, Record<string, unknown>> = {};
   for (const row of rows) {
     const next = toProviderModelConfig(row);
@@ -808,7 +853,7 @@ export async function listBananaOpenRouterModels(): Promise<BananaPickerModel[]>
   // (the first CONFIG_MODEL_CAP rows that yield a provider entry). Banana 2.1.20
   // throws ProviderModelNotFoundError for any id missing from provider.models,
   // so the picker must never offer an unregistered id.
-  const rows = (await fetchMonkeyModelCatalog()).slice(0, CONFIG_MODEL_CAP);
+  const rows = (await fetchOpenRouterCatalog()).slice(0, CONFIG_MODEL_CAP);
   return rows
     .filter((row) => toProviderModelConfig(row) !== null)
     .map(toPickerModel)
@@ -816,11 +861,95 @@ export async function listBananaOpenRouterModels(): Promise<BananaPickerModel[]>
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// ── Fireworks model config + picker ──────────────────────────────────────
+// Fireworks /v1/models rows look like:
+//   { id, supports_chat, supports_image_input, supports_tools, context_length }
+// We register chat-capable models only (skips image/FLUX models) and attach
+// low/medium/high effort variants to reasoning-capable models. Fireworks is an
+// openai-compatible provider, so the variant body must be `{reasoningEffort}`
+// (→ `reasoning_effort` on the wire), NOT OpenRouter's `{reasoning:{effort}}`.
+const FIREWORKS_REASONING_RE =
+  /glm|deepseek|kimi|k2p|qwen|gpt-oss|minimax|thinking|reason|\br1\b|big-pickle/i;
+
+function toFireworksPickerModel(model: unknown): BananaPickerModel | null {
+  const row = recordOf(model);
+  const id = typeof row.id === 'string' ? row.id.trim() : '';
+  if (!id || row.supports_chat === false) return null;
+  const context = numberFrom(row.context_length);
+  return {
+    id,
+    name: id.split('/').pop() || id,
+    ...(context ? { context_length: context } : {}),
+  };
+}
+
+function toFireworksProviderModelConfig(model: unknown): [string, Record<string, unknown>] | null {
+  const row = recordOf(model);
+  const id = typeof row.id === 'string' ? row.id.trim() : '';
+  if (!id || row.supports_chat === false) return null;
+
+  const context = numberFrom(row.context_length);
+  const name = id.split('/').pop() || id;
+  const attachment = row.supports_image_input === true;
+  const toolCall = row.supports_tools !== false;
+  const reasoning = FIREWORKS_REASONING_RE.test(id);
+  // Cap requested output so input + output fits the context window with room
+  // for Banana's system prompt + tool schemas.
+  const output = context ? Math.min(32768, Math.max(4096, Math.floor(context / 4))) : undefined;
+
+  const config: Record<string, unknown> = {
+    id,
+    name,
+    attachment,
+    reasoning,
+    temperature: true,
+    tool_call: toolCall,
+    modalities: { input: attachment ? ['text', 'image'] : ['text'], output: ['text'] },
+  };
+  if (context) {
+    config.limit = { context, input: context, output: output ?? context };
+  }
+  if (reasoning) {
+    // openai-compatible effort variants (see transform.ts grok-3-mini branch):
+    // the non-openrouter shape is `{reasoningEffort}`. Config variants merge in
+    // and override Banana's auto-generated ones (provider.ts ~2160), which
+    // return {} for glm/kimi/qwen/deepseek — so this is what makes the effort
+    // selector actually work for those families on Fireworks.
+    config.variants = {
+      low: { reasoningEffort: 'low' },
+      medium: { reasoningEffort: 'medium' },
+      high: { reasoningEffort: 'high' },
+    };
+  }
+  return [id, config];
+}
+
+async function fireworksConfigModels(): Promise<Record<string, Record<string, unknown>>> {
+  const rows = (await fetchFireworksCatalog()).slice(0, CONFIG_MODEL_CAP);
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const row of rows) {
+    const next = toFireworksProviderModelConfig(row);
+    if (next) out[next[0]] = next[1];
+  }
+  return out;
+}
+
+/** Picker catalog for the Fireworks engine — bare ids (the client prefixes
+ *  `fireworks/`). Only chat-capable models, matching the registered config. */
+export async function listFireworksModels(): Promise<BananaPickerModel[]> {
+  const rows = (await fetchFireworksCatalog()).slice(0, CONFIG_MODEL_CAP);
+  return rows
+    .filter((row) => toFireworksProviderModelConfig(row) !== null)
+    .map(toFireworksPickerModel)
+    .filter((model): model is BananaPickerModel => model !== null)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** True unless explicitly disabled. A deploy can set
- *  RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY to a falsy value to turn the
- *  override off without a code change. Accepts the common boolean-off
- *  spellings (false/0/no/off, any case) so `FALSE` or `0` also work. */
-function openrouterViaMonkeyEnabled(): boolean {
+ *  RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY (legacy name kept for back-compat) to
+ *  a falsy value to turn the openrouter provider override off without a code
+ *  change. Accepts the common boolean-off spellings (false/0/no/off). */
+function openrouterProviderEnabled(): boolean {
   const raw = process.env.RIVENDELL_BANANA_OPENROUTER_VIA_MONKEY?.trim().toLowerCase();
   return !(raw === 'false' || raw === '0' || raw === 'no' || raw === 'off');
 }
@@ -1144,6 +1273,15 @@ const LOCAL_VLLM_BASE_URL =
 
 type LocalVllmModel = { id: string; maxLen: number };
 
+// LM Studio mislabels text models as type:'vlm' (e.g. qwen3.6-35b-a3b), so the
+// `type` field can't be trusted to tell text from vision. Filter vision + embed
+// by id instead — same heuristic the assistant-mcp dev-pr-tracker bridge uses.
+// Keeps vision-only models (qwen3-vl-*) out of the Forge cron picker + Hall
+// companion picker. The vision adapter (vision-adapter.ts) finds its own model
+// and does NOT go through here, so this is safe for it.
+const VISION_OR_EMBED =
+  /embed|vlm|vision|llava|moondream|pixtral|internvl|smolvlm|cogvlm|minicpm-v|-vl-|-vl\b|\bvl-/i;
+
 async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
   // Prefer LM Studio's native API: it reports each model's REAL loaded context
   // window. The OpenAI /v1/models endpoint omits it, which forced a 32k guess.
@@ -1155,7 +1293,12 @@ async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
         data?: Array<{ id?: unknown; type?: unknown; state?: unknown; loaded_context_length?: unknown; max_context_length?: unknown }>;
       };
       const loaded = (json.data ?? [])
-        .filter((m) => m.state === 'loaded' && m.type !== 'embeddings')
+        .filter(
+          (m) =>
+            m.state === 'loaded' &&
+            m.type !== 'embeddings' &&
+            !VISION_OR_EMBED.test(String(m.id)),
+        )
         .map((m) => ({
           id: typeof m.id === 'string' ? m.id : '',
           maxLen:
@@ -1183,7 +1326,7 @@ async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
         id: typeof m.id === 'string' ? m.id : '',
         maxLen: typeof m.max_model_len === 'number' && m.max_model_len > 0 ? m.max_model_len : 32768,
       }))
-      .filter((m): m is LocalVllmModel => m.id.length > 0);
+      .filter((m): m is LocalVllmModel => m.id.length > 0 && !VISION_OR_EMBED.test(m.id));
   } catch {
     // LM Studio not running / unreachable: no local models registered.
     return [];
@@ -1385,26 +1528,28 @@ function resolveMirroredMcp(opts: { projectPathHint?: string; cli?: CliKind } = 
 }
 
 async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKind } = {}): Promise<string | null> {
-  const includeOpenrouterProxy = openrouterViaMonkeyEnabled();
+  const includeOpenrouter = openrouterProviderEnabled();
   // Mirror the configured MCP set into Banana so OpenRouter and Local models
   // keep the same tool surface as the Claude/Codex-backed companions.
   const mirroredMcp = resolveMirroredMcp(opts);
   const override: any = {
     $schema: 'https://banana-code.dev/config.json',
   };
-  if (includeOpenrouterProxy) {
-    const models = await monkeyOpenRouterConfigModels();
+  if (includeOpenrouter) {
+    // OpenRouter, DIRECT (no monkey proxy). baseURL + real apiKey override
+    // Banana's built-in openrouter provider so any model id forwards upstream.
+    const models = await openrouterConfigModels();
     override.provider = {
       openrouter: {
         ...(Object.keys(models).length ? { models } : {}),
         options: {
-          baseURL: MONKEY_BASE_URL,
-          apiKey: resolveMonkeyToken(),
+          baseURL: OPENROUTER_BASE_URL,
+          apiKey: resolveOpenRouterKey(),
         },
       },
     };
   }
-  // Local (vLLM) provider — DIRECT to the on-box OpenAI endpoint, no monkey hop.
+  // Local (vLLM) provider — DIRECT to the on-box OpenAI endpoint.
   // Registered models are whatever vLLM currently has loaded; swapping the vLLM
   // model + restarting the banana serve repopulates this list.
   const localModels = await localConfigModels();
@@ -1416,9 +1561,23 @@ async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKi
       models: localModels,
     };
   }
+  // Fireworks provider — DIRECT, openai-compatible, using the PERSONAL key.
+  // Registered with auto-discovered models so `fireworks/<id>` picks route.
+  const fireworksModels = resolveFireworksKey() ? await fireworksConfigModels() : {};
+  if (Object.keys(fireworksModels).length) {
+    override.provider = override.provider || {};
+    override.provider.fireworks = {
+      name: 'Fireworks',
+      options: { baseURL: FIREWORKS_BASE_URL, apiKey: resolveFireworksKey() },
+      models: fireworksModels,
+    };
+  }
   if (Object.keys(mirroredMcp).length) override.mcp = mirroredMcp;
   const hasOverride =
-    includeOpenrouterProxy || Object.keys(localModels).length > 0 || Object.keys(mirroredMcp).length > 0;
+    includeOpenrouter ||
+    Object.keys(localModels).length > 0 ||
+    Object.keys(fireworksModels).length > 0 ||
+    Object.keys(mirroredMcp).length > 0;
 
   const existingRaw = (
     process.env.BANANA_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT
@@ -1462,10 +1621,10 @@ async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKi
       : {};
 
   const merged: any = { ...existing, ...override };
-  if (includeOpenrouterProxy || override.provider?.local) {
+  if (includeOpenrouter || override.provider?.local || override.provider?.fireworks) {
     merged.provider = {
       ...existingProvider,
-      ...(includeOpenrouterProxy
+      ...(includeOpenrouter
         ? {
             openrouter: {
               ...existingOpenrouter,
@@ -1479,9 +1638,10 @@ async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKi
             },
           }
         : {}),
-      // The local (vLLM) provider is generated fresh each build — no existing
-      // merge needed; just carry it through so it isn't dropped here.
+      // The local (vLLM) + fireworks providers are generated fresh each build —
+      // no existing merge needed; just carry them through so they aren't dropped.
       ...(override.provider?.local ? { local: override.provider.local } : {}),
+      ...(override.provider?.fireworks ? { fireworks: override.provider.fireworks } : {}),
     };
   }
   if (Object.keys(mirroredMcp).length || Object.keys(existingMcp).length) {
@@ -2795,21 +2955,30 @@ export class BananaSession {
     //    id), prepend the recap of the prior conversation to the prompt text
     //    so the brand-new session inherits context. Slash commands are expanded
     //    into prompt text here so Banana sees Claude/project commands too.
-    // Engine boundary: a banana-local session must run ONLY a local (vLLM)
-    // model — never fall back to Banana's default / OpenRouter, which would leak
-    // a local-intended prompt to the cloud. Pin a missing/non-local model to
-    // whatever vLLM has loaded; if nothing is loaded, force a local/* id so the
-    // request errors locally instead of routing remotely. And never run a
-    // local/* model on the OpenRouter banana cli.
+    // Engine boundary: each banana cli must run ONLY its own provider's models,
+    // so a turn never silently routes elsewhere (e.g. leaking a local-intended
+    // prompt to the cloud, or falling back to Banana's built-in — now dead —
+    // monkey default). Pin a missing/foreign id to that engine's default.
+    //   banana-local      -> whatever vLLM has loaded (else a local/* error id)
+    //   banana-fireworks  -> a fireworks/* id (FIREWORKS_DEFAULT_MODEL)
+    //   banana            -> an openrouter/* id (OPENROUTER_DEFAULT_MODEL)
     let requestedModelId = opts?.model;
+    const requestedProvider = parseModel(requestedModelId)?.providerID;
     if (this.cli === 'banana-local') {
-      const parsed = parseModel(requestedModelId);
-      if (!parsed || parsed.providerID !== 'local') {
+      if (requestedProvider !== 'local') {
         const st = await localVllmStatus();
         requestedModelId = `local/${st.loaded ?? 'no-model-loaded'}`;
       }
-    } else if (parseModel(requestedModelId)?.providerID === 'local') {
-      requestedModelId = undefined;
+    } else if (this.cli === 'banana-fireworks') {
+      if (requestedProvider !== 'fireworks') {
+        requestedModelId = FIREWORKS_DEFAULT_MODEL;
+      }
+    } else if (this.cli === 'banana') {
+      // OpenRouter engine: anything not openrouter/* (missing, stale monkey/*,
+      // local/*, fireworks/*) pins to the OpenRouter default.
+      if (requestedProvider !== 'openrouter') {
+        requestedModelId = OPENROUTER_DEFAULT_MODEL;
+      }
     }
     const model = parseModel(requestedModelId);
     const slashCommand = await parseBananaSlashCommand(text, this.cwd);

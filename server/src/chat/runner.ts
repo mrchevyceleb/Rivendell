@@ -56,7 +56,8 @@ function collectDescendantPids(pid: number): number[] {
 //   codex          = Codex  → Kim Codex (.codex)
 //   claude         = Banana → Personal Claude (.claude-personal)
 //   codex-personal = Banana → Personal Codex (.codex-personal)
-//   banana         = Banana → OpenRouter (monkey)
+//   banana         = Banana → OpenRouter (direct, real OPENROUTER_API_KEY)
+//   banana-fireworks = Banana → Fireworks (direct, FIREWORKS_PERSONAL_API_KEY)
 //   banana-local   = Banana → Local LLM (vLLM on the Spark, direct)
 // The per-directory account-map still governs everywhere else (terminals, AutoSam,
 // samwise-2); this companion→account binding is Rivendell-only.
@@ -67,6 +68,7 @@ export type CliKind =
   | 'banana'
   | 'codex-personal'
   | 'banana-local'
+  | 'banana-fireworks'
   | 'zai';
 
 /** Rivendell-only: which named account a Claude/Codex-backed companion runs on. */
@@ -678,7 +680,7 @@ export async function getOrCreateSession(opts: {
       account: cliAccount(opts.cli),
     });
   }
-  if (opts.cli === 'banana' || opts.cli === 'banana-local') {
+  if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     return getOrCreateBananaSession({ repoPath: opts.repoPath, chatId, cli: opts.cli });
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
@@ -847,7 +849,7 @@ export async function freshStart(opts: {
     const { freshStartCodex } = await import('./codex-runner.ts');
     return freshStartCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli, account: cliAccount(opts.cli) });
   }
-  if (opts.cli === 'banana' || opts.cli === 'banana-local') {
+  if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     const { freshStartBanana } = await import('./banana-runner.ts');
     return freshStartBanana({ repoPath: opts.repoPath, chatId, cli: opts.cli });
   }
@@ -884,7 +886,7 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
     await interruptCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
     return;
   }
-  if (opts.cli === 'banana' || opts.cli === 'banana-local') {
+  if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     const { interruptBanana } = await import('./banana-runner.ts');
     interruptBanana({ repoPath: opts.repoPath, chatId, cli: opts.cli });
     return;

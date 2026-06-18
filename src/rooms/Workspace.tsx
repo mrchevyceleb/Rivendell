@@ -58,6 +58,7 @@ function companionAgentLabel(cli: string): string {
     case 'codex-personal': return 'Personal Codex';
     case 'banana': return 'OpenRouter';
     case 'banana-local': return 'Local';
+    case 'banana-fireworks': return 'Fireworks';
     default: return cli;
   }
 }

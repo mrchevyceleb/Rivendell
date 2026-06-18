@@ -25,6 +25,7 @@ import {
 import {
   activeBananaSessions,
   listBananaOpenRouterModels,
+  listFireworksModels,
   listLocalModels,
   localFullCatalog,
   localVllmStatus,
@@ -156,6 +157,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
     }
   });
 
+  // Fireworks catalog for the Banana → Fireworks engine. Ids are bare account
+  // model ids (`accounts/fireworks/models/<name>`); the client prefixes
+  // `fireworks/`.
+  app.get('/api/fireworks/models', async (_req, res) => {
+    try {
+      res.json({ data: await listFireworksModels() });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   // Local (vLLM) catalog for the Banana → Local engine. Ids are `local/<model>`.
   app.get('/api/local/models', async (_req, res) => {
     try {
@@ -215,6 +227,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'banana' &&
       cli !== 'codex-personal' &&
       cli !== 'banana-local' &&
+      cli !== 'banana-fireworks' &&
       cli !== 'zai'
     ) {
       res.status(400).json({ error: 'invalid cli' });

@@ -9,6 +9,7 @@ const COMPANION_LABEL: Record<CompanionId, string> = {
   banana: 'banana',
   'codex-personal': 'codex',
   'banana-local': 'banana',
+  'banana-fireworks': 'fireworks',
   zai: 'glm',
 };
 

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { CompanionId } from '../data/types';
-import { useBananaModel } from './useBananaModel';
+import { useBananaModel, useFireworksModel } from './useBananaModel';
 
 // Companion + model/effort selection for an embedded chat (the Workspace room).
 // Unlike Hall — which exposes assistant/codex/banana top-level tabs and reaches
@@ -17,6 +17,7 @@ export const WORKSPACE_COMPANIONS: { id: CompanionId; label: string }[] = [
   { id: 'codex', label: 'KG Codex' },
   { id: 'codex-personal', label: 'Personal Codex' },
   { id: 'banana', label: 'OpenRouter' },
+  { id: 'banana-fireworks', label: 'Fireworks' },
   { id: 'banana-local', label: 'Local · LM Studio' },
   { id: 'zai', label: 'Z.ai · GLM' },
 ];
@@ -78,6 +79,7 @@ export function useCompanionPicker(storageKey: string) {
   };
 
   const bananaModel = useBananaModel();
+  const fireworksModel = useFireworksModel();
 
   const [claudeModel, setClaudeModelState] = useState(() => readLS('rivendell:claude-model', 'claude-opus-4-8'));
   const [claudeEffort, setClaudeEffortState] = useState(() => readLS('rivendell:claude-effort', 'xhigh'));
@@ -114,12 +116,14 @@ export function useCompanionPicker(storageKey: string) {
   const isCodex = cli === 'codex' || cli === 'codex-personal';
   const isLocal = cli === 'banana-local';
   const isOpenRouter = cli === 'banana';
+  const isFireworks = cli === 'banana-fireworks';
   const isZai = cli === 'zai';
 
   const model =
     isZai ? zaiModel
     : isLocal ? (localModel || undefined)
     : isOpenRouter ? bananaModel.model
+    : isFireworks ? fireworksModel.model
     : isCodex ? codexModel
     : isClaude ? claudeModel
     : undefined;
@@ -127,14 +131,15 @@ export function useCompanionPicker(storageKey: string) {
     isCodex ? codexEffort
     : isZai ? zaiEffort
     : isClaude ? claudeEffort
-    : (isOpenRouter || isLocal) ? bananaEffort
+    : (isOpenRouter || isLocal || isFireworks) ? bananaEffort
     : undefined;
 
   return {
     companion, setCompanion,
     cli, model, effort,
-    isClaude, isCodex, isLocal, isOpenRouter, isZai,
+    isClaude, isCodex, isLocal, isOpenRouter, isFireworks, isZai,
     bananaModel,
+    fireworksModel,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     zaiModel, setZaiModel, zaiEffort, setZaiEffort,
