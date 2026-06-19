@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Cpu, Search, Star } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useBananaModel } from '../hooks/useBananaModel';
 
 // Model selector for the Banana companions (OpenRouter / Fireworks). Renders a
@@ -29,6 +29,7 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const countId = useId();
 
   // Close on outside click / Escape.
   useEffect(() => {
@@ -48,22 +49,32 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
   }, [open]);
 
   const toggle = () => {
-    setOpen((value) => {
-      const next = !value;
-      // Fetch the OpenRouter catalogue lazily, only when the picker opens.
-      if (next) loadOpenRouter();
-      return next;
-    });
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    // Fetch the provider catalogue lazily, only when the picker opens.
+    setQuery('');
+    loadOpenRouter();
+    setOpen(true);
   };
 
   // Filter the catalogue as the user types — match id or label.
-  const filtered = useMemo(() => {
+  const modelMatches = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return models.slice(0, 60);
+    if (!q) return models;
     return models
-      .filter((m) => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))
-      .slice(0, 60);
+      .filter((m) => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q));
   }, [query, models]);
+  const filtered = useMemo(() => modelMatches.slice(0, 60), [modelMatches]);
+  const countLabel = useMemo(() => {
+    if (loading) return 'loading';
+    if (models.length === 0) return 'none loaded';
+    if (!query.trim()) return `${models.length} loaded`;
+    return modelMatches.length > 0
+      ? `${filtered.length} shown / ${modelMatches.length} matches`
+      : '0 matches';
+  }, [filtered.length, loading, modelMatches.length, models.length, query]);
 
   // Resolve favorited ids to full model options. Favorites whose model is not
   // in the catalogue yet (e.g. still loading) are kept, falling back to a
@@ -169,7 +180,12 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
           ) : null}
 
           <div className="model-picker-section">
-            <p className="model-picker-heading">{listHeading}</p>
+            <div className="model-picker-heading-row">
+              <p className="model-picker-heading">{listHeading}</p>
+              <span id={countId} className="model-picker-count" role="status" aria-live="polite">
+                {countLabel}
+              </span>
+            </div>
             <div className="model-picker-search">
               <Search size={13} />
               <input
@@ -177,6 +193,7 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={searchPlaceholder}
+                aria-describedby={countId}
                 autoFocus
               />
             </div>

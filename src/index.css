@@ -3857,6 +3857,19 @@ button {
   margin: 0;
 }
 
+.model-picker-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-picker-count {
+  font-size: 10.5px;
+  color: var(--r-ink-faint);
+  white-space: nowrap;
+}
+
 .model-picker-tiers {
   display: grid;
   grid-template-columns: 1fr 1fr;
