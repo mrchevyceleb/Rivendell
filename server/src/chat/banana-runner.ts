@@ -49,6 +49,9 @@ type BananaSendOptions = {
   effort?: string;
   hidden?: boolean;
   autoContinueDepth?: number;
+  blockedSideEffectContinueDepth?: number;
+  /** Deprecated alias kept so an in-flight hidden continuation from older code
+   *  cannot reset the retry guard during a hot reload. */
   blockedSearchContinueDepth?: number;
 };
 type GmailSideEffectAction = 'gmail_send' | 'gmail_reply';
@@ -131,8 +134,8 @@ type BananaTurnState = {
   model?: string;
   /** Prevent runaway auto-continue loops if a model keeps compacting. */
   autoContinueDepth: number;
-  /** Prevent retry loops if a model keeps launching the same broad search. */
-  blockedSearchContinueDepth: number;
+  /** Prevent retry loops if a model keeps launching the same blocked side effect. */
+  blockedSideEffectContinueDepth: number;
   /** Single-use approval for a recently displayed email draft. */
   gmailApprovedDraft: ApprovedGmailDraft | null;
   usage: BananaUsage | null;
@@ -1733,225 +1736,6 @@ function isMeaningfulToolInput(inputText: string): boolean {
   return inputText !== '' && inputText !== '{}' && inputText !== 'null';
 }
 
-function normalizeGuardPath(value: string, baseCwd = process.cwd()): string {
-  const trimmed = value.trim();
-  if (!trimmed) return '';
-  const expanded = trimmed
-    .replace(/^~(?=$|[\\/])/, homedir())
-    .replace(/^\$HOME(?=$|[\\/])/, homedir());
-  return stripTrailingPathSlash(isAbsolute(expanded) ? resolve(expanded) : resolve(baseCwd, expanded));
-}
-
-function stripTrailingPathSlash(value: string): string {
-  if (value === '/') return value;
-  return value.replace(/[\\/]+$/, '');
-}
-
-function sameGuardPath(a: string, b: string, baseCwd = process.cwd()): boolean {
-  return normalizeGuardPath(a, baseCwd).toLowerCase() === normalizeGuardPath(b).toLowerCase();
-}
-
-function guardedSearchRoots(): Array<{ path: string; label: string }> {
-  return [
-    { path: homedir(), label: 'home directory' },
-    { path: join(homedir(), 'samwise'), label: '~/samwise workspace hub' },
-    { path: ASSISTANT_HUB_PATH, label: 'ASSISTANT-HUB root' },
-  ];
-}
-
-function guardedSearchRulePatterns(): string[] {
-  const raw = guardedSearchRoots().flatMap((root) => [
-    root.path,
-    stripTrailingPathSlash(root.path) + '/',
-  ]);
-  raw.push('~', '~/', '$HOME', '$HOME/');
-  return Array.from(new Set(raw));
-}
-
-function looksPathLikeSearchToken(value: string): boolean {
-  const trimmed = value.trim();
-  return trimmed === '*'
-    || trimmed === '.*'
-    || trimmed === '.'
-    || trimmed === '..'
-    || trimmed.includes('/')
-    || trimmed.includes('\\')
-    || trimmed.startsWith('~')
-    || trimmed.startsWith('$HOME');
-}
-
-function guardPathCandidates(value: string): string[] {
-  const trimmed = value.trim();
-  if (!trimmed) return [];
-  const candidates = [trimmed];
-  if (/[*?[{]/.test(trimmed) && looksPathLikeSearchToken(trimmed)) {
-    candidates.push(globRootCandidate(trimmed));
-  }
-  return Array.from(new Set(candidates.filter(Boolean)));
-}
-
-function broadSearchPathReason(value: string, baseCwd = process.cwd()): string | null {
-  for (const candidate of guardPathCandidates(value)) {
-    const normalized = normalizeGuardPath(candidate, baseCwd);
-    if (!normalized) continue;
-    for (const root of guardedSearchRoots()) {
-      if (sameGuardPath(normalized, root.path)) {
-        return `${value} resolves to the ${root.label}`;
-      }
-    }
-  }
-  return null;
-}
-
-function collectPathLikeValues(value: unknown, keyHint = ''): string[] {
-  if (typeof value === 'string') {
-    if (/(?:^|_)(?:path|paths|dir|directory|cwd|root)(?:$|_)/i.test(keyHint)) return [value];
-    return [];
-  }
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => collectPathLikeValues(item, keyHint));
-  }
-  if (!value || typeof value !== 'object') return [];
-  const out: string[] = [];
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    out.push(...collectPathLikeValues(child, key));
-  }
-  return out;
-}
-
-function collectStringValuesForKey(value: unknown, targetKey: string): string[] {
-  if (!value || typeof value !== 'object') return [];
-  if (Array.isArray(value)) return value.flatMap((item) => collectStringValuesForKey(item, targetKey));
-  const out: string[] = [];
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    if (key.toLowerCase() === targetKey.toLowerCase() && typeof child === 'string') out.push(child);
-    out.push(...collectStringValuesForKey(child, targetKey));
-  }
-  return out;
-}
-
-function globRootCandidate(pattern: string): string {
-  const trimmed = pattern.trim();
-  if (!trimmed) return '';
-  const globIndex = trimmed.search(/[*?[{]/);
-  if (globIndex < 0) return trimmed;
-  const prefix = trimmed.slice(0, globIndex);
-  const slashIndex = Math.max(prefix.lastIndexOf('/'), prefix.lastIndexOf('\\'));
-  if (slashIndex < 0) return '.';
-  return prefix.slice(0, slashIndex + 1) || '/';
-}
-
-function shellishTokens(command: string): string[] {
-  const tokens: string[] = [];
-  const re = /"((?:\\"|[^"])*)"|'([^']*)'|([^\s;&|()<>]+)/g;
-  for (const match of command.matchAll(re)) {
-    tokens.push((match[1] ?? match[2] ?? match[3] ?? '').replace(/\\"/g, '"'));
-  }
-  return tokens;
-}
-
-function commandUsesRecursiveSearch(command: string): boolean {
-  return /\b(?:grep|egrep|fgrep|find)\b/i.test(command);
-}
-
-function toolCwd(input: unknown, fallbackCwd: string): string {
-  if (!input || typeof input !== 'object') return fallbackCwd;
-  const cwd = (input as Record<string, unknown>).cwd;
-  return typeof cwd === 'string' && cwd.trim() ? normalizeGuardPath(cwd, fallbackCwd) : fallbackCwd;
-}
-
-function unsafeShellSearchReason(command: string, baseCwd: string): string | null {
-  if (!commandUsesRecursiveSearch(command)) return null;
-  for (const token of shellishTokens(command)) {
-    const reason = broadSearchPathReason(token, baseCwd);
-    if (reason) return `shell search command targets ${reason}`;
-  }
-  return null;
-}
-
-function commandFromToolInput(input: unknown): string {
-  if (!input || typeof input !== 'object') return '';
-  const command = (input as Record<string, unknown>).command;
-  return typeof command === 'string' ? command : '';
-}
-
-function unsafeBananaToolReason(toolName: string, input: unknown, fallbackCwd: string): string | null {
-  const tool = toolName.toLowerCase();
-  const baseCwd = toolCwd(input, fallbackCwd);
-  if (tool === 'bash') {
-    const command = commandFromToolInput(input);
-    const cwdReason = broadSearchPathReason(baseCwd);
-    if (cwdReason && commandUsesRecursiveSearch(command)) return `shell search command runs from ${cwdReason}`;
-    return command ? unsafeShellSearchReason(command, baseCwd) : null;
-  }
-  if (!['grep', 'glob', 'list'].includes(tool)) return null;
-  const paths = collectPathLikeValues(input);
-  for (const path of paths) {
-    const reason = broadSearchPathReason(path, baseCwd);
-    if (reason) return `${toolName} tool targets ${reason}`;
-  }
-  let hasExplicitSearchScope = paths.length > 0;
-  if (tool === 'glob') {
-    const patterns = collectStringValuesForKey(input, 'pattern');
-    hasExplicitSearchScope = hasExplicitSearchScope || patterns.length > 0;
-    for (const pattern of patterns) {
-      const reason = broadSearchPathReason(globRootCandidate(pattern), baseCwd);
-      if (reason) return `${toolName} tool pattern targets ${reason}`;
-    }
-  }
-  if (!hasExplicitSearchScope) {
-    const cwdReason = broadSearchPathReason('.', baseCwd);
-    if (cwdReason) return `${toolName} tool runs from ${cwdReason}`;
-  }
-  return null;
-}
-
-function unsafeBananaToolMessage(toolName: string, input: unknown, fallbackCwd: string): string | null {
-  const reason = unsafeBananaToolReason(toolName, input, fallbackCwd);
-  if (!reason) return null;
-  return [
-    `Banana blocked an unsafe broad search before it could stall: ${reason}.`,
-    'Narrow the path to the current repo or a specific subdirectory, or use `rg`/`rg --files` with explicit exclusions.',
-  ].join(' ');
-}
-
-function unsafePermissionRequestMessage(request: PermissionRequest, fallbackCwd: string): string | null {
-  const permission = String(request.permission ?? '').toLowerCase();
-  const baseCwd = toolCwd(request.metadata, fallbackCwd);
-  if (permission === 'bash') {
-    for (const pattern of request.patterns ?? []) {
-      const cwdReason = broadSearchPathReason(baseCwd);
-      if (cwdReason && commandUsesRecursiveSearch(pattern)) {
-        return `Banana rejected an unsafe permission request: shell search command runs from ${cwdReason}.`;
-      }
-      const reason = unsafeShellSearchReason(pattern, baseCwd);
-      if (reason) return `Banana rejected an unsafe permission request: ${reason}.`;
-    }
-  }
-  if (['grep', 'glob', 'list'].includes(permission)) {
-    const candidates = [
-      ...(request.patterns ?? []),
-      ...collectPathLikeValues(request.metadata),
-    ];
-    for (const candidate of candidates) {
-      const reason = broadSearchPathReason(candidate, baseCwd);
-      if (reason) return `Banana rejected an unsafe ${permission} permission request: ${reason}.`;
-    }
-    if (permission === 'glob') {
-      for (const pattern of request.patterns ?? []) {
-        const reason = broadSearchPathReason(globRootCandidate(pattern), baseCwd);
-        if (reason) return `Banana rejected an unsafe glob permission request: ${reason}.`;
-      }
-      for (const pattern of collectStringValuesForKey(request.metadata, 'pattern')) {
-        const reason = broadSearchPathReason(globRootCandidate(pattern), baseCwd);
-        if (reason) return `Banana rejected an unsafe glob permission request: ${reason}.`;
-      }
-    }
-  }
-  const reason = unsafeBananaToolReason(permission, request.metadata, fallbackCwd);
-  return reason ? `Banana rejected an unsafe permission request: ${reason}.` : null;
-}
-
 function truncateToolText(text: string, max = 1200): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max - 32)}\n... [truncated ${text.length - max + 32} chars]`;
@@ -2937,7 +2721,7 @@ export class BananaSession {
       currentMessageHiddenCompactionSummary: false,
       model: opts.model,
       autoContinueDepth: opts.autoContinueDepth ?? 0,
-      blockedSearchContinueDepth: opts.blockedSearchContinueDepth ?? 0,
+      blockedSideEffectContinueDepth: opts.blockedSideEffectContinueDepth ?? opts.blockedSearchContinueDepth ?? 0,
       gmailApprovedDraft,
       usage: null,
       done: false,
@@ -3521,26 +3305,6 @@ export class BananaSession {
           }
         }
       }
-      // Only evaluate the broad-search guard once the tool input has fully
-      // streamed in. On `pending`/early `running` ticks the args are still
-      // arriving, so `input` is `{}` — which the guard misreads as a
-      // scope-less search "running from" the workspace-root cwd and aborts a
-      // perfectly scoped glob/grep before its pattern/path ever lands. Every
-      // guarded tool (bash/grep/glob/list-with-args) carries a meaningful
-      // input when it actually executes, so this only skips the empty ticks.
-      const toolInputReady = isMeaningfulToolInput(stringifyToolInput(stateBlock.input));
-      const unsafeMessage = toolInputReady
-        ? unsafeBananaToolMessage(toolName, stateBlock.input, this.cwd)
-        : null;
-      if (unsafeMessage) {
-        this.emitStoredToolInput(rec);
-        console.warn(`[chat banana] ${unsafeMessage}`);
-        this.abortServerTurn();
-        this.quarantineThread('unsafe broad search was aborted');
-        this.failTurn(unsafeMessage, unsafeMessage);
-        this.continueAfterBlockedSearch(unsafeMessage, state);
-        return;
-      }
     }
 
     if (status === 'running' || status === 'pending') {
@@ -3610,15 +3374,12 @@ export class BananaSession {
     }
   }
 
-  /** Auto-reply to a permission request: 'once' normally, 'reject' in plan
-   *  mode or when the request would launch a known broad search. Banana chat
-   *  runs unsandboxed (skip-permissions equivalent), so the default reply is
-   *  'once'. */
+  /** Auto-reply to a permission request. Banana chat runs unsandboxed
+   *  (skip-permissions equivalent), so the default reply is 'once'. */
   private async replyToPermission(request: PermissionRequest): Promise<void> {
     const planMode = process.env.RIVENDELL_BANANA_PLAN_MODE === 'true';
-    const unsafeMessage = unsafePermissionRequestMessage(request, this.cwd);
     const gmailMessage = gmailSideEffectPermissionMessage(request, this.turn?.gmailApprovedDraft ?? null);
-    const rejectMessage = unsafeMessage ?? gmailMessage;
+    const rejectMessage = gmailMessage;
     if (rejectMessage) console.warn(`[chat banana] ${rejectMessage}`);
     try {
       const client = bananaServer.clientFor(this.cwd);
@@ -3700,28 +3461,10 @@ export class BananaSession {
     });
   }
 
-  private continueAfterBlockedSearch(message: string, state: BananaTurnState): void {
-    if (this.dead || state.blockedSearchContinueDepth >= 1) return;
-    const model = state.model;
-    const blockedSearchContinueDepth = state.blockedSearchContinueDepth + 1;
-    void this.send(
-      [
-        'Continue the previous task from where you left off.',
-        message,
-        'Do not retry that broad built-in search. If you need files, use a scoped subdirectory or a bounded shell `rg` command with explicit exclusions such as `--glob "!node_modules/**"` and `--glob "!.git/**"`.',
-        'If the needed fact is still not findable quickly, ask Matt for it instead of searching the whole workspace.',
-      ].join(' '),
-      undefined,
-      { model, hidden: true, blockedSearchContinueDepth },
-    ).catch((err) => {
-      if (!this.dead) this.failTurn(`banana blocked-search continue failed: ${(err as Error).message}`);
-    });
-  }
-
   private continueAfterBlockedSideEffect(message: string, state: BananaTurnState): void {
-    if (this.dead || state.blockedSearchContinueDepth >= 1) return;
+    if (this.dead || state.blockedSideEffectContinueDepth >= 1) return;
     const model = state.model;
-    const blockedSearchContinueDepth = state.blockedSearchContinueDepth + 1;
+    const blockedSideEffectContinueDepth = state.blockedSideEffectContinueDepth + 1;
     void this.send(
       [
         'Continue the previous task from where you left off.',
@@ -3730,7 +3473,7 @@ export class BananaSession {
         'Show Matt the full email draft with From, To, Subject, and Body, then wait for explicit approval in a later message before sending.',
       ].join(' '),
       undefined,
-      { model, hidden: true, blockedSearchContinueDepth },
+      { model, hidden: true, blockedSideEffectContinueDepth },
     ).catch((err) => {
       if (!this.dead) this.failTurn(`banana blocked-side-effect continue failed: ${(err as Error).message}`);
     });
@@ -3942,11 +3685,6 @@ const PLAN_RULESET: PermissionRuleset = [
   { permission: 'question', action: 'deny', pattern: '*' },
   { permission: 'plan_enter', action: 'deny', pattern: '*' },
   { permission: 'plan_exit', action: 'deny', pattern: '*' },
-  ...guardedSearchRulePatterns().flatMap((pattern) => [
-    { permission: 'grep', action: 'deny' as const, pattern },
-    { permission: 'glob', action: 'deny' as const, pattern },
-    { permission: 'list', action: 'deny' as const, pattern },
-  ]),
 ];
 
 /** Best-effort extraction of a human message from a banana error object. */
