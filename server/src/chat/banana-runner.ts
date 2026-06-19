@@ -3521,7 +3521,17 @@ export class BananaSession {
           }
         }
       }
-      const unsafeMessage = unsafeBananaToolMessage(toolName, stateBlock.input, this.cwd);
+      // Only evaluate the broad-search guard once the tool input has fully
+      // streamed in. On `pending`/early `running` ticks the args are still
+      // arriving, so `input` is `{}` — which the guard misreads as a
+      // scope-less search "running from" the workspace-root cwd and aborts a
+      // perfectly scoped glob/grep before its pattern/path ever lands. Every
+      // guarded tool (bash/grep/glob/list-with-args) carries a meaningful
+      // input when it actually executes, so this only skips the empty ticks.
+      const toolInputReady = isMeaningfulToolInput(stringifyToolInput(stateBlock.input));
+      const unsafeMessage = toolInputReady
+        ? unsafeBananaToolMessage(toolName, stateBlock.input, this.cwd)
+        : null;
       if (unsafeMessage) {
         this.emitStoredToolInput(rec);
         console.warn(`[chat banana] ${unsafeMessage}`);
