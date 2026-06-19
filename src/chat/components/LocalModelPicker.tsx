@@ -13,6 +13,11 @@ type Catalog = {
   curated: { id: string; label: string; note: string }[];
 };
 
+function validContextLen(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
 const selStyle: React.CSSProperties = {
   fontSize: 12.5,
   border: '1px solid var(--r-line)',
@@ -119,7 +124,13 @@ async function resolveModelId(raw: string): Promise<{ exact: string | null; cand
   return { exact: null, candidates: exactMatches.length ? exactMatches : results };
 }
 
-export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId: string | null) => void }) {
+export function LocalModelPicker({
+  onActiveChange,
+  onContextChange,
+}: {
+  onActiveChange: (modelId: string | null) => void;
+  onContextChange?: (tokens: number | null) => void;
+}) {
   const [cat, setCat] = useState<Catalog | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [custom, setCustom] = useState('');
@@ -131,6 +142,8 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
   const [searching, setSearching] = useState(false);
   const activeCbRef = useRef(onActiveChange);
   activeCbRef.current = onActiveChange;
+  const contextCbRef = useRef(onContextChange);
+  contextCbRef.current = onContextChange;
 
   const refresh = async () => {
     try {
@@ -138,6 +151,7 @@ export function LocalModelPicker({ onActiveChange }: { onActiveChange: (modelId:
       const d: Catalog = await r.json();
       setCat(d);
       activeCbRef.current(d.loaded ? `local/${d.loaded}` : null);
+      contextCbRef.current?.(d.loaded ? validContextLen(d.contextLen) : null);
     } catch {
       /* leave prior catalog */
     }

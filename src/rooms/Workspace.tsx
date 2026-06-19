@@ -430,6 +430,7 @@ export function Workspace() {
     chatId: 'workspace',
     enabled: Boolean(assistantHubRepo),
     model: picker.model,
+    contextWindowTokens: picker.isLocal ? picker.localContextWindow : undefined,
     effort: picker.effort,
   });
 

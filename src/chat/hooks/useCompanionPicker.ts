@@ -89,6 +89,7 @@ export function useCompanionPicker(storageKey: string) {
   const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
   const [bananaEffort, setBananaEffortState] = useState(() => readLS('rivendell:banana-effort', 'medium'));
   const [localModel, setLocalModelState] = useState(() => readLS('rivendell:local-model', ''));
+  const [localContextWindow, setLocalContextWindow] = useState<number | null>(null);
 
   const persist = (key: string, set: (v: string) => void) => (v: string) => {
     set(v);
@@ -144,6 +145,6 @@ export function useCompanionPicker(storageKey: string) {
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     zaiModel, setZaiModel, zaiEffort, setZaiEffort,
     bananaEffort, setBananaEffort,
-    localModel, setLocalModel,
+    localModel, setLocalModel, localContextWindow, setLocalContextWindow,
   };
 }

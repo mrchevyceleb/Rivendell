@@ -83,7 +83,12 @@ export function CompanionControls({ picker }: { picker: CompanionPicker }) {
         </>
       )}
 
-      {picker.isLocal && <LocalModelPicker onActiveChange={(m) => picker.setLocalModel(m ?? '')} />}
+      {picker.isLocal && (
+        <LocalModelPicker
+          onActiveChange={(m) => picker.setLocalModel(m ?? '')}
+          onContextChange={picker.setLocalContextWindow}
+        />
+      )}
 
       {picker.isZai && (
         <CodexEnginePicker

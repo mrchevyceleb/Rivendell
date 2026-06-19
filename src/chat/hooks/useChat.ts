@@ -24,9 +24,29 @@ const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
 // id. Codex's GPT-5 family is 400K; current Claude (Opus 4.6/4.7/4.8, Sonnet
 // 4.6) is 1M; GLM 5.2 is 1M; banana/OpenRouter defaults to 200K.
 function defaultWindowForCli(cli: CompanionId, model?: string): number {
-  if (cli === 'codex' || cli === 'codex-personal') return CODEX_WINDOW_TOKENS;
+  if (isCodexCli(cli)) return CODEX_WINDOW_TOKENS;
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
   return windowForClaudeModel(model); // Claude/Z.ai model ids carry the real window.
+}
+
+function contextWindowOverride(value: number | null | undefined): number | undefined {
+  if (!Number.isFinite(value) || !value || value <= 0) return undefined;
+  return Math.floor(value);
+}
+
+function windowForCli(cli: CompanionId, model: string | undefined, override?: number | null): number {
+  return contextWindowOverride(override) ?? defaultWindowForCli(cli, model);
+}
+
+function isCodexCli(cli: CompanionId): boolean {
+  return cli === 'codex' || cli === 'codex-personal';
+}
+
+function shouldReadResultUsage(cli: CompanionId): boolean {
+  return isCodexCli(cli)
+    || cli === 'banana'
+    || cli === 'banana-local'
+    || cli === 'banana-fireworks';
 }
 
 // Map a model id to its real context window. Current Opus (4.6/4.7/4.8),
@@ -316,10 +336,22 @@ export function useChat(opts: {
   onInitialMessageSent?: () => void;
   /** Model id (Banana + Codex). Rides on every send/steer. */
   model?: string;
+  /** Optional known context window for engines whose model id does not encode it. */
+  contextWindowTokens?: number | null;
   /** Reasoning effort (Codex; Claude uses its config default). */
   effort?: string;
 }) {
-  const { repo, cli, chatId = 'main', enabled, initialMessage, onInitialMessageSent, model, effort } = opts;
+  const {
+    repo,
+    cli,
+    chatId = 'main',
+    enabled,
+    initialMessage,
+    onInitialMessageSent,
+    model,
+    contextWindowTokens,
+    effort,
+  } = opts;
   // Mirror the model into a ref so the WS send path always reads the latest
   // pick without re-subscribing the connection effect on every change.
   const modelRef = useRef<string | undefined>(model);
@@ -342,7 +374,7 @@ export function useChat(opts: {
   // Window size for the active CLI. Seeded from the per-CLI default and
   // refined by the `system/init` event (claude) or by the safety ratchet
   // when observed usage exceeds the assumed window.
-  const windowTokensRef = useRef<number>(defaultWindowForCli(cli, model));
+  const windowTokensRef = useRef<number>(windowForCli(cli, model, contextWindowTokens));
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -375,7 +407,7 @@ export function useChat(opts: {
   const restoredKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const nextWindow = defaultWindowForCli(cli, model);
+    const nextWindow = windowForCli(cli, model, contextWindowTokens);
     windowTokensRef.current = nextWindow;
     setUsage((prev) => {
       if (!prev) return prev;
@@ -386,7 +418,7 @@ export function useChat(opts: {
         fraction: Math.min(total / nextWindow, 1),
       };
     });
-  }, [cli, model]);
+  }, [cli, model, contextWindowTokens]);
 
   useEffect(() => {
     if (initialMessage) {
@@ -439,7 +471,7 @@ export function useChat(opts: {
     // Reset the assumed context window to the per-CLI default each time we
     // (re)connect. The system/init event will refine it for claude; codex
     // sticks at 400K unless usage forces a ratchet.
-    windowTokensRef.current = defaultWindowForCli(cli, modelRef.current);
+    windowTokensRef.current = windowForCli(cli, modelRef.current, contextWindowTokens);
     setUsage(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
@@ -615,19 +647,29 @@ export function useChat(opts: {
           // size. Taking the most recent assistant event in a turn gives
           // us the true context size of the most recent call.
           //
-          // Codex doesn't have this bug — codex-runner synthesizes a
-          // single `result` event per turn from `turn.completed`, which
-          // is already per-turn — so the result handler still works there.
+          // Codex/Banana don't have this Claude cumulative-result bug:
+          // Codex and Banana synthesize one result usage payload per turn.
+          // Z.ai emits zeroes on assistant.message.usage but real per-call
+          // numbers on the final message_delta, so read that instead.
+          const messageDeltaUsage =
+            cli === 'zai' &&
+            msg.event?.type === 'stream_event' &&
+            msg.event?.event?.type === 'message_delta' &&
+            msg.event.event.usage
+              ? (msg.event.event.usage as Record<string, number | undefined>)
+              : null;
           const usagePayload =
-            cli !== 'codex' &&
+            messageDeltaUsage ??
+            (cli !== 'zai' &&
+            !shouldReadResultUsage(cli) &&
             msg.event?.type === 'assistant' &&
             msg.event?.message?.usage
               ? (msg.event.message.usage as Record<string, number | undefined>)
-              : cli === 'codex' &&
+              : shouldReadResultUsage(cli) &&
                   msg.event?.type === 'result' &&
                   msg.event?.usage
                 ? (msg.event.usage as Record<string, number | undefined>)
-                : null;
+                : null);
 
           if (usagePayload) {
             const input = usagePayload.input_tokens ?? 0;
@@ -641,7 +683,7 @@ export function useChat(opts: {
             // large-context variant. Codex has no 1M variant — the meter just
             // clamps at 100% if usage somehow exceeds its 400K window.
             if (
-              cli !== 'codex' &&
+              !isCodexCli(cli) &&
               total > windowTokensRef.current &&
               windowTokensRef.current < LARGE_WINDOW_TOKENS
             ) {

@@ -303,9 +303,14 @@ export function Hall() {
   const [localModel, setLocalModelState] = useState<string>(
     () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:local-model')) || '',
   );
-  const changeLocalModel = (m: string) => {
-    setLocalModelState(m);
-    if (typeof window !== 'undefined') localStorage.setItem('rivendell:local-model', m);
+  const [localContextWindow, setLocalContextWindow] = useState<number | null>(null);
+  const changeLocalModel = (m: string | null) => {
+    const next = m ?? '';
+    setLocalModelState(next);
+    if (typeof window !== 'undefined') {
+      if (next) localStorage.setItem('rivendell:local-model', next);
+      else localStorage.removeItem('rivendell:local-model');
+    }
   };
 
   // The wire cli the Banana companion actually runs as, per its engine pick.
@@ -335,6 +340,7 @@ export function Hall() {
       : isCodexEngine ? codexModel
       : isClaudeEngine ? claudeModel
       : undefined,
+    contextWindowTokens: isLocalEngine ? localContextWindow : undefined,
     effort:
       isCodexEngine ? codexEffort
       : isZaiEngine ? zaiEffort
@@ -486,7 +492,10 @@ export function Hall() {
             </select>
           ) : null}
           {isLocalEngine ? (
-            <LocalModelPicker onActiveChange={(id) => { if (id) changeLocalModel(id); }} />
+            <LocalModelPicker
+              onActiveChange={changeLocalModel}
+              onContextChange={setLocalContextWindow}
+            />
           ) : null}
           <button
             className={`rail-icon-button hall-info-toggle ${mobileInfoOpen ? 'is-active' : ''}`}
