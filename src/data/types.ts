@@ -233,6 +233,8 @@ export type CronJob = {
   deliveryChannel?: string;
   maxTokens?: number;
   status: 'active' | 'paused' | 'failed';
+  /** True when the schedule is disabled, independent of the last run's pass/fail status. */
+  paused?: boolean;
   runtime: CronRuntime;
   cwd?: string;
   permissionMode?: CronPermissionMode;

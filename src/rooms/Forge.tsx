@@ -290,7 +290,7 @@ export function Forge() {
     try {
       await apiJson<CronJob>(`/api/cron/${encodeURIComponent(job.id)}`, {
         method: 'PATCH',
-        body: JSON.stringify({ status: job.status === 'active' ? 'paused' : 'active' }),
+        body: JSON.stringify({ status: cronIsPaused(job) ? 'active' : 'paused' }),
       });
       await invalidate();
     } finally {
@@ -399,8 +399,8 @@ export function Forge() {
                       <span className="cron-readonly-note">Managed in {job.sourceLabel || 'source'}</span>
                     ) : (
                       <>
-                        <button type="button" onClick={() => toggle(job)} disabled={busyId === job.id} title={job.status === 'active' ? 'Pause schedule' : 'Resume schedule'}>
-                          {job.status === 'active' ? <Pause size={14} /> : <Play size={14} />}
+                        <button type="button" onClick={() => toggle(job)} disabled={busyId === job.id} title={cronIsPaused(job) ? 'Resume schedule' : 'Pause schedule'}>
+                          {cronIsPaused(job) ? <Play size={14} /> : <Pause size={14} />}
                         </button>
                         <button type="button" onClick={() => runNow(job)} disabled={busyId === job.id} title="Run once now">
                           <Zap size={14} />
@@ -597,6 +597,13 @@ export function Forge() {
   );
 }
 
+// The schedule's on/off state is independent of the last run's pass/fail.
+// A job can be enabled (running) yet show "failed" from its last run, so the
+// pause/resume control must follow `paused`, not the derived display status.
+function cronIsPaused(job: CronJob): boolean {
+  return job.paused ?? job.status === 'paused';
+}
+
 function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
   job: CronJob;
   onEdit: () => void;
@@ -666,8 +673,8 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
         ) : (
           <>
             <Button tone="elf" onClick={onToggle} disabled={busy}>
-              {job.status === 'active' ? <Pause size={14} /> : <Play size={14} />}
-              {job.status === 'active' ? 'Pause' : 'Resume'}
+              {cronIsPaused(job) ? <Play size={14} /> : <Pause size={14} />}
+              {cronIsPaused(job) ? 'Resume' : 'Pause'}
             </Button>
             <Button tone="ghost" onClick={onRun} disabled={busy}>
               <Zap size={14} />

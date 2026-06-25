@@ -63,6 +63,8 @@ export type RivendellCronJob = {
   deliveryChannel?: string;
   maxTokens?: number;
   status: 'active' | 'paused' | 'failed';
+  /** True when the schedule is disabled, independent of the last run's pass/fail status. */
+  paused?: boolean;
   runtime: CronRuntime;
   cwd?: string;
   permissionMode?: CronPermissionMode;
@@ -508,7 +510,8 @@ function mapCron(job: AdminCron): RivendellCronJob {
     toolName,
     deliveryChannel: job.delivery_channel || undefined,
     maxTokens,
-    status: job.last_run_status === 'failed' ? 'failed' : job.enabled === false ? 'paused' : 'active',
+    paused: job.enabled === false,
+    status: job.enabled === false ? 'paused' : job.last_run_status === 'failed' ? 'failed' : 'active',
     runtime,
     cwd,
     permissionMode,
