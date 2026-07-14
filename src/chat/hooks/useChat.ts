@@ -19,7 +19,7 @@ export type ContextUsage = {
 const DEFAULT_WINDOW_TOKENS = 200_000;
 const LARGE_WINDOW_TOKENS = 1_000_000;
 const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
-const GROK_WINDOW_TOKENS = 256_000; // Grok 4.5 context window
+const GROK_WINDOW_TOKENS = 500_000; // Grok 4.5 context window
 
 // Pick the starting context window for a given CLI before we've seen any model
 // id. Codex uses the selected catalog entry; current Claude (Opus 4.6/4.7/4.8,

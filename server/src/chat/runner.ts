@@ -187,11 +187,11 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
 // dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the Grok token authenticates
 // (never Matt's Anthropic subscription). Auth uses GROK_PERSONAL_API_KEY from
 // the assistant Doppler project (Bearer, which xAI accepts). Grok 4.5 has a
-// 256K context window; set the auto-compact window so Claude Code doesn't
+// 500K context window; set the auto-compact window so Claude Code doesn't
 // compact prematurely.
 const XAI_BASE_URL = process.env.RIVENDELL_XAI_BASE_URL?.trim() || '';
 const XAI_GROK45_MODEL = 'grok-4.5';
-const XAI_COMPACT_WINDOW = '256000';
+const XAI_COMPACT_WINDOW = '500000';
 const XAI_CONFIG_DIR = join(homedir(), '.claude-xai');
 const VALID_XAI_MODELS = new Set([XAI_GROK45_MODEL]);
 // xAI's Anthropic endpoint accepts Claude Code's full effort range and maps it
