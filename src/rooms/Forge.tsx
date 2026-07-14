@@ -27,7 +27,7 @@ import {
   codexModelSpec,
   normalizeCodexEffort,
 } from '../chat/codexModels';
-import { ZAI_MODELS } from '../chat/hooks/useCompanionPicker';
+import { ZAI_MODELS, XAI_MODELS } from '../chat/hooks/useCompanionPicker';
 import type { CronAiModel, CronJob, CronRun } from '../data/types';
 import { Button, Chip, EmptyState, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
@@ -109,12 +109,14 @@ const schedulePresets = [
   { label: 'M/F 7 AM', value: 'mon/fri 7am', cron: '0 7 * * 1,5' },
 ];
 
-// The four engines Matt wants for scheduled work. Each one dispatches to a real
+// The six engines Matt wants for scheduled work. Each one dispatches to a real
 // backend on the local cron runner (see assistant-mcp cron-engines.ts):
-//   assistant     → KG Claude (kim account, claude CLI)
-//   codex         → KG Codex (kim account, codex CLI)
-//   banana-local  → LM Studio local model (HTTP completion, on-box)
-//   zai           → GLM 5.2 via Z.ai (claude CLI redirected to z.ai)
+//   assistant        → KG Claude (kim account, claude CLI)
+//   codex            → KG Codex (kim account, codex CLI)
+//   banana-local     → LM Studio local model (HTTP completion, on-box)
+//   zai              → GLM 5.2 via Z.ai (claude CLI redirected to z.ai)
+//   xai              → Grok 4.5 via xAI (claude CLI redirected to xAI + proxy)
+//   banana-fireworks → Fireworks models (HTTP completion, FIREWORKS_API_KEY)
 // Personal Claude (engine 'claude') was removed; legacy jobs with that engine
 // are migrated to KG Claude (assistant) on display and edit.
 const CRON_ENGINES: { id: string; label: string; hint: string }[] = [
@@ -122,6 +124,8 @@ const CRON_ENGINES: { id: string; label: string; hint: string }[] = [
   { id: 'codex', label: 'KG Codex', hint: 'Kim account · codex CLI with tools' },
   { id: 'banana-local', label: 'LM Studio · Local', hint: 'On-box local model · plain completion' },
   { id: 'zai', label: 'GLM 5.2', hint: 'Z.ai GLM · agentic CLI with tools' },
+  { id: 'xai', label: 'Grok 4.5', hint: 'xAI Grok · agentic CLI with tools' },
+  { id: 'banana-fireworks', label: 'Fireworks', hint: 'Fireworks models · HTTP completion' },
 ];
 const KNOWN_ENGINES = new Set(CRON_ENGINES.map((e) => e.id));
 function engineLabel(id: string): string {
@@ -167,9 +171,10 @@ function prettifyEngineId(id: string): string {
 type ModelOpt = { id: string; label: string };
 function staticModelsForEngine(engine: string): ModelOpt[] {
   if (engine === 'zai') return ZAI_MODELS;
+  if (engine === 'xai') return XAI_MODELS;
   if (engine === 'codex') return CODEX_MODELS;
   if (engine === 'assistant') return CLAUDE_MODELS;
-  return []; // banana-local: fetched live from LM Studio
+  return []; // banana-local / banana-fireworks: fetched live
 }
 
 // ── Schedule builder: pick frequency + time + day, never type a cron string ──
@@ -265,6 +270,7 @@ export function Forge() {
   const [draft, setDraft] = useState<CronDraft>(emptyDraft);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [localModels, setLocalModels] = useState<ModelOpt[]>([]);
+  const [fireworksModels, setFireworksModels] = useState<ModelOpt[]>([]);
   const [notice, setNotice] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
   // Synchronous in-flight guard for save. busyId (state) only blocks clicks
   // AFTER React re-renders, so a synchronous burst (rapid double-click, repeat
@@ -288,19 +294,39 @@ export function Forge() {
     return () => { cancelled = true; };
   }, []);
 
-  // When LM Studio models arrive and the Local engine is selected with no model yet, pick the first.
+  // Pull the Fireworks catalog so the Fireworks engine offers a dropdown too.
+  // The /api/fireworks/models endpoint returns the same {id, name} shape.
+  useEffect(() => {
+    let cancelled = false;
+    apiJson<{ data?: { id: string; name: string }[] }>('/api/fireworks/models')
+      .then((res) => {
+        if (cancelled) return;
+        setFireworksModels((res.data ?? []).map((m) => ({ id: m.id, label: m.name })));
+      })
+      .catch(() => { /* Fireworks offline — dropdown shows a placeholder */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // When LM Studio / Fireworks models arrive and the engine is selected with no
+  // model yet, pick the first so the dropdown isn't blank.
   useEffect(() => {
     if (draft.engine === 'banana-local' && !draft.model && localModels.length) {
       setDraft((d) => ({ ...d, model: localModels[0].id }));
     }
   }, [localModels, draft.engine, draft.model]);
+  useEffect(() => {
+    if (draft.engine === 'banana-fireworks' && !draft.model && fireworksModels.length) {
+      setDraft((d) => ({ ...d, model: fireworksModels[0].id }));
+    }
+  }, [fireworksModels, draft.engine, draft.model]);
 
-  const modelOptions = draft.engine === 'banana-local' ? localModels : staticModelsForEngine(draft.engine);
+  const liveModels = draft.engine === 'banana-local' ? localModels : draft.engine === 'banana-fireworks' ? fireworksModels : null;
+  const modelOptions = liveModels ?? staticModelsForEngine(draft.engine);
   const codexEffortOptions = draft.engine === 'codex'
     ? codexModelSpec(draft.model).efforts
     : [];
   const initialSelectionFor = (engine: string): { model: string; effort: string } => {
-    const list = engine === 'banana-local' ? localModels : staticModelsForEngine(engine);
+    const list = engine === 'banana-local' ? localModels : engine === 'banana-fireworks' ? fireworksModels : staticModelsForEngine(engine);
     const model = list[0]?.id ?? '';
     return {
       model,
@@ -591,7 +617,7 @@ export function Forge() {
                   }}
                 >
                   {modelOptions.length === 0 && (
-                    <option value="">{draft.engine === 'banana-local' ? 'LM Studio offline' : 'No models'}</option>
+                    <option value="">{draft.engine === 'banana-local' ? 'LM Studio offline' : draft.engine === 'banana-fireworks' ? 'Fireworks unavailable' : 'No models'}</option>
                   )}
                   {modelOptions.map((m) => (
                     <option key={m.id} value={m.id}>{m.label}</option>
@@ -950,8 +976,8 @@ function draftFromJob(job: CronJob): CronDraft {
 }
 
 function validModelFor(engine: string, modelId: string | undefined): string {
-  // LM Studio model ids are dynamic (fetched live), so trust whatever was stored.
-  if (engine === 'banana-local') return modelId || '';
+  // LM Studio / Fireworks model ids are dynamic (fetched live), so trust whatever was stored.
+  if (engine === 'banana-local' || engine === 'banana-fireworks') return modelId || '';
   const list = staticModelsForEngine(engine);
   if (modelId && list.some((m) => m.id === modelId)) return modelId;
   return list[0]?.id ?? '';
