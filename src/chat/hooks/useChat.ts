@@ -170,8 +170,28 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
     return next;
   }
 
-  // Final `assistant` event: with content_block_* coverage above we already
-  // have everything. Skip.
+  // Final `assistant` event. Backends that stream Anthropic-format deltas
+  // (Anthropic, Z.ai) deliver text via content_block_delta above, so the
+  // block is already full and this is a no-op. xAI's Anthropic-compatible
+  // stream, however, emits message_start + content_block_start(thinking) and
+  // then skips every content_block_delta, delivering the full text only in
+  // this final assistant event. Without this fallback xAI replies render as a
+  // blank bubble. Guard on "no text yet for this turn" so delta-backed
+  // backends never double-render.
+  if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
+    const turnId = turnIdRef.current;
+    const fullText = (ev.message.content as Array<any>)
+      .filter((c) => c?.type === 'text' && typeof c.text === 'string')
+      .map((c) => c.text)
+      .join('');
+    if (fullText) {
+      const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
+      if (!hasText) {
+        return [...blocks, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, cbIndex: -1, open: false }];
+      }
+    }
+    return blocks;
+  }
 
   return blocks;
 }
