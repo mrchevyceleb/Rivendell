@@ -13,6 +13,7 @@ import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/acco
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl } from './xai-proxy.ts';
+import { getXaiOauthToken, getXaiOauthTokenSync } from '../routes/xai-oauth.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -219,7 +220,10 @@ function xaiEnv(): NodeJS.ProcessEnv {
   // at the proxy, which forwards to https://api.x.ai. RIVENDELL_XAI_BASE_URL
   // (the proxy URL) is set at startup once the proxy is listening.
   env.ANTHROPIC_BASE_URL = XAI_BASE_URL || xaiProxyBaseUrl();
-  env.ANTHROPIC_AUTH_TOKEN = process.env.GROK_PERSONAL_API_KEY || '';
+  // Prefer the SuperGrok subscription OAuth token (flat-rate, auto-refreshed)
+  // over the metered GROK_PERSONAL_API_KEY. The same Bearer works on xAI's
+  // /v1/messages endpoint, so the claude CLI + proxy path is unchanged.
+  env.ANTHROPIC_AUTH_TOKEN = getXaiOauthTokenSync() || process.env.GROK_PERSONAL_API_KEY || '';
   env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = XAI_COMPACT_WINDOW;
   env.SAMWISE_ACCOUNT = 'xai';
   return env;
@@ -233,6 +237,22 @@ const resolveClaudeEffort = (cli: CliKind, e?: string): string =>
   cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
   : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
+
+/** Prime the SuperGrok OAuth token (refreshing now if it's near expiry) and
+ *  keep it fresh on a background interval so xaiEnv() always has a valid token
+ *  at spawn time. Safe to call when no token exists (no-op). */
+let xaiTokenTimer: NodeJS.Timeout | null = null;
+export async function primeXaiOauthToken(): Promise<void> {
+  try { await getXaiOauthToken(); }
+  catch (err) { console.warn(`[chat xai] OAuth token prime failed: ${(err as Error).message}`); }
+  if (xaiTokenTimer) return;
+  // Refresh every 30 minutes. getXaiOauthToken() only hits xAI when the token
+  // is within its 5-minute expiry skew, so this is cheap between refreshes.
+  xaiTokenTimer = setInterval(() => {
+    getXaiOauthToken().catch((err) => console.warn(`[chat xai] OAuth refresh failed: ${(err as Error).message}`));
+  }, 30 * 60 * 1000).unref();
+}
+
 
 // assistant-mcp is defined in the personal-account config (~/.claude.json) but NOT
 // in the kim-account config (~/.claude/.claude.json) that Elrond (cli='assistant')

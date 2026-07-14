@@ -24,6 +24,8 @@ import { artifactsRouter } from './routes/artifacts.ts';
 import { mcpRouter } from './routes/mcp.ts';
 import { filesRouter } from './routes/files.ts';
 import { internalRouter } from './routes/internal.ts';
+import { xaiOauthRouter } from './routes/xai-oauth.ts';
+import { primeXaiOauthToken } from './chat/runner.ts';
 
 const app = express();
 app.use(express.json({ limit: '25mb' }));
@@ -56,6 +58,10 @@ app.use('/api/files', filesRouter);
 // Localhost-only headless runner (cron agentic loop). Gated by MCP_AUTH_TOKEN.
 app.use('/internal', internalRouter);
 
+// xAI SuperGrok OAuth login page (browser, one-time). Mounted before the SPA
+// fallback so GET /xai-oauth serves the connector instead of index.html.
+app.use('/xai-oauth', xaiOauthRouter);
+
 const server = createServer(app);
 // Start the xAI transform proxy before chat registers so its base URL is
 // resolved before any xAI chat session can spawn. Non-fatal: a failure logs
@@ -65,6 +71,9 @@ try {
 } catch (err) {
   console.warn(`[rivendell] xAI proxy failed to start: ${(err as Error).message}`);
 }
+// Prime the SuperGrok OAuth token (refresh now if near expiry, then background
+// refresh every 30m) so xAI chat turns use the subscription, not API credits.
+await primeXaiOauthToken();
 const stopChat = await registerChat(app, server);
 registerScribeSocket(server);
 startWorkerQueue();
