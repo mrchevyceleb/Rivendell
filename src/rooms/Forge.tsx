@@ -109,17 +109,17 @@ const schedulePresets = [
   { label: 'M/F 7 AM', value: 'mon/fri 7am', cron: '0 7 * * 1,5' },
 ];
 
-// The five engines Matt wants for scheduled work. Each one dispatches to a real
+// The four engines Matt wants for scheduled work. Each one dispatches to a real
 // backend on the local cron runner (see assistant-mcp cron-engines.ts):
 //   assistant     → KG Claude (kim account, claude CLI)
 //   codex         → KG Codex (kim account, codex CLI)
-//   claude        → Personal Claude (personal account, claude CLI)
 //   banana-local  → LM Studio local model (HTTP completion, on-box)
 //   zai           → GLM 5.2 via Z.ai (claude CLI redirected to z.ai)
+// Personal Claude (engine 'claude') was removed; legacy jobs with that engine
+// are migrated to KG Claude (assistant) on display and edit.
 const CRON_ENGINES: { id: string; label: string; hint: string }[] = [
   { id: 'assistant', label: 'KG Claude', hint: 'Kim account · agentic CLI with tools' },
   { id: 'codex', label: 'KG Codex', hint: 'Kim account · codex CLI with tools' },
-  { id: 'claude', label: 'Personal Claude', hint: 'Personal account · agentic CLI with tools' },
   { id: 'banana-local', label: 'LM Studio · Local', hint: 'On-box local model · plain completion' },
   { id: 'zai', label: 'GLM 5.2', hint: 'Z.ai GLM · agentic CLI with tools' },
 ];
@@ -145,13 +145,18 @@ function engineFromAiModel(m: CronAiModel): string {
  * Claude by default). Returns the human label + optional specific model id.
  */
 function engineDisplay(job: CronJob): { label: string; modelId?: string } {
+  // Migrate the removed Personal Claude engine ('claude') to KG Claude so
+  // legacy jobs render with a real label instead of the bare id.
+  if (job.engine === 'claude') {
+    return { label: engineLabel('assistant'), modelId: job.modelId };
+  }
   if (job.engine && KNOWN_ENGINES.has(job.engine)) {
     return { label: engineLabel(job.engine), modelId: job.modelId };
   }
   if (job.engine) {
     return { label: prettifyEngineId(job.engine), modelId: job.modelId };
   }
-  return { label: job.runtime === 'local' ? 'KG Claude' : 'Claude', modelId: job.modelId };
+  return { label: 'KG Claude', modelId: job.modelId };
 }
 function prettifyEngineId(id: string): string {
   const cleaned = id.replace(/[-_]/g, ' ').replace(/\bbanana\b/gi, 'LM Studio').replace(/\s+/g, ' ').trim();
@@ -163,7 +168,7 @@ type ModelOpt = { id: string; label: string };
 function staticModelsForEngine(engine: string): ModelOpt[] {
   if (engine === 'zai') return ZAI_MODELS;
   if (engine === 'codex') return CODEX_MODELS;
-  if (engine === 'assistant' || engine === 'claude') return CLAUDE_MODELS;
+  if (engine === 'assistant') return CLAUDE_MODELS;
   return []; // banana-local: fetched live from LM Studio
 }
 
@@ -466,7 +471,7 @@ export function Forge() {
                 const eng = engineDisplay(job);
                 return (
                 <article
-                  className={`cron-card status-${job.status} engine-${job.engine || (job.runtime === 'local' ? 'assistant' : 'claude')} source-${job.source || 'assistant-mcp'} ${job.readOnly ? 'is-readonly' : ''} ${selected?.id === job.id ? 'is-selected' : ''}`}
+                  className={`cron-card status-${job.status} engine-${job.engine === 'claude' ? 'assistant' : (job.engine || 'assistant')} source-${job.source || 'assistant-mcp'} ${job.readOnly ? 'is-readonly' : ''} ${selected?.id === job.id ? 'is-selected' : ''}`}
                   key={job.id}
                   onClick={() => setSelectedId(job.id)}
                 >
@@ -916,8 +921,9 @@ function CronHistory({ runs, loading, error, readOnly, expanded, onToggle, onRef
 }
 
 function draftFromJob(job: CronJob): CronDraft {
-  // Clamp to one of the five known engines so editing a legacy/unknown job
-  // lands on a valid choice instead of a phantom dropdown value.
+  // Clamp to one of the four known engines so editing a legacy/unknown job
+  // lands on a valid choice instead of a phantom dropdown value. A legacy
+  // 'claude' (Personal Claude) job falls through to KG Claude (assistant).
   const fallback = job.aiModel === 'codex' ? 'codex' : 'assistant';
   const rawEngine = job.engine && KNOWN_ENGINES.has(job.engine) ? job.engine : fallback;
   const cron = job.schedule || '';
