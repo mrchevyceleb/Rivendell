@@ -160,7 +160,8 @@ function engineDisplay(job: CronJob): { label: string; modelId?: string } {
   if (job.engine) {
     return { label: prettifyEngineId(job.engine), modelId: job.modelId };
   }
-  return { label: 'KG Claude', modelId: job.modelId };
+  // Engine-less legacy jobs use the coarse aiModel field.
+  return { label: engineLabel(engineFromAiModel(job.aiModel || 'claude')), modelId: job.modelId };
 }
 function prettifyEngineId(id: string): string {
   const cleaned = id.replace(/[-_]/g, ' ').replace(/\bbanana\b/gi, 'LM Studio').replace(/\s+/g, ' ').trim();
@@ -351,7 +352,9 @@ export function Forge() {
   const pausedCount = jobs.filter((job) => job.status === 'paused').length;
   const failedCount = jobs.filter((job) => job.status === 'failed').length;
   const resolvedSchedule = resolveScheduleInput(draft.schedule);
-  const cannotSave = !draft.name.trim() || !draft.prompt.trim() || !resolvedSchedule.valid;
+  const modelRequired = draft.engine === 'banana-local' || draft.engine === 'banana-fireworks';
+  const missingRequiredModel = modelRequired && !draft.model.trim();
+  const cannotSave = !draft.name.trim() || !draft.prompt.trim() || !resolvedSchedule.valid || missingRequiredModel;
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['cron'] });
@@ -729,7 +732,9 @@ export function Forge() {
 
               {cannotSave ? (
                 <p className="form-error">
-                  Fill in the task title, schedule, and prompt before saving.
+                  {missingRequiredModel
+                    ? `Choose a ${draft.engine === 'banana-fireworks' ? 'Fireworks' : 'LM Studio'} model before saving.`
+                    : 'Fill in the task title, schedule, and prompt before saving.'}
                 </p>
               ) : null}
 

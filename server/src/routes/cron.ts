@@ -13,6 +13,23 @@ import { CRON_LOCAL_TRIGGER_URL } from '../config.ts';
 
 export const cronRouter = Router();
 
+const MODEL_REQUIRED_ENGINES = new Set(['banana-local', 'banana-fireworks']);
+const REMOVED_PERSONAL_ENGINES = new Set(['claude', 'codex-personal']);
+
+function validateCronEnginePayload(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return 'request body must be an object';
+  const payload = body as Record<string, unknown>;
+  const engine = typeof payload.engine === 'string' ? payload.engine.trim() : '';
+  if (REMOVED_PERSONAL_ENGINES.has(engine)) {
+    return `engine "${engine}" was removed; use ${engine === 'claude' ? 'assistant (KG Claude)' : 'codex (KG Codex)'}`;
+  }
+  if (MODEL_REQUIRED_ENGINES.has(engine)) {
+    const modelId = typeof payload.modelId === 'string' ? payload.modelId.trim() : '';
+    if (!modelId) return `engine "${engine}" requires modelId`;
+  }
+  return null;
+}
+
 cronRouter.get('/', asyncHandler(async (_req, res) => {
   try {
     res.json(await fetchAdminCronJobs());
@@ -34,6 +51,11 @@ cronRouter.get('/:id/history', asyncHandler(async (req, res) => {
 }));
 
 cronRouter.post('/', asyncHandler(async (req, res) => {
+  const validationError = validateCronEnginePayload(req.body);
+  if (validationError) {
+    res.status(400).json({ error: validationError });
+    return;
+  }
   try {
     const job = await createAdminCronJob(req.body);
     res.status(201).json(job);
@@ -77,6 +99,11 @@ cronRouter.post('/:id/run-now', asyncHandler(async (req, res) => {
 }));
 
 cronRouter.patch('/:id', asyncHandler(async (req, res) => {
+  const validationError = validateCronEnginePayload(req.body);
+  if (validationError) {
+    res.status(400).json({ error: validationError });
+    return;
+  }
   try {
     const job = await updateAdminCronJob(String(req.params.id), req.body);
     if (!job) {
