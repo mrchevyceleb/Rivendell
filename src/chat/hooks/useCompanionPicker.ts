@@ -1,26 +1,65 @@
 import { useState } from 'react';
 import type { CompanionId } from '../data/types';
 import { useBananaModel, useFireworksModel } from './useBananaModel';
+import {
+  normalizeCodexEffort,
+  normalizeCodexModel,
+  readStoredCodexEffort,
+  readStoredCodexModel,
+} from '../codexModels';
 
 // Companion + model/effort selection for an embedded chat (the Workspace room).
-// Unlike Hall — which exposes assistant/codex/banana top-level tabs and reaches
-// the personal accounts through a second "banana engine" picker — this exposes
-// every engine directly in one flat list, which is what Matt wants in the side
-// panel: pick KG vs personal Claude/Codex (or OpenRouter / Local) in one click.
+// Unlike Hall, this exposes every engine family directly in one flat list. For
+// Claude Code and Codex, the selected repo decides KG vs personal through
+// account-map.json.
 //
 // Model/effort choices share localStorage keys with Hall so a model pick in one
 // place carries to the other; only the companion choice is panel-scoped.
 
-export const WORKSPACE_COMPANIONS: { id: CompanionId; label: string }[] = [
-  { id: 'assistant', label: 'Elrond · KG Claude' },
-  { id: 'claude', label: 'Personal Claude' },
-  { id: 'codex', label: 'KG Codex' },
-  { id: 'codex-personal', label: 'Personal Codex' },
-  { id: 'banana', label: 'OpenRouter' },
-  { id: 'banana-fireworks', label: 'Fireworks' },
-  { id: 'banana-local', label: 'Local · LM Studio' },
-  { id: 'zai', label: 'Z.ai · GLM' },
+// One entry per picker lane. `id` is the (string) selection key; `cli` is the
+// engine the server runs; `account`, when set, PINS that login no matter the
+// repo. Rivendell's picker is the only surface that overrides the per-repo
+// account-map (terminals/AutoSam keep repo resolution) — the choice rides into
+// the chat via useChat's chatId encoding and is forced at spawn server-side.
+export const WORKSPACE_COMPANIONS: {
+  id: string;
+  cli: CompanionId;
+  account?: RepoAccount;
+  label: string;
+}[] = [
+  { id: 'claude-kim', cli: 'claude', account: 'kim', label: 'Claude · kim' },
+  { id: 'codex-kim', cli: 'codex', account: 'kim', label: 'Codex · kim' },
+  { id: 'banana', cli: 'banana', label: 'OpenRouter' },
+  { id: 'banana-fireworks', cli: 'banana-fireworks', label: 'Fireworks' },
+  { id: 'banana-local', cli: 'banana-local', label: 'Local · LM Studio' },
+  { id: 'zai', cli: 'zai', label: 'Z.ai · GLM' },
+  { id: 'xai', cli: 'xai', label: 'xAI · Grok 4.5' },
 ];
+
+// The two logins Rivendell can pin a lane to. The canonical account map lives
+// at ~/samwise/.accounts/account-map.json (consumed server-side); these are the
+// only two accounts configured on Moria.
+export type RepoAccount = 'kim' | 'personal';
+
+// Plain-words, one-line explanation of the ACTIVE lane's auth, shown under the
+// picker so "which account is this?" is never a mystery.
+export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null): string {
+  const who =
+    account === 'kim' ? 'the kim login (R-Link / Kim Garst)'
+    : account === 'personal' ? 'your personal login'
+    : 'the login mapped to the selected repo';
+  switch (cli) {
+    case 'assistant':      return `Elrond on Claude Code, signed in as ${who}.`;
+    case 'claude':         return `Claude Code, signed in as ${who}.`;
+    case 'codex':           return `Codex, signed in as ${who}.`;
+    case 'zai':              return 'GLM 5.2 via your Z.ai coding plan (no Claude or Codex login).';
+    case 'xai':              return 'Grok 4.5 via your xAI coding plan (no Claude or Codex login).';
+    case 'banana':           return 'OpenRouter, billed to your OpenRouter API key (no Claude or Codex login).';
+    case 'banana-fireworks': return 'Fireworks, billed to your Fireworks API key (no Claude or Codex login).';
+    case 'banana-local':     return 'A local model on Moria via LM Studio. No account, no cloud cost.';
+    default:                 return '';
+  }
+}
 
 // Z.ai coding-plan models (Anthropic-compatible, run through the claude CLI).
 // GLM 5.2's id MUST carry the `[1m]` suffix to get its 1M context window; bare
@@ -67,29 +106,81 @@ export function readStoredZaiEffort(): string {
   return effort;
 }
 
+// xAI coding-plan models (Anthropic-compatible, run through the claude CLI
+// redirected to https://api.x.ai). Grok 4.5 is the current coding-plan model.
+export const DEFAULT_XAI_MODEL = 'grok-4.5';
+export const DEFAULT_XAI_EFFORT = 'high';
+export const XAI_MODELS: { id: string; label: string }[] = [
+  { id: DEFAULT_XAI_MODEL, label: 'Grok 4.5' },
+];
+// xAI's Anthropic endpoint maps Claude Code's effort onto Grok's thinking
+// budget. Exposing the full range would mostly duplicate the same behavior;
+// offer the two meaningful levels, matching the GLM picker.
+export const XAI_EFFORTS = ['high', 'max'];
+
+export function normalizeXaiModel(model: string): string {
+  return XAI_MODELS.some((entry) => entry.id === model) ? model : DEFAULT_XAI_MODEL;
+}
+
+export function normalizeXaiEffort(effort: string): string {
+  return XAI_EFFORTS.includes(effort) ? effort : DEFAULT_XAI_EFFORT;
+}
+
+export function readStoredXaiModel(): string {
+  if (typeof window === 'undefined') return DEFAULT_XAI_MODEL;
+  const raw = localStorage.getItem('rivendell:xai-model') || DEFAULT_XAI_MODEL;
+  const model = normalizeXaiModel(raw);
+  if (model !== raw) localStorage.setItem('rivendell:xai-model', model);
+  return model;
+}
+
+export function readStoredXaiEffort(): string {
+  if (typeof window === 'undefined') return DEFAULT_XAI_EFFORT;
+  const raw = localStorage.getItem('rivendell:xai-effort') || DEFAULT_XAI_EFFORT;
+  const effort = normalizeXaiEffort(raw);
+  if (effort !== raw) localStorage.setItem('rivendell:xai-effort', effort);
+  return effort;
+}
+
 export type CompanionPicker = ReturnType<typeof useCompanionPicker>;
 
 export function useCompanionPicker(storageKey: string) {
-  const [companion, setCompanionState] = useState<CompanionId>(
-    () => (readLS(storageKey, 'assistant') as CompanionId),
-  );
-  const setCompanion = (c: CompanionId) => {
+  const [companion, setCompanionState] = useState<string>(() => {
+    // Migrate stale lanes removed from the picker (assistant / claude-personal /
+    // codex-personal) to the new default so a stored selection doesn't silently
+    // fall through to the first lane on every load.
+    const raw = readLS(storageKey, 'claude-kim');
+    const valid = WORKSPACE_COMPANIONS.some((c) => c.id === raw);
+    if (!valid) {
+      if (typeof window !== 'undefined') localStorage.setItem(storageKey, 'claude-kim');
+      return 'claude-kim';
+    }
+    return raw;
+  });
+  const setCompanion = (c: string) => {
     setCompanionState(c);
     if (typeof window !== 'undefined') localStorage.setItem(storageKey, c);
   };
+  // Resolve the selected lane to its engine + (optional) pinned account. A stale
+  // stored id (e.g. a pre-account-lanes 'claude') falls back to the first lane.
+  const entry = WORKSPACE_COMPANIONS.find((c) => c.id === companion) ?? WORKSPACE_COMPANIONS[0];
+  const account = entry.account ?? null;
 
   const bananaModel = useBananaModel();
   const fireworksModel = useFireworksModel();
 
   const [claudeModel, setClaudeModelState] = useState(() => readLS('rivendell:claude-model', 'claude-opus-4-8'));
   const [claudeEffort, setClaudeEffortState] = useState(() => readLS('rivendell:claude-effort', 'xhigh'));
-  const [codexModel, setCodexModelState] = useState(() => readLS('rivendell:codex-model', 'gpt-5.5'));
-  const [codexEffort, setCodexEffortState] = useState(() => readLS('rivendell:codex-effort', 'xhigh'));
+  const [codexModel, setCodexModelState] = useState(readStoredCodexModel);
+  const [codexEffort, setCodexEffortState] = useState(() => readStoredCodexEffort(codexModel));
   const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);
   const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
+  const [xaiModel, setXaiModelState] = useState(readStoredXaiModel);
+  const [xaiEffort, setXaiEffortState] = useState(readStoredXaiEffort);
   const [bananaEffort, setBananaEffortState] = useState(() => readLS('rivendell:banana-effort', 'medium'));
   const [localModel, setLocalModelState] = useState(() => readLS('rivendell:local-model', ''));
   const [localContextWindow, setLocalContextWindow] = useState<number | null>(null);
+  const [localSupportsThinking, setLocalSupportsThinking] = useState(false);
 
   const persist = (key: string, set: (v: string) => void) => (v: string) => {
     set(v);
@@ -97,8 +188,23 @@ export function useCompanionPicker(storageKey: string) {
   };
   const setClaudeModel = persist('rivendell:claude-model', setClaudeModelState);
   const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState);
-  const setCodexModel = persist('rivendell:codex-model', setCodexModelState);
-  const setCodexEffort = persist('rivendell:codex-effort', setCodexEffortState);
+  const setCodexModel = (value: string) => {
+    const model = normalizeCodexModel(value);
+    const effort = normalizeCodexEffort(model, codexEffort);
+    setCodexModelState(model);
+    setCodexEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:codex-model', model);
+      localStorage.setItem('rivendell:codex-effort', effort);
+    }
+  };
+  const setCodexEffort = (value: string) => {
+    const effort = normalizeCodexEffort(codexModel, value);
+    setCodexEffortState(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:codex-effort', effort);
+    }
+  };
   const setZaiModel = (v: string) => {
     const model = normalizeZaiModel(v);
     setZaiModelState(model);
@@ -109,19 +215,31 @@ export function useCompanionPicker(storageKey: string) {
     setZaiEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
   };
+  const setXaiModel = (v: string) => {
+    const model = normalizeXaiModel(v);
+    setXaiModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:xai-model', model);
+  };
+  const setXaiEffort = (v: string) => {
+    const effort = normalizeXaiEffort(v);
+    setXaiEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:xai-effort', effort);
+  };
   const setBananaEffort = persist('rivendell:banana-effort', setBananaEffortState);
   const setLocalModel = persist('rivendell:local-model', setLocalModelState);
 
-  const cli = companion;
+  const cli = entry.cli;
   const isClaude = cli === 'assistant' || cli === 'claude';
-  const isCodex = cli === 'codex' || cli === 'codex-personal';
+  const isCodex = cli === 'codex';
   const isLocal = cli === 'banana-local';
   const isOpenRouter = cli === 'banana';
   const isFireworks = cli === 'banana-fireworks';
   const isZai = cli === 'zai';
+  const isXai = cli === 'xai';
 
   const model =
     isZai ? zaiModel
+    : isXai ? xaiModel
     : isLocal ? (localModel || undefined)
     : isOpenRouter ? bananaModel.model
     : isFireworks ? fireworksModel.model
@@ -131,20 +249,23 @@ export function useCompanionPicker(storageKey: string) {
   const effort =
     isCodex ? codexEffort
     : isZai ? zaiEffort
+    : isXai ? xaiEffort
     : isClaude ? claudeEffort
     : (isOpenRouter || isLocal || isFireworks) ? bananaEffort
     : undefined;
 
   return {
     companion, setCompanion,
-    cli, model, effort,
-    isClaude, isCodex, isLocal, isOpenRouter, isFireworks, isZai,
+    cli, account, model, effort,
+    isClaude, isCodex, isLocal, isOpenRouter, isFireworks, isZai, isXai,
     bananaModel,
     fireworksModel,
     claudeModel, setClaudeModel, claudeEffort, setClaudeEffort,
     codexModel, setCodexModel, codexEffort, setCodexEffort,
     zaiModel, setZaiModel, zaiEffort, setZaiEffort,
+    xaiModel, setXaiModel, xaiEffort, setXaiEffort,
     bananaEffort, setBananaEffort,
     localModel, setLocalModel, localContextWindow, setLocalContextWindow,
+    localSupportsThinking, setLocalSupportsThinking,
   };
 }

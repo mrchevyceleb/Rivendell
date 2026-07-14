@@ -1,19 +1,18 @@
 // Shared types between mock + real-backend data shapes.
 
-// Rivendell binds each companion to a CLI + account/provider via this id.
-// User-facing tabs: assistant (Elrond = Kim Claude), codex (Kim Codex), banana
-// (engine multiplexer). The banana engine picker switches the effective cli to:
-// claude (Personal Claude), codex-personal (Personal Codex), banana (OpenRouter),
-// banana-local (Local vLLM).
+// Rivendell binds each companion to a CLI/provider via this id. Claude Code
+// and Codex account choice comes from the selected repo's account-map rule.
+// The banana engine picker switches the effective cli to claude, banana
+// (OpenRouter), banana-fireworks, banana-local, zai, or xai.
 export type CompanionId =
   | 'claude'
   | 'codex'
   | 'assistant'
   | 'banana'
-  | 'codex-personal'
   | 'banana-local'
   | 'banana-fireworks'
-  | 'zai';
+  | 'zai'
+  | 'xai';
 
 // A live session reported by /api/live — used to mark "running now" entries
 // in the chronicle ribbon.

@@ -54,10 +54,12 @@ export type RivendellCronJob = {
   actionType?: string;
   prompt?: string;
   aiModel?: CronAiModel;
-  /** Full companion engine id (assistant/claude/codex/codex-personal/banana/banana-fireworks/banana-local/zai). */
+  /** Full companion engine id (assistant/claude/codex/banana/banana-fireworks/banana-local/zai/xai). */
   engine?: string;
   /** Specific model id for the engine (glm-5.2, claude-opus-4-8, gpt-5.5, an OpenRouter/LM Studio id). */
   modelId?: string;
+  /** Model-specific Codex effort stored in action_config.reasoning_effort. */
+  reasoningEffort?: string;
   repo?: string;
   toolName?: string;
   deliveryChannel?: string;
@@ -391,6 +393,50 @@ export async function runAdminCronJob(id: string): Promise<unknown> {
   return assistantAdminJson(`/admin/api/cron/jobs/${encodeURIComponent(id)}/run`, { method: 'POST' });
 }
 
+export type RivendellCronRun = {
+  id: string;
+  status: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  result: unknown;
+  error: string | null;
+};
+
+type AdminCronExecution = {
+  id?: string;
+  status?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  result?: unknown;
+  error_message?: string | null;
+};
+
+/**
+ * Execution history for a cron job. The upstream stores every run in
+ * `scheduled_jobs`; we project it to the clean shape the Forge renders.
+ */
+export async function fetchAdminCronHistory(id: string, limit = 15): Promise<RivendellCronRun[]> {
+  const data = await assistantAdminJson<{ executions?: AdminCronExecution[] }>(
+    `/admin/api/cron/jobs/${encodeURIComponent(id)}/history?limit=${limit}`,
+  );
+  return (data.executions ?? []).map(mapCronRun);
+}
+
+function mapCronRun(e: AdminCronExecution): RivendellCronRun {
+  const startedAt = e.started_at ? new Date(e.started_at).getTime() : null;
+  const completedAt = e.completed_at ? new Date(e.completed_at).getTime() : null;
+  return {
+    id: e.id || `${e.started_at || ''}-${e.status || ''}`,
+    status: e.status || 'unknown',
+    startedAt: e.started_at || null,
+    completedAt: e.completed_at || null,
+    durationMs: startedAt && completedAt ? Math.max(0, completedAt - startedAt) : null,
+    result: e.result,
+    error: e.error_message || null,
+  };
+}
+
 export async function fetchAdminCalendarEvents(): Promise<unknown> {
   return assistantAdminJson('/admin/api/calendar/events');
 }
@@ -485,6 +531,9 @@ function mapCron(job: AdminCron): RivendellCronJob {
   const aiModel = normalizeCronModel(job.action_config?.model, job.runtime);
   const engine = typeof job.action_config?.engine === 'string' ? job.action_config.engine : undefined;
   const modelId = typeof job.action_config?.model_id === 'string' ? job.action_config.model_id : undefined;
+  const reasoningEffort = typeof job.action_config?.reasoning_effort === 'string'
+    ? job.action_config.reasoning_effort
+    : undefined;
   const repo = normalizeOptionalString(job.action_config?.repo);
   const toolName = typeof job.action_config?.tool_name === 'string' ? job.action_config.tool_name : undefined;
   const maxTokens = typeof job.action_config?.max_tokens === 'number' ? job.action_config.max_tokens : undefined;
@@ -506,6 +555,7 @@ function mapCron(job: AdminCron): RivendellCronJob {
     aiModel,
     engine,
     modelId,
+    reasoningEffort,
     repo,
     toolName,
     deliveryChannel: job.delivery_channel || undefined,
@@ -576,6 +626,7 @@ function actionConfigFromCron(input: Partial<RivendellCronJob>): Record<string, 
   // Full engine + specific model — what the local cron runner dispatches on.
   if (input.engine !== undefined) config.engine = input.engine;
   if (input.modelId !== undefined) config.model_id = input.modelId;
+  if (input.reasoningEffort !== undefined) config.reasoning_effort = input.reasoningEffort;
   const repo = normalizeOptionalString(input.repo);
   const cwd = normalizeOptionalString(input.cwd);
   if (repo !== undefined) config.repo = repo;

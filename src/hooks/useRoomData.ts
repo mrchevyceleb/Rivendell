@@ -5,6 +5,7 @@ import type {
   CalendarEventsResponse,
   ChronicleEntry,
   CronJob,
+  CronRun,
   EmailItem,
   FamilyItem,
   HallSummary,
@@ -118,6 +119,23 @@ export function useCronJobs() {
     refetchOnWindowFocus: 'always',
   });
   return { ...result, data: result.data ?? emptyCronJobs };
+}
+
+/**
+ * Per-job execution history. Polls on an interval so a manual "Run once"
+ * surfaces in the list, but TanStack Query handles dedup + abort so a slow
+ * upstream can't stack overlapping requests or overwrite newer state. Disabled
+ * for managed/readOnly jobs (synthetic ids that have no history rows).
+ */
+export function useCronHistory(jobId: string | null | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ['cron-history', jobId],
+    queryFn: () => apiJson<{ runs: CronRun[] }>(`/api/cron/${encodeURIComponent(String(jobId))}/history?limit=15`),
+    enabled: Boolean(jobId) && enabled,
+    staleTime: 10_000,
+    refetchInterval: enabled ? 8_000 : false,
+    retry: false,
+  });
 }
 
 export function useWeavings() {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
+import { contextWindowForCodexModel } from '../codexModels';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
@@ -17,14 +18,14 @@ export type ContextUsage = {
 
 const DEFAULT_WINDOW_TOKENS = 200_000;
 const LARGE_WINDOW_TOKENS = 1_000_000;
-const CODEX_WINDOW_TOKENS = 400_000; // GPT-5 family default
 const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
+const GROK_WINDOW_TOKENS = 256_000; // Grok 4.5 context window
 
 // Pick the starting context window for a given CLI before we've seen any model
-// id. Codex's GPT-5 family is 400K; current Claude (Opus 4.6/4.7/4.8, Sonnet
-// 4.6) is 1M; GLM 5.2 is 1M; banana/OpenRouter defaults to 200K.
+// id. Codex uses the selected catalog entry; current Claude (Opus 4.6/4.7/4.8,
+// Sonnet 4.6) is 1M; GLM 5.2 is 1M; banana/OpenRouter defaults to 200K.
 function defaultWindowForCli(cli: CompanionId, model?: string): number {
-  if (isCodexCli(cli)) return CODEX_WINDOW_TOKENS;
+  if (isCodexCli(cli)) return contextWindowForCodexModel(model);
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
   return windowForClaudeModel(model); // Claude/Z.ai model ids carry the real window.
 }
@@ -39,7 +40,7 @@ function windowForCli(cli: CompanionId, model: string | undefined, override?: nu
 }
 
 function isCodexCli(cli: CompanionId): boolean {
-  return cli === 'codex' || cli === 'codex-personal';
+  return cli === 'codex';
 }
 
 function shouldReadResultUsage(cli: CompanionId): boolean {
@@ -59,6 +60,7 @@ function windowForClaudeModel(model: string | undefined): number {
   if (m.includes('haiku')) return DEFAULT_WINDOW_TOKENS;
   if (m.includes('glm-5.2')) return LARGE_WINDOW_TOKENS;
   if (m.includes('glm')) return DEFAULT_WINDOW_TOKENS;
+  if (m.includes('grok-4.5') || m.includes('grok-4-5')) return GROK_WINDOW_TOKENS;
   if (m.includes('opus') || m.includes('sonnet') || m.includes('fable') || m.includes('mythos')) return LARGE_WINDOW_TOKENS;
   return DEFAULT_WINDOW_TOKENS;
 }
@@ -338,13 +340,16 @@ export function useChat(opts: {
   model?: string;
   /** Optional known context window for engines whose model id does not encode it. */
   contextWindowTokens?: number | null;
-  /** Reasoning effort (Codex; Claude uses its config default). */
+  /** Reasoning/thinking effort for engines that expose one. */
   effort?: string;
+  /** Account-pinned login for this lane ('kim' | 'personal'), or undefined for
+   *  the repo-resolved default. Rides inside the chatId so the server spawns the
+   *  CLI under that account and keeps kim/personal as separate sessions. */
+  account?: string;
 }) {
   const {
     repo,
     cli,
-    chatId = 'main',
     enabled,
     initialMessage,
     onInitialMessageSent,
@@ -352,6 +357,11 @@ export function useChat(opts: {
     contextWindowTokens,
     effort,
   } = opts;
+  // Encode the account into the chatId (same `__acct__` separator the server
+  // parses in accountResolver.ts). Every WS message + storage key then keys off
+  // this, so switching account rebinds to that account's own session.
+  const baseChatId = opts.chatId ?? 'main';
+  const chatId = opts.account ? `${baseChatId}__acct__${opts.account}` : baseChatId;
   // Mirror the model into a ref so the WS send path always reads the latest
   // pick without re-subscribing the connection effect on every change.
   const modelRef = useRef<string | undefined>(model);
@@ -468,9 +478,8 @@ export function useChat(opts: {
     teardownRef.current = false;
     const connectionId = ++connectionIdRef.current;
     const isCurrentConnection = () => connectionIdRef.current === connectionId && !teardownRef.current;
-    // Reset the assumed context window to the per-CLI default each time we
-    // (re)connect. The system/init event will refine it for claude; codex
-    // sticks at 400K unless usage forces a ratchet.
+    // Reset the assumed context window to the selected model each time we
+    // (re)connect. The system/init event will refine it for Claude.
     windowTokensRef.current = windowForCli(cli, modelRef.current, contextWindowTokens);
     setUsage(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
@@ -680,8 +689,8 @@ export function useChat(opts: {
             // Safety net (claude only): if observed usage exceeds the known
             // window, ratchet up to 1M. Covers the case where init didn't
             // carry a model id but the session is plainly running on the
-            // large-context variant. Codex has no 1M variant — the meter just
-            // clamps at 100% if usage somehow exceeds its 400K window.
+            // large-context variant. Codex windows come from the model catalog,
+            // so the meter clamps at 100% if reported usage somehow exceeds one.
             if (
               !isCodexCli(cli) &&
               total > windowTokensRef.current &&

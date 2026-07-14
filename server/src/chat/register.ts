@@ -228,7 +228,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       cli !== 'codex-personal' &&
       cli !== 'banana-local' &&
       cli !== 'banana-fireworks' &&
-      cli !== 'zai'
+      cli !== 'zai' &&
+      cli !== 'xai'
     ) {
       res.status(400).json({ error: 'invalid cli' });
       return;
@@ -331,7 +332,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // backend already marked the turn ended; plain idle chatter stays
         // suppressed.
         const code = typeof sev.code === 'string' ? sev.code : '';
-        if (busy || code.startsWith('BANANA_')) {
+        // Fatal errors (e.g. a 401 auth failure) must ALWAYS reach the client,
+        // even with no turn in flight, or the chat dies silently. Only harmless
+        // idle stderr chatter is suppressed.
+        if (busy || sev.fatal || code.startsWith('BANANA_')) {
+          // NB: do NOT clear `busy` on fatal. failAuth()'s deferred shutdown
+          // fires `closed` next, and the closed branch only sends `sessionClosed`
+          // (which clears the client spinner) while `busy` is true. Zeroing it
+          // here would swallow that and strand the spinner until the watchdog.
           safeSend({
             type: 'error',
             message: sev.message,
@@ -528,7 +536,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // with the current pick before an idle turn. getOrCreateSession recycles
           // an IDLE session whose model/effort differ (busy sessions left intact),
           // preserving session_id so the replacement --resumes the conversation.
-          if (!wasBusy && (cliKind === 'claude' || cliKind === 'assistant' || cliKind === 'zai') && repoPath) {
+          if (!wasBusy && (cliKind === 'claude' || cliKind === 'assistant' || cliKind === 'zai' || cliKind === 'xai') && repoPath) {
             const reconciled = await getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort, recycleOnMismatch: true });
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
           } else if (!session && cliKind && repoPath) {

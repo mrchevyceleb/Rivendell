@@ -9,6 +9,7 @@ type Catalog = {
   loaded: string | null;
   ready: boolean;
   contextLen: number | null;
+  supportsThinking: boolean;
   cached: string[];
   curated: { id: string; label: string; note: string }[];
 };
@@ -127,9 +128,11 @@ async function resolveModelId(raw: string): Promise<{ exact: string | null; cand
 export function LocalModelPicker({
   onActiveChange,
   onContextChange,
+  onThinkingSupportChange,
 }: {
   onActiveChange: (modelId: string | null) => void;
   onContextChange?: (tokens: number | null) => void;
+  onThinkingSupportChange?: (supported: boolean) => void;
 }) {
   const [cat, setCat] = useState<Catalog | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -144,6 +147,8 @@ export function LocalModelPicker({
   activeCbRef.current = onActiveChange;
   const contextCbRef = useRef(onContextChange);
   contextCbRef.current = onContextChange;
+  const thinkingCbRef = useRef(onThinkingSupportChange);
+  thinkingCbRef.current = onThinkingSupportChange;
 
   const refresh = async () => {
     try {
@@ -152,6 +157,7 @@ export function LocalModelPicker({
       setCat(d);
       activeCbRef.current(d.loaded ? `local/${d.loaded}` : null);
       contextCbRef.current?.(d.loaded ? validContextLen(d.contextLen) : null);
+      thinkingCbRef.current?.(Boolean(d.loaded && d.supportsThinking));
     } catch {
       /* leave prior catalog */
     }

@@ -615,13 +615,12 @@ const OPENROUTER_DEFAULT_MODEL = 'openrouter/anthropic/claude-sonnet-4.6';
 // Fireworks AI exposes an OpenAI-compatible API. We register a custom
 // `fireworks` provider (baseURL + apiKey + auto-discovered models) so the
 // Fireworks engine routes `fireworks/<account-model-id>` picks directly. Auth
-// MUST use FIREWORKS_PERSONAL_API_KEY (Matt's personal account), never the
-// other FIREWORKS_API_KEY in the assistant Doppler project.
+// uses FIREWORKS_API_KEY from the assistant Doppler project.
 const FIREWORKS_BASE_URL =
   process.env.RIVENDELL_FIREWORKS_BASE_URL?.trim() || 'https://api.fireworks.ai/inference/v1';
 
 function resolveFireworksKey(): string {
-  return process.env.FIREWORKS_PERSONAL_API_KEY?.trim() || '';
+  return process.env.FIREWORKS_API_KEY?.trim() || '';
 }
 
 /** Default Fireworks model when the `banana-fireworks` engine is sent an empty
@@ -629,6 +628,17 @@ function resolveFireworksKey(): string {
  *  serverless set; if it isn't available the request errors locally rather
  *  than routing elsewhere. */
 const FIREWORKS_DEFAULT_MODEL = 'fireworks/accounts/fireworks/models/glm-5p2';
+
+// Fireworks' OpenAI-compatible /inference/v1/models only returns ~7 stale,
+// account-scoped rows — not the real serverless set. The control-plane library
+// (/v1/accounts/fireworks/models) carries every model plus a `supportsServerless`
+// flag, so we page through that and keep the serverless rows. This is the
+// difference between the picker showing 7 models vs the full ~14 serverless ones.
+const FIREWORKS_CONTROL_BASE_URL =
+  process.env.RIVENDELL_FIREWORKS_CONTROL_BASE_URL?.trim() || 'https://api.fireworks.ai/v1';
+// Serverless models that aren't chat completions (image/embedding/reranker) —
+// flagged supports_chat=false so the config/picker mappers drop them.
+const FIREWORKS_NON_CHAT_RE = /embedding|reranker|rerank|flux|whisper|sdxl|stable-diffusion|image-?gen/i;
 
 const MODEL_CATALOG_TTL_MS = 60 * 1000;
 const MODEL_CATALOG_TIMEOUT_MS = 10_000;
@@ -727,8 +737,79 @@ function fetchOpenRouterCatalog(): Promise<unknown[]> {
   return fetchModelCatalog('openrouter', `${OPENROUTER_BASE_URL}/models`, resolveOpenRouterKey(), openrouterCatalog);
 }
 
+// Page the Fireworks control-plane library, keep serverless rows, and normalize
+// each to the same shape the old /inference/v1/models path produced
+// ({ id, supports_chat, supports_image_input, supports_tools, context_length })
+// so the downstream config/picker mappers stay unchanged. Short TTL cache +
+// keep-prior-on-failure, matching fetchModelCatalog.
 function fetchFireworksCatalog(): Promise<unknown[]> {
-  return fetchModelCatalog('fireworks', `${FIREWORKS_BASE_URL}/models`, resolveFireworksKey(), fireworksCatalog);
+  const apiKey = resolveFireworksKey();
+  const cache = fireworksCatalog;
+  const fresh = cache.rows !== null && Date.now() - cache.at < MODEL_CATALOG_TTL_MS;
+  if (fresh) return Promise.resolve(cache.rows as unknown[]);
+  if (cache.inflight) return cache.inflight;
+
+  cache.inflight = (async () => {
+    if (!apiKey) {
+      console.warn('[banana-runner] Fireworks catalog: no API key set, returning empty');
+      return cache.rows ?? [];
+    }
+    try {
+      const rows: Record<string, unknown>[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; page < 8; page++) {
+        const url =
+          `${FIREWORKS_CONTROL_BASE_URL}/accounts/fireworks/models?pageSize=200` +
+          (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
+        let body: Record<string, unknown>;
+        try {
+          const response = await fetch(url, {
+            headers: { Accept: 'application/json', Authorization: `Bearer ${apiKey}` },
+            signal: controller.signal,
+          });
+          if (!response.ok) {
+            console.warn(`[banana-runner] Fireworks control-plane returned ${response.status}, keeping prior catalog`);
+            return cache.rows ?? [];
+          }
+          body = recordOf(await response.json());
+        } finally {
+          clearTimeout(timeout);
+        }
+        const models = Array.isArray(body.models) ? body.models : [];
+        for (const model of models) {
+          const rec = recordOf(model);
+          if (rec.supportsServerless !== true) continue;
+          const id = typeof rec.name === 'string' ? rec.name.trim() : '';
+          if (!id) continue;
+          rows.push({
+            id,
+            supports_chat: !FIREWORKS_NON_CHAT_RE.test(id),
+            supports_image_input: rec.supportsImageInput === true,
+            supports_tools: rec.supportsTools !== false,
+            context_length: numberFrom(rec.contextLength),
+          });
+        }
+        pageToken =
+          typeof body.nextPageToken === 'string' && body.nextPageToken ? body.nextPageToken : undefined;
+        if (!pageToken) break;
+      }
+      if (rows.length > 0) {
+        cache.rows = rows;
+        cache.at = Date.now();
+      }
+      return cache.rows ?? [];
+    } catch (error) {
+      const reason =
+        (error as Error)?.name === 'AbortError' ? 'timeout' : (error as Error)?.message || 'unknown error';
+      console.warn(`[banana-runner] Fireworks control-plane fetch failed (${reason}), keeping prior catalog`);
+      return cache.rows ?? [];
+    } finally {
+      cache.inflight = null;
+    }
+  })();
+  return cache.inflight;
 }
 
 // Does the model the next turn will run natively accept image input? Local
@@ -1284,6 +1365,18 @@ type LocalVllmModel = { id: string; maxLen: number };
 // and does NOT go through here, so this is safe for it.
 const VISION_OR_EMBED =
   /embed|vlm|vision|llava|moondream|pixtral|internvl|smolvlm|cogvlm|minicpm-v|-vl-|-vl\b|\bvl-/i;
+const LOCAL_QWEN_THINKING_RE = /(?:^|[/_-])(?:qwen3|qwq)(?:[._/-]|$)/i;
+
+function localSupportsThinkingControl(modelId: string | null | undefined): boolean {
+  return LOCAL_QWEN_THINKING_RE.test(String(modelId ?? '').replace(/^local\//, ''));
+}
+
+function localThinkingDirective(modelId: string | null | undefined, effort: string | undefined): string | null {
+  if (!localSupportsThinkingControl(modelId)) return null;
+  if (effort === 'low') return '/no_think';
+  if (effort === 'high') return '/think';
+  return null;
+}
 
 async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
   // Prefer LM Studio's native API: it reports each model's REAL loaded context
@@ -1338,23 +1431,22 @@ async function fetchLocalVllmModels(): Promise<LocalVllmModel[]> {
 
 function toLocalModelConfig(model: LocalVllmModel): [string, Record<string, unknown>] {
   const context = model.maxLen;
+  const reasoning = localSupportsThinkingControl(model.id);
   // Cap requested output so input + output fits the (small) local context window.
   // Banana's system prompt + built-in tool schemas run ~13k tokens, so leave
   // generous input headroom rather than letting it request the whole window.
   const output = Math.min(8192, Math.max(1024, Math.floor(context / 4)));
-  return [
-    model.id,
-    {
-      id: model.id,
-      name: model.id.split('/').pop() || model.id,
-      attachment: false,
-      reasoning: true,
-      temperature: true,
-      tool_call: true,
-      modalities: { input: ['text'], output: ['text'] },
-      limit: { context, input: context, output },
-    },
-  ];
+  const config: Record<string, unknown> = {
+    id: model.id,
+    name: model.id.split('/').pop() || model.id,
+    attachment: false,
+    reasoning,
+    temperature: true,
+    tool_call: true,
+    modalities: { input: ['text'], output: ['text'] },
+    limit: { context, input: context, output },
+  };
+  return [model.id, config];
 }
 
 async function localConfigModels(): Promise<Record<string, Record<string, unknown>>> {
@@ -1387,9 +1479,16 @@ export async function localVllmStatus(): Promise<{
   loaded: string | null;
   ready: boolean;
   contextLen: number | null;
+  supportsThinking: boolean;
 }> {
   const models = await fetchLocalVllmModels();
-  return { loaded: models[0]?.id ?? null, ready: models.length > 0, contextLen: models[0]?.maxLen ?? null };
+  const loaded = models[0]?.id ?? null;
+  return {
+    loaded,
+    ready: models.length > 0,
+    contextLen: models[0]?.maxLen ?? null,
+    supportsThinking: localSupportsThinkingControl(loaded),
+  };
 }
 
 // Cap the AUTO context default for memory safety — a model may advertise 256k+
@@ -1428,6 +1527,7 @@ export async function localFullCatalog(): Promise<{
   loaded: string | null;
   ready: boolean;
   contextLen: number | null;
+  supportsThinking: boolean;
   cached: string[];
   curated: { id: string; label: string; note: string }[];
 }> {
@@ -1436,6 +1536,7 @@ export async function localFullCatalog(): Promise<{
     loaded: status.loaded,
     ready: status.ready,
     contextLen: status.contextLen,
+    supportsThinking: status.supportsThinking,
     cached: cachedLocalModelIds(),
     curated: LOCAL_CURATED,
   };
@@ -2783,6 +2884,11 @@ export class BananaSession {
     } else if (recoverContextThisTurn && !preTurnRecap) {
       this.recoverContextOnNextTurn = false;
     }
+    const localDirective = this.cli === 'banana-local'
+      ? localThinkingDirective(requestedModelId, opts?.effort)
+      : null;
+    const promptText = localDirective ? `${localDirective}\n${effectiveText}` : effectiveText;
+    const providerVariant = this.cli !== 'banana-local' && opts?.effort ? opts.effort : undefined;
     const thisTurn = this.turn;
     const promptKind = slashCommand ? 'command' : 'prompt';
     try {
@@ -2794,9 +2900,9 @@ export class BananaSession {
         // `variant`. Banana maps the model's effort variant (low|medium|high) to
         // providerOptions: {reasoning:{effort}} for the OpenRouter provider,
         // {reasoningEffort} for openai-compatible. A model with no matching
-        // variant (e.g. glm/kimi/qwen, which Banana excludes) is a safe no-op.
-        ...(opts?.effort ? { variant: opts.effort } : {}),
-        parts: [...fileParts, { type: 'text' as const, text: effectiveText }],
+        // variant is a safe no-op.
+        ...(providerVariant ? { variant: providerVariant } : {}),
+        parts: [...fileParts, { type: 'text' as const, text: promptText }],
       });
       if (res.error) {
         const message = errorText(res.error);

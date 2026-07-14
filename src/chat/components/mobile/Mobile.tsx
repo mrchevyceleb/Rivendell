@@ -153,10 +153,10 @@ const COMPANION_LABEL: Record<CompanionId, string> = {
   codex: 'codex',
   assistant: 'assistant',
   banana: 'banana',
-  'codex-personal': 'codex',
   'banana-local': 'banana',
   'banana-fireworks': 'fireworks',
   zai: 'glm',
+  xai: 'grok',
 };
 
 // ─── Mobile Threshold ───

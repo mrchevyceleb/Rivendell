@@ -20,13 +20,13 @@ function flattenTreePaths(node: FileTreeNode | undefined, out: string[] = []): s
 export function companionAgentLabel(cli: string): string {
   switch (cli) {
     case 'assistant': return 'Elrond';
-    case 'claude': return 'Personal Claude';
+    case 'claude': return 'Claude Code';
     case 'codex': return 'Codex';
-    case 'codex-personal': return 'Personal Codex';
     case 'banana': return 'OpenRouter';
     case 'banana-local': return 'Local';
     case 'banana-fireworks': return 'Fireworks';
     case 'zai': return 'GLM';
+    case 'xai': return 'Grok 4.5';
     default: return cli;
   }
 }
@@ -52,6 +52,7 @@ export function ChatTab({
   const chat = useChat({
     repo,
     cli: picker.cli,
+    account: picker.account ?? undefined,
     chatId,
     enabled: Boolean(repo),
     model: picker.model,
@@ -61,7 +62,7 @@ export function ChatTab({
 
   // Publish this tab's send() so the shell (file "Ask Elrond", tree) can reach it.
   useEffect(() => {
-    registerApi(chatId, { send: chat.send, companionLabel: companionAgentLabel(picker.companion) });
+    registerApi(chatId, { send: chat.send, companionLabel: companionAgentLabel(picker.cli) });
     return () => registerApi(chatId, null);
   }, [chatId, chat.send, picker.companion, registerApi]);
 
@@ -70,7 +71,7 @@ export function ChatTab({
       <CompanionControls picker={picker} />
       <Conversation
         compact
-        agent={companionAgentLabel(picker.companion)}
+        agent={companionAgentLabel(picker.cli)}
         repo={repo?.name}
         title="thread"
         blocks={chat.blocks}

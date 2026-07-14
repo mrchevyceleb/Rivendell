@@ -120,3 +120,17 @@ export function accountEnv(cwd: string): NodeJS.ProcessEnv {
   env.SAMWISE_ACCOUNT = 'default';
   return env;
 }
+
+// Rivendell's account-pinned chat lanes (Claude · kim, Codex · personal, etc.)
+// carry the chosen login inside the chatId as a `__acct__<account>` suffix. That
+// rides through every keying/session-id/interrupt path untouched, so kim and
+// personal stay separate sessions; here we pull it back out at spawn time so the
+// CLI launches under that exact account regardless of the repo path. The client
+// (useChat.ts) MUST use the same `__acct__` separator. Null for normal lanes,
+// which keep the per-repo account-map resolution.
+const CHAT_ID_ACCOUNT_RE = /__acct__([a-z0-9-]+)$/i;
+export function accountFromChatId(chatId: string | undefined | null): string | null {
+  if (!chatId) return null;
+  const match = CHAT_ID_ACCOUNT_RE.exec(chatId);
+  return match ? match[1].toLowerCase() : null;
+}

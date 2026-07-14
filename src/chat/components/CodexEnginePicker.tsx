@@ -1,12 +1,7 @@
-// Model + reasoning-effort selector for the Codex companion. Mirrors the
-// engines.json matrix (model IDs verified 2026-05-30). The chosen values ride
-// the WS send/steer payload and reach `codex -m` / `-c model_reasoning_effort`.
-const CODEX_MODELS = [
-  { id: 'gpt-5.5', label: 'GPT-5.5' },
-  { id: 'gpt-5.3-codex', label: 'Codex 5.3' },
-  { id: 'gpt-5.3-codex-spark', label: 'Spark 5.3' },
-];
-const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+import { CODEX_MODELS, codexEffortsForModel } from '../codexModels';
+
+// Model + reasoning-effort selector for Codex. The chosen values ride the WS
+// send/steer payload and reach `codex -m` / `-c model_reasoning_effort`.
 export const CLAUDE_MODELS = [
   { id: 'claude-opus-4-8', label: 'Opus 4.8' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
@@ -27,7 +22,7 @@ export function CodexEnginePicker(props: {
   effortLabel?: string;
 }) {
   const models = props.models ?? CODEX_MODELS;
-  const efforts = props.efforts ?? CODEX_EFFORTS;
+  const efforts = props.efforts ?? codexEffortsForModel(props.model);
   const base = {
     fontSize: 12.5,
     border: '1px solid var(--rule, currentColor)',

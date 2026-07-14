@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { registerChat } from './chat/register.ts';
+import { ensureXaiProxy, shutdownXaiProxy } from './chat/xai-proxy.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
 import { startWorkerQueue, stopWorkerQueue } from './worker/queue.ts';
 import { startWorkspaceWatcher, stopWorkspaceWatcher } from './lib/workspaceWatcher.ts';
@@ -56,6 +57,14 @@ app.use('/api/files', filesRouter);
 app.use('/internal', internalRouter);
 
 const server = createServer(app);
+// Start the xAI transform proxy before chat registers so its base URL is
+// resolved before any xAI chat session can spawn. Non-fatal: a failure logs
+// and xAI turns surface a clear error instead of crashing the server.
+try {
+  await ensureXaiProxy();
+} catch (err) {
+  console.warn(`[rivendell] xAI proxy failed to start: ${(err as Error).message}`);
+}
 const stopChat = await registerChat(app, server);
 registerScribeSocket(server);
 startWorkerQueue();
@@ -83,6 +92,7 @@ const tearDown = (signal: NodeJS.Signals) => {
   stopWorkerQueue();
   stopWorkspaceWatcher();
   stopChat();
+  shutdownXaiProxy();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();
 };

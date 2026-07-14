@@ -7,8 +7,8 @@ import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
-import { accountEnvForAccount } from '../lib/accountResolver.ts';
-import { engineDefault } from '../lib/engineConfig.ts';
+import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
+import { resolveCodexSelection } from './codex-models.ts';
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const descendants = child.pid ? collectDescendantPids(child.pid) : [];
@@ -121,7 +121,7 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
-type CodexSessionOptions = { recoverContextOnNextTurn?: boolean; cli?: CliKind; account?: string };
+type CodexSessionOptions = { recoverContextOnNextTurn?: boolean; cli?: CliKind };
 type ToolUseBlock = { index: number; toolUseId: string };
 type CodexUsage = {
   input_tokens: number;
@@ -135,12 +135,6 @@ type CodexTurnState = {
   toolUseBlocks: Map<string, ToolUseBlock>;
   usage: CodexUsage | null;
 };
-
-// Model + reasoning effort every `codex exec` runs with. Single source of
-// truth, mirrors AutoSam's review.rs pins. Valid efforts: minimal|low|medium|
-// high|xhigh; xhigh is the top tier.
-const { model: CODEX_MODEL, effort: CODEX_EFFORT } = engineDefault('codex', 'gpt-5.5', 'xhigh');
-const CODEX_REASONING_CONFIG = `model_reasoning_effort="${CODEX_EFFORT}"`;
 
 const CODEX_TURN_PREAMBLE = [
   '<samwise-codex-runtime>',
@@ -199,7 +193,6 @@ function stringifyToolResultContent(content: unknown): string {
 export class CodexSession {
   readonly key: string;
   readonly cli: CliKind;
-  private readonly account: string;
   readonly cwd: string;
   readonly chatId: string;
   private listeners = new Set<Listener>();
@@ -225,7 +218,6 @@ export class CodexSession {
     this.cwd = cwd;
     this.chatId = chatId;
     this.cli = opts.cli ?? 'codex';
-    this.account = opts.account ?? 'kim';
     this.key = keyOf(this.cli, cwd, chatId);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
@@ -448,7 +440,7 @@ export class CodexSession {
     ].join('\n');
   }
 
-  async send(text: string, images?: ChatImage[], opts: { model?: string; effort?: string } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown } = {}): Promise<void> {
     if (this.busy) {
       this.emit({
         type: 'error',
@@ -456,6 +448,10 @@ export class CodexSession {
       });
       return;
     }
+    const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
+      opts.model,
+      opts.effort,
+    );
     this.busy = true;
     this.cancellationEmitted = false;
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
@@ -517,11 +513,9 @@ export class CodexSession {
       this.recoverContextOnNextTurn = false;
     }
     const prompt = `${CODEX_TURN_PREAMBLE}\n\n${effectiveText}`;
-    // Validate WS-supplied values against an allow-list before they reach the
-    // codex CLI. effort is interpolated into a `-c model_reasoning_effort="..."`
-    // config fragment, so a crafted value (quotes/newlines) must be rejected.
-    const codexModel = opts.model && /^[A-Za-z0-9._/-]+$/.test(opts.model) ? opts.model : CODEX_MODEL;
-    const codexEffort = opts.effort && /^(minimal|low|medium|high|xhigh)$/.test(opts.effort) ? opts.effort : CODEX_EFFORT;
+    // Selection was validated before the session became busy. effort is
+    // interpolated into this config fragment, so only allow-listed strings
+    // can reach the CLI.
     const codexReasoning = `model_reasoning_effort="${codexEffort}"`;
     const args: string[] = this.threadId
       ? [
@@ -566,9 +560,12 @@ export class CodexSession {
       return;
     }
 
+    // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
+    // login; everything else keeps the per-repo account-map resolution.
+    const forcedAccount = accountFromChatId(this.chatId);
     const child = spawn('codex', args, {
       cwd: this.cwd,
-      env: accountEnvForAccount(this.account, this.cwd),
+      env: forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -582,6 +579,13 @@ export class CodexSession {
       toolUseBlocks: new Map(),
       usage: null,
     };
+    // Tracks whether this turn produced any model-visible progress so we can
+    // surface a real error when Codex exits empty (the "thinking then nothing"
+    // UX failure mode). Codex can return exit 1 with zero agent_message and
+    // almost no stderr, which used to leave Rivendell with only a silent
+    // error_during_execution result and no chat-visible reason.
+    let producedAgentMessage = false;
+    let sawTurnCompleted = false;
     const stderrChunks: string[] = [];
     let transientProjectConfigError: string | null = null;
 
@@ -611,6 +615,12 @@ export class CodexSession {
         if (!line) continue;
         try {
           const ev = JSON.parse(line);
+          if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
+            producedAgentMessage = true;
+          }
+          if (ev?.type === 'turn.completed') {
+            sawTurnCompleted = true;
+          }
           this.handleCodexEvent(ev, turnState);
         } catch {
           // Non-JSON line — ignore.
@@ -651,6 +661,32 @@ export class CodexSession {
         stderrChunks.length = 0;
       }
       this.closeDanglingToolBlocks(turnState, code, transientProjectConfigError ?? stderrText);
+      // Surface empty / hard-fail turns. Codex sometimes starts a task and then
+      // completes with last_agent_message=null + exit 1 and no useful stderr.
+      // Without an explicit error event the UI just drops out of "thinking".
+      const emptyTurn =
+        !producedAgentMessage && !transientProjectConfigError && (code !== 0 || !sawTurnCompleted);
+      if (emptyTurn) {
+        const detail = stderrText
+          ? stderrText.slice(0, 500)
+          : `codex exit ${code ?? 'null'} with no agent message (thread ${this.threadId ?? 'new'})`;
+        this.emit({
+          type: 'error',
+          message:
+            code === 0
+              ? `Codex finished without a reply. ${detail}`
+              : `Codex failed before producing a reply. ${detail}`,
+        });
+      } else if (code !== 0 && !transientProjectConfigError && stderrText) {
+        // Non-empty stderr already emitted line-by-line above; if filtering ate
+        // everything, still leave a breadcrumb.
+        if (stderrChunks.length === 0) {
+          this.emit({
+            type: 'error',
+            message: `Codex exited ${code} without a delivered reply.`,
+          });
+        }
+      }
       // Emit a result event so the front-end flips status back to 'ready'.
       // Forward codex's per-turn token usage (captured from `turn.completed`)
       // mapped to claude's field names so the same client-side meter works.
@@ -661,7 +697,19 @@ export class CodexSession {
         session_id: this.threadId ?? undefined,
         usage: turnState.usage ?? undefined,
       });
-      if (this.threadId) {
+      if (emptyTurn && code !== 0) {
+        // Drop poisoned thread ids after empty hard-fails so the next send
+        // starts clean instead of resuming a corpse that keeps exiting 1.
+        // Do not go through persistThreadId('') — that would leave this.threadId as ''.
+        const deadThread = this.threadId;
+        this.threadId = null;
+        await setSessionId(this.cli, this.cwd, '', this.chatId);
+        if (deadThread) {
+          console.warn(
+            `[chat codex] cleared poisoned thread ${deadThread} after empty exit ${code}`,
+          );
+        }
+      } else if (this.threadId) {
         await this.persistThreadId(this.threadId);
       }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
@@ -933,18 +981,16 @@ export async function getOrCreateCodexSession(opts: {
   repoPath: string;
   chatId?: string;
   cli?: CliKind;
-  account?: string;
 }): Promise<CodexSession> {
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
   const cli = opts.cli ?? 'codex';
-  const account = opts.account ?? 'kim';
   const key = keyOf(cli, cwd, chatId);
   const existing = codexSessions.get(key);
   if (existing && existing.isAlive()) return existing;
 
   const threadId = (await getSessionId(cli, cwd, chatId)) ?? null;
-  const session = new CodexSession(cwd, chatId, threadId, { cli, account });
+  const session = new CodexSession(cwd, chatId, threadId, { cli });
   codexSessions.set(key, session);
   return session;
 }
@@ -974,12 +1020,10 @@ export async function freshStartCodex(opts: {
   repoPath: string;
   chatId?: string;
   cli?: CliKind;
-  account?: string;
 }): Promise<CodexSession> {
   const cwd = opts.repoPath;
   const chatId = opts.chatId || 'main';
   const cli = opts.cli ?? 'codex';
-  const account = opts.account ?? 'kim';
   const key = keyOf(cli, cwd, chatId);
   const existing = codexSessions.get(key);
   if (existing) {
@@ -990,7 +1034,7 @@ export async function freshStartCodex(opts: {
   // Wipe the durable log before the new session loads it, so a reset thread
   // can't be resurrected by a full (sinceSeq=0) replay from an empty client.
   await clearEventLog(key);
-  const session = new CodexSession(cwd, chatId, null, { cli, account });
+  const session = new CodexSession(cwd, chatId, null, { cli });
   codexSessions.set(key, session);
   return session;
 }

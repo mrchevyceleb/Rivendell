@@ -2814,6 +2814,141 @@ button {
   line-height: 1.5;
 }
 
+/* Forge inline notice (success/error toast for save/run/delete). */
+.cron-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--r-line);
+}
+.cron-notice.notice-error {
+  background: rgba(196, 106, 133, 0.14);
+  border-color: rgba(196, 106, 133, 0.4);
+  color: #f4c2cf;
+}
+.cron-notice.notice-success {
+  background: rgba(122, 190, 154, 0.12);
+  border-color: rgba(122, 190, 154, 0.34);
+  color: #bfe6cd;
+}
+
+/* Engine picker hint under the select. */
+.cron-engine-hint {
+  display: block;
+  margin-top: 5px;
+  color: var(--r-ink-soft);
+  font-size: 11.5px;
+  opacity: 0.85;
+}
+
+/* Run history in the detail panel. */
+.cron-history {
+  margin-top: 16px;
+  border: 1px solid var(--r-line);
+  border-radius: 9px;
+  background: var(--r-bg-deep);
+  padding: 12px;
+}
+.cron-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.cron-history-head .r-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.cron-history-refresh {
+  background: transparent;
+  border: 1px solid var(--r-line);
+  border-radius: 7px;
+  padding: 4px;
+  color: var(--r-ink-soft);
+  cursor: pointer;
+  display: flex;
+  transition: transform 0.4s ease, color 0.15s ease;
+}
+.cron-history-refresh:hover {
+  color: var(--r-gold);
+}
+.cron-history-empty {
+  margin: 4px 0 0;
+  color: var(--r-ink-soft);
+  font-size: 12.5px;
+}
+.cron-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.cron-run {
+  border: 1px solid var(--r-line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.cron-run-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  background: transparent;
+  border: none;
+  color: var(--r-ink);
+  cursor: pointer;
+  font-size: 12.5px;
+  text-align: left;
+}
+.cron-run-head:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.cron-run-status {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.cron-run-time {
+  margin-left: auto;
+  color: var(--r-ink-soft);
+  font-size: 11.5px;
+}
+.cron-run-dur {
+  color: var(--r-ink-soft);
+  font-size: 11.5px;
+  font-family: var(--r-mono);
+}
+.cron-run.outcome-ok .cron-run-status { color: #9fd3b3; }
+.cron-run.outcome-ok svg { color: #7abe9a; }
+.cron-run.outcome-failed .cron-run-status { color: #f0a9bb; }
+.cron-run.outcome-failed svg { color: #c46a85; }
+.cron-run.outcome-running svg,
+.cron-run.outcome-unknown svg { color: var(--r-ink-soft); }
+.cron-run-output {
+  margin: 0;
+  padding: 9px 10px;
+  border-top: 1px solid var(--r-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--r-ink-soft);
+  font-family: var(--r-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .code-block,
 .scribe-terminal {
   font-family: var(--r-mono);

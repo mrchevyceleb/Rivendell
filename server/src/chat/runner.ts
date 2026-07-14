@@ -9,9 +9,10 @@ import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
-import { accountEnvForAccount } from '../lib/accountResolver.ts';
+import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
+import { ensureXaiProxy, xaiProxyBaseUrl } from './xai-proxy.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -51,16 +52,18 @@ function collectDescendantPids(pid: number): number[] {
 //   resume failure, drop the stale id, and let the conversation continue from
 //   the new one (don't spawn again — the user's message hasn't been sent yet).
 
-// Rivendell binds each companion to a CLI + account/provider via the `cli` value:
-//   assistant      = Elrond → Kim Claude (.claude)
-//   codex          = Codex  → Kim Codex (.codex)
-//   claude         = Banana → Personal Claude (.claude-personal)
-//   codex-personal = Banana → Personal Codex (.codex-personal)
+// Rivendell binds each companion to a CLI/provider via the `cli` value:
+//   assistant      = Elrond on Claude Code
+//   codex          = Codex
+//   claude         = Banana through Claude Code
+//   codex-personal = Banana through Codex (legacy, no longer surfaced)
 //   banana         = Banana → OpenRouter (direct, real OPENROUTER_API_KEY)
-//   banana-fireworks = Banana → Fireworks (direct, FIREWORKS_PERSONAL_API_KEY)
+//   banana-fireworks = Banana → Fireworks (direct, FIREWORKS_API_KEY)
 //   banana-local   = Banana → Local LLM (vLLM on the Spark, direct)
-// The per-directory account-map still governs everywhere else (terminals, AutoSam,
-// samwise-2); this companion→account binding is Rivendell-only.
+//   zai            = Z.ai coding plan (claude CLI → GLM over Anthropic endpoint)
+//   xai            = xAI coding plan (claude CLI → Grok 4.5 over Anthropic endpoint)
+// Claude Code and Codex account selection comes from the per-directory
+// account map, matching terminals, AutoSam, and samwise-2.
 export type CliKind =
   | 'claude'
   | 'codex'
@@ -69,19 +72,8 @@ export type CliKind =
   | 'codex-personal'
   | 'banana-local'
   | 'banana-fireworks'
-  | 'zai';
-
-/** Rivendell-only: which named account a Claude/Codex-backed companion runs on. */
-export function cliAccount(cli: CliKind): string {
-  switch (cli) {
-    case 'assistant':
-    case 'codex':
-      return 'kim';
-    default:
-      // claude (Personal Claude), codex-personal (Personal Codex)
-      return 'personal';
-  }
-}
+  | 'zai'
+  | 'xai';
 
 export type StreamEvent = unknown;
 
@@ -92,7 +84,7 @@ export type SessionEvent =
   | { type: 'turnStart' }
   | { type: 'turnEnd'; sessionId?: string }
   | { type: 'closed'; code: number | null; signal: NodeJS.Signals | null }
-  | { type: 'error'; message: string; code?: string; retryable?: boolean };
+  | { type: 'error'; message: string; code?: string; retryable?: boolean; fatal?: boolean };
 
 // Match `/<skill-name> <body>` at the very start of a user message. Skill names
 // are kebab-case (lowercase letters, digits, hyphen). The body is anything that
@@ -188,12 +180,59 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
 }
+
+// xAI coding plan — Grok 4.5 served over xAI's Anthropic-compatible endpoint
+// (https://api.x.ai/v1/messages). Same trick as Z.ai: run the stock `claude`
+// binary with ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN redirected and a
+// dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the Grok token authenticates
+// (never Matt's Anthropic subscription). Auth uses GROK_PERSONAL_API_KEY from
+// the assistant Doppler project (Bearer, which xAI accepts). Grok 4.5 has a
+// 256K context window; set the auto-compact window so Claude Code doesn't
+// compact prematurely.
+const XAI_BASE_URL = process.env.RIVENDELL_XAI_BASE_URL?.trim() || '';
+const XAI_GROK45_MODEL = 'grok-4.5';
+const XAI_COMPACT_WINDOW = '256000';
+const XAI_CONFIG_DIR = join(homedir(), '.claude-xai');
+const VALID_XAI_MODELS = new Set([XAI_GROK45_MODEL]);
+// xAI's Anthropic endpoint accepts Claude Code's full effort range and maps it
+// onto Grok's thinking budget; the UI offers a focused subset.
+const VALID_XAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+function resolveXaiModel(m?: string, fallback = XAI_GROK45_MODEL): string {
+  const trimmed = m?.trim();
+  if (trimmed && VALID_XAI_MODELS.has(trimmed)) return trimmed;
+  return fallback;
+}
+function resolveXaiEffort(e?: string, fallback = 'high'): string {
+  const effort = e?.trim();
+  return effort && VALID_XAI_EFFORTS.has(effort) ? effort : fallback;
+}
+const XAI_MODEL = resolveXaiModel(process.env.RIVENDELL_XAI_MODEL);
+const XAI_EFFORT = resolveXaiEffort(process.env.RIVENDELL_XAI_EFFORT);
+function xaiEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.OPENAI_API_KEY;
+  delete env.ANTHROPIC_API_KEY; // force token-based auth to xAI, not a metered Anthropic key
+  env.CLAUDE_CONFIG_DIR = XAI_CONFIG_DIR;
+  // The claude CLI emits a `role: "system"` message that xAI's Anthropic
+  // endpoint rejects (400 "Invalid message role"). A localhost transform
+  // proxy folds it into the top-level system field; ANTHROPIC_BASE_URL points
+  // at the proxy, which forwards to https://api.x.ai. RIVENDELL_XAI_BASE_URL
+  // (the proxy URL) is set at startup once the proxy is listening.
+  env.ANTHROPIC_BASE_URL = XAI_BASE_URL || xaiProxyBaseUrl();
+  env.ANTHROPIC_AUTH_TOKEN = process.env.GROK_PERSONAL_API_KEY || '';
+  env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = XAI_COMPACT_WINDOW;
+  env.SAMWISE_ACCOUNT = 'xai';
+  return env;
+}
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
+  if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   return m && VALID_MODEL_ID.test(m) ? m : CLAUDE_MODEL;
 };
 const resolveClaudeEffort = (cli: CliKind, e?: string): string =>
-  cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT) : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
+  cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
+  : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
+  : e && VALID_CLAUDE_EFFORTS.has(e) ? e : CLAUDE_EFFORT;
 
 // assistant-mcp is defined in the personal-account config (~/.claude.json) but NOT
 // in the kim-account config (~/.claude/.claude.json) that Elrond (cli='assistant')
@@ -260,6 +299,10 @@ class ClaudeSession {
   readonly spawnEffort: string;
   private resumeFailed = false;
   private spawnError: string | null = null;
+  /** Set once we detect a fatal auth failure (401/403). Guards failAuth() so a
+   *  10-deep retry storm only tears the child down once, and flips isAlive()
+   *  false so the next getOrCreateSession respawns against fresh credentials. */
+  private authFailed = false;
   private initSeen = false;
   private exitedBeforeInit = false;
   /** Set by shutdown(): once an intentional teardown begins, stop appending to
@@ -337,11 +380,19 @@ class ClaudeSession {
       args.push('--mcp-config', ASSISTANT_MCP_CONFIG);
     }
 
+    // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
+    // login; everything else keeps the per-repo account-map resolution.
+    const forcedAccount = accountFromChatId(chatId);
     this.child = spawn('claude', args, {
       cwd,
-      // Rivendell: the companion (not the directory) picks the account —
-      // assistant=Kim (Elrond), claude=personal (Banana → Personal Claude).
-      env: cli === 'zai' ? zaiEnv(this.spawnModel) : accountEnvForAccount(cliAccount(cli), cwd),
+      env:
+        cli === 'zai'
+          ? zaiEnv(this.spawnModel)
+          : cli === 'xai'
+            ? xaiEnv()
+            : forcedAccount
+              ? accountEnvForAccount(forcedAccount, cwd)
+              : accountEnv(cwd),
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessByStdio<Writable, Readable, Readable>;
@@ -515,7 +566,24 @@ class ClaudeSession {
   }
 
   isAlive(): boolean {
-    return this.child.exitCode === null && !this.spawnError;
+    return this.child.exitCode === null && !this.spawnError && !this.authFailed;
+  }
+
+  /** The warm child's OAuth token is dead (401/403). Retrying in-process can't
+   *  recover it — its cached refresh token was rotated out. Tear the child down
+   *  so the next getOrCreateSession respawns a fresh process that re-reads
+   *  credentials from disk. Guarded so a retry storm only kills once. */
+  private failAuth(): void {
+    if (this.authFailed) return;
+    this.authFailed = true;
+    // Kill immediately. The fatal error was already emitted synchronously just
+    // above, and the child's 'exit'→'closed' fires on a later tick regardless,
+    // so ordering is safe without deferring. Killing now shrinks the window
+    // before the process dies: the respawn only happens on the user's NEXT send
+    // (human-timescale away), by which point SIGTERM + the 3s SIGKILL backstop
+    // have reaped this process — so two `claude --resume` processes never run
+    // against the same session id.
+    this.shutdown('auth-failed');
   }
 
   hasResumeFailed(): boolean {
@@ -637,6 +705,67 @@ class ClaudeSession {
 
     this.emit({ type: 'event', event: ev });
 
+    // Surface API failures the CLI otherwise buries. z.ai (and Anthropic) return
+    // a rate-limit / error as a `result` event with `subtype:"success"` but
+    // `is_error:true` + `api_error_status` set and the human-readable reason in
+    // `.result` (e.g. "[1308][Usage limit reached for 5 hour...]"). Without this
+    // the turn just ends silently and the user sees nothing at all.
+    if (ev?.type === 'result' && (ev.is_error === true || typeof ev.api_error_status === 'number')) {
+      const status = typeof ev.api_error_status === 'number' ? ` (${ev.api_error_status})` : '';
+      const reason = typeof ev.result === 'string' && ev.result.trim()
+        ? ev.result.trim()
+        : `Request failed${status}`;
+      // Only a 401 (dead/rotated OAuth token) is recoverable by respawning a
+      // fresh process. A 403 is usually a plan/permission problem that a respawn
+      // can't fix — surface it, but don't kill the session over it. Token-backed
+      // engines (zai/xai) use a fixed env API key, so a 401 there is NOT
+      // recoverable by respawn (same key reloads) — surface it as a hard auth
+      // error with an accurate message and don't promise a reconnect.
+      const tokenBacked = this.cli === 'zai' || this.cli === 'xai';
+      const fatalAuth = ev.api_error_status === 401;
+      const authMessage = fatalAuth && tokenBacked
+        ? `${this.cli === 'xai' ? 'xAI' : 'Z.ai'} authentication failed (401). The API key is invalid or expired — check Doppler.`
+        : fatalAuth
+          ? `Claude authentication failed (${ev.api_error_status}). Reconnecting with fresh credentials…`
+          : reason;
+      this.emit({
+        type: 'error',
+        message: authMessage,
+        code: ev.api_error_status ? String(ev.api_error_status) : undefined,
+        retryable: ev.api_error_status === 429,
+        fatal: fatalAuth,
+      });
+      if (fatalAuth) this.failAuth();
+    }
+
+    // A mid-turn API retry storm is otherwise invisible — the session just
+    // appears to hang while the CLI retries up to 10× with backoff. A 401/403
+    // means the OAuth token is dead: retrying in-process can't fix it, so surface
+    // it and kill the child (failAuth) to force a fresh respawn on the next send.
+    // A 429 is retryable — surface it and let the CLI back off (the z.ai / GLM
+    // usage-limit path).
+    if (ev?.type === 'system' && ev.subtype === 'api_retry' && typeof ev.error_status === 'number') {
+      // error_status is always present here, so key strictly off 401 — a 403
+      // carrying error:"authentication_failed" is a plan/permission problem a
+      // respawn can't fix, so it must NOT be treated as fatal.
+      const fatalAuth = ev.error_status === 401;
+      const tokenBacked = this.cli === 'zai' || this.cli === 'xai';
+      if (fatalAuth) {
+        this.emit({
+          type: 'error',
+          message: tokenBacked
+            ? `${this.cli === 'xai' ? 'xAI' : 'Z.ai'} authentication failed (${ev.error_status}). The API key is invalid or expired — check Doppler.`
+            : `Claude authentication failed (${ev.error_status}). Reconnecting with fresh credentials…`,
+          code: String(ev.error_status),
+          fatal: true,
+        });
+        this.failAuth();
+      } else {
+        const attempt = ev.attempt ? ` (attempt ${ev.attempt}/${ev.max_retries ?? '?'})` : '';
+        this.emit({ type: 'error', message: `API ${ev.error} ${ev.error_status}${attempt} — retrying…`, code: String(ev.error_status), retryable: true });
+      }
+    }
+
     // turn end = `result` event from the CLI
     if (ev?.type === 'result') {
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
@@ -677,7 +806,6 @@ export async function getOrCreateSession(opts: {
       repoPath: opts.repoPath,
       chatId,
       cli: opts.cli,
-      account: cliAccount(opts.cli),
     });
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
@@ -724,6 +852,13 @@ export async function getOrCreateSession(opts: {
     sessions.delete(key);
   }
 
+  if (opts.cli === 'xai') {
+    // The xAI engine runs through a localhost transform proxy; never spawn
+    // without it (an empty ANTHROPIC_BASE_URL would fall back to Anthropic and
+    // leak the Grok credential to the wrong provider). Throws if the proxy
+    // can't start, surfacing a clear error instead of a silent wrong-provider spawn.
+    await ensureXaiProxy();
+  }
   return spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
 }
 
@@ -847,7 +982,7 @@ export async function freshStart(opts: {
   const chatId = opts.chatId || 'main';
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     const { freshStartCodex } = await import('./codex-runner.ts');
-    return freshStartCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli, account: cliAccount(opts.cli) });
+    return freshStartCodex({ repoPath: opts.repoPath, chatId, cli: opts.cli });
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
     const { freshStartBanana } = await import('./banana-runner.ts');
@@ -864,6 +999,7 @@ export async function freshStart(opts: {
   // Wipe the durable log too — otherwise a client whose cache is empty would
   // pull the old thread back via a full (sinceSeq=0) replay after the reset.
   await clearEventLog(key);
+  if (opts.cli === 'xai') await ensureXaiProxy();
   return spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
 }
 

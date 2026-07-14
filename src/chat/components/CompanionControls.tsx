@@ -1,6 +1,13 @@
 import { Bot } from 'lucide-react';
 import type { CompanionPicker } from '../hooks/useCompanionPicker';
-import { WORKSPACE_COMPANIONS, ZAI_EFFORTS, ZAI_MODELS } from '../hooks/useCompanionPicker';
+import {
+  WORKSPACE_COMPANIONS,
+  ZAI_EFFORTS,
+  ZAI_MODELS,
+  XAI_EFFORTS,
+  XAI_MODELS,
+  companionAuthBlurb,
+} from '../hooks/useCompanionPicker';
 import { CodexEnginePicker, CLAUDE_MODELS, CLAUDE_EFFORTS } from './CodexEnginePicker';
 import { ModelPicker } from './ModelPicker';
 import { LocalModelPicker } from './LocalModelPicker';
@@ -19,6 +26,18 @@ const selectStyle: React.CSSProperties = {
   cursor: 'pointer',
   fontFamily: 'var(--r-body)',
 };
+
+const REASONING_EFFORT_OPTIONS = [
+  { value: 'low', label: 'effort · low' },
+  { value: 'medium', label: 'effort · medium' },
+  { value: 'high', label: 'effort · high' },
+];
+
+const LOCAL_THINKING_OPTIONS = [
+  { value: 'low', label: 'thinking · off' },
+  { value: 'medium', label: 'thinking · auto' },
+  { value: 'high', label: 'thinking · on' },
+];
 
 export function CompanionControls({ picker }: { picker: CompanionPicker }) {
   return (
@@ -76,18 +95,33 @@ export function CompanionControls({ picker }: { picker: CompanionPicker }) {
             value={picker.bananaEffort}
             onChange={(e) => picker.setBananaEffort(e.target.value)}
           >
-            {['low', 'medium', 'high'].map((e) => (
-              <option key={e} value={e}>{`effort · ${e}`}</option>
+            {REASONING_EFFORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
             ))}
           </select>
         </>
       )}
 
       {picker.isLocal && (
-        <LocalModelPicker
-          onActiveChange={(m) => picker.setLocalModel(m ?? '')}
-          onContextChange={picker.setLocalContextWindow}
-        />
+        <>
+          <LocalModelPicker
+            onActiveChange={(m) => picker.setLocalModel(m ?? '')}
+            onContextChange={picker.setLocalContextWindow}
+            onThinkingSupportChange={picker.setLocalSupportsThinking}
+          />
+          {picker.localSupportsThinking && (
+            <select
+              aria-label="Local thinking mode"
+              style={selectStyle}
+              value={picker.bananaEffort}
+              onChange={(e) => picker.setBananaEffort(e.target.value)}
+            >
+              {LOCAL_THINKING_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          )}
+        </>
       )}
 
       {picker.isZai && (
@@ -103,6 +137,32 @@ export function CompanionControls({ picker }: { picker: CompanionPicker }) {
           effortLabel="thinking"
         />
       )}
+
+      {picker.isXai && (
+        <CodexEnginePicker
+          model={picker.xaiModel}
+          onModelChange={picker.setXaiModel}
+          effort={picker.xaiEffort}
+          onEffortChange={picker.setXaiEffort}
+          models={XAI_MODELS}
+          efforts={XAI_EFFORTS}
+          modelAriaLabel="Grok model"
+          effortAriaLabel="Grok thinking level"
+          effortLabel="thinking"
+        />
+      )}
+
+      <span
+        style={{
+          flexBasis: '100%',
+          margin: 0,
+          fontSize: 11,
+          lineHeight: 1.4,
+          color: 'var(--r-ink-soft)',
+        }}
+      >
+        {companionAuthBlurb(picker.cli, picker.account)}
+      </span>
     </div>
   );
 }

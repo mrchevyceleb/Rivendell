@@ -30,10 +30,22 @@ import {
   readStoredZaiModel,
   ZAI_EFFORTS,
   ZAI_MODELS,
+  normalizeXaiEffort,
+  normalizeXaiModel,
+  readStoredXaiEffort,
+  readStoredXaiModel,
+  XAI_EFFORTS,
+  XAI_MODELS,
 } from '../chat/hooks/useCompanionPicker';
 import { ModelPicker } from '../chat/components/ModelPicker';
 import { LocalModelPicker } from '../chat/components/LocalModelPicker';
 import { CodexEnginePicker, CLAUDE_MODELS, CLAUDE_EFFORTS } from '../chat/components/CodexEnginePicker';
+import {
+  normalizeCodexEffort,
+  normalizeCodexModel,
+  readStoredCodexEffort,
+  readStoredCodexModel,
+} from '../chat/codexModels';
 import { useCommands } from '../chat/hooks/useCommands';
 import { useLive } from '../chat/hooks/useLive';
 import { useRepos } from '../chat/hooks/useRepos';
@@ -67,60 +79,67 @@ const SCRIBE_COLLAPSED_KEY = 'rivendell:hall-scribe-collapsed';
 
 const companionLabel: Record<CompanionId, string> = {
   assistant: 'Elrond',
-  claude: 'Personal Claude',
+  claude: 'Claude Code',
   codex: 'Codex',
   banana: 'Banana',
-  'codex-personal': 'Personal Codex',
   'banana-local': 'Local LLM',
   'banana-fireworks': 'Fireworks',
   zai: 'Z.ai GLM',
+  xai: 'xAI Grok',
 };
 
 const companionTitle: Record<CompanionId, string> = {
   assistant: 'Lord of Imladris',
-  claude: 'personal-account Claude Code',
+  claude: 'repo-routed Claude Code',
   codex: 'OpenAI emissary',
   banana: 'Banana Code emissary',
-  'codex-personal': 'personal-account Codex',
   'banana-local': 'local model on the Spark',
   'banana-fireworks': 'Fireworks emissary',
   zai: 'GLM via Z.ai coding plan',
+  xai: 'Grok 4.5 via xAI coding plan',
 };
 
 const companionSub: Record<CompanionId, string> = {
-  assistant: 'Kim Claude Code in ASSISTANT-HUB',
-  claude: 'personal-account Claude Code',
-  codex: 'Kim Codex',
+  assistant: 'Claude Code using the repo account map',
+  claude: 'Claude Code using the repo account map',
+  codex: 'Codex using the repo account map',
   banana: 'OpenRouter via Banana Code',
-  'codex-personal': 'personal-account Codex',
   'banana-local': 'local LM Studio model, direct',
   'banana-fireworks': 'Fireworks models, direct',
   zai: 'GLM 5.2 1M / 5.1 via Z.ai',
+  xai: 'Grok 4.5 via xAI, direct',
 };
 
 // Banana is an engine multiplexer: the picked engine selects the wire cli
-// (and thus the account / provider) the session actually runs on.
-type BananaEngine = 'personal-claude' | 'personal-codex' | 'openrouter' | 'fireworks' | 'local' | 'zai';
+// and provider. Claude Code and Codex accounts still come from the repo map.
+type BananaEngine = 'openrouter' | 'fireworks' | 'local' | 'zai' | 'xai';
 const BANANA_ENGINES: { id: BananaEngine; label: string }[] = [
   { id: 'openrouter', label: 'OpenRouter' },
   { id: 'fireworks', label: 'Fireworks' },
   { id: 'zai', label: 'Z.ai GLM' },
-  { id: 'personal-claude', label: 'Personal Claude' },
-  { id: 'personal-codex', label: 'Personal Codex' },
+  { id: 'xai', label: 'xAI Grok' },
   { id: 'local', label: 'Local (vLLM)' },
+];
+const BANANA_REASONING_OPTIONS = [
+  { value: 'low', label: 'effort · low' },
+  { value: 'medium', label: 'effort · medium' },
+  { value: 'high', label: 'effort · high' },
+];
+const LOCAL_THINKING_OPTIONS = [
+  { value: 'low', label: 'thinking · off' },
+  { value: 'medium', label: 'thinking · auto' },
+  { value: 'high', label: 'thinking · on' },
 ];
 function bananaEngineToCli(engine: string): CompanionId {
   switch (engine) {
-    case 'personal-claude':
-      return 'claude';
-    case 'personal-codex':
-      return 'codex-personal';
     case 'local':
       return 'banana-local';
     case 'fireworks':
       return 'banana-fireworks';
     case 'zai':
       return 'zai';
+    case 'xai':
+      return 'xai';
     default:
       return 'banana';
   }
@@ -239,23 +258,27 @@ export function Hall() {
     localStorage.setItem(SCRIBE_COLLAPSED_KEY, String(scribeCollapsed));
   }, [scribeCollapsed]);
 
-  // Banana model picker — only the Banana companion threads a model id into
-  // its sends. Elrond and Codex ignore the field server-side.
+  // Model selections are shared across every Hall and embedded chat surface.
   const bananaModel = useBananaModel();
   const fireworksModel = useFireworksModel();
-  const [codexModel, setCodexModel] = useState<string>(
-    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:codex-model')) || 'gpt-5.5',
-  );
+  const [codexModel, setCodexModel] = useState<string>(readStoredCodexModel);
   const [codexEffort, setCodexEffort] = useState<string>(
-    () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:codex-effort')) || 'xhigh',
+    () => readStoredCodexEffort(codexModel),
   );
   const changeCodexModel = (m: string) => {
-    setCodexModel(m);
-    if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-model', m);
+    const model = normalizeCodexModel(m);
+    const effort = normalizeCodexEffort(model, codexEffort);
+    setCodexModel(model);
+    setCodexEffort(effort);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('rivendell:codex-model', model);
+      localStorage.setItem('rivendell:codex-effort', effort);
+    }
   };
   const changeCodexEffort = (e: string) => {
-    setCodexEffort(e);
-    if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-effort', e);
+    const effort = normalizeCodexEffort(codexModel, e);
+    setCodexEffort(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:codex-effort', effort);
   };
   const [claudeModel, setClaudeModel] = useState<string>(
     () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:claude-model')) || 'claude-opus-4-8',
@@ -287,6 +310,8 @@ export function Hall() {
   };
   const [zaiModel, setZaiModelState] = useState(readStoredZaiModel);
   const [zaiEffort, setZaiEffortState] = useState(readStoredZaiEffort);
+  const [xaiModel, setXaiModelState] = useState(readStoredXaiModel);
+  const [xaiEffort, setXaiEffortState] = useState(readStoredXaiEffort);
   const changeZaiModel = (m: string) => {
     const model = normalizeZaiModel(m);
     setZaiModelState(model);
@@ -297,6 +322,16 @@ export function Hall() {
     setZaiEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
   };
+  const changeXaiModel = (m: string) => {
+    const model = normalizeXaiModel(m);
+    setXaiModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:xai-model', model);
+  };
+  const changeXaiEffort = (e: string) => {
+    const effort = normalizeXaiEffort(e);
+    setXaiEffortState(effort);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:xai-effort', effort);
+  };
   // Local (vLLM) catalog — fetched live from /api/local/models when the Local
   // engine is active. vLLM serves one model at a time; swapping it on the box
   // (then reopening the picker) repopulates this.
@@ -304,6 +339,7 @@ export function Hall() {
     () => (typeof window !== 'undefined' && localStorage.getItem('rivendell:local-model')) || '',
   );
   const [localContextWindow, setLocalContextWindow] = useState<number | null>(null);
+  const [localSupportsThinking, setLocalSupportsThinking] = useState(false);
   const changeLocalModel = (m: string | null) => {
     const next = m ?? '';
     setLocalModelState(next);
@@ -315,14 +351,15 @@ export function Hall() {
 
   // The wire cli the Banana companion actually runs as, per its engine pick.
   // Elrond/Codex tabs map straight through. This drives the account/provider
-  // (server-side) AND which model/effort picker we surface (client-side).
+  // family and which model/effort picker we surface.
   const effectiveCli: CompanionId = companion === 'banana' ? bananaEngineToCli(bananaEngine) : companion;
   const isClaudeEngine = effectiveCli === 'claude' || effectiveCli === 'assistant';
-  const isCodexEngine = effectiveCli === 'codex' || effectiveCli === 'codex-personal';
+  const isCodexEngine = effectiveCli === 'codex';
   const isLocalEngine = effectiveCli === 'banana-local';
   const isOpenRouterEngine = effectiveCli === 'banana';
   const isFireworksEngine = effectiveCli === 'banana-fireworks';
   const isZaiEngine = effectiveCli === 'zai';
+  const isXaiEngine = effectiveCli === 'xai';
   const isBananaEngine = isOpenRouterEngine || isLocalEngine || isFireworksEngine;
 
   const chat = useChat({
@@ -337,6 +374,7 @@ export function Hall() {
       : isOpenRouterEngine ? bananaModel.model
       : isFireworksEngine ? fireworksModel.model
       : isZaiEngine ? zaiModel
+      : isXaiEngine ? xaiModel
       : isCodexEngine ? codexModel
       : isClaudeEngine ? claudeModel
       : undefined,
@@ -344,6 +382,7 @@ export function Hall() {
     effort:
       isCodexEngine ? codexEffort
       : isZaiEngine ? zaiEffort
+      : isXaiEngine ? xaiEffort
       : isClaudeEngine ? claudeEffort
       : isBananaEngine ? bananaEffort
       : undefined,
@@ -495,6 +534,7 @@ export function Hall() {
             <LocalModelPicker
               onActiveChange={changeLocalModel}
               onContextChange={setLocalContextWindow}
+              onThinkingSupportChange={setLocalSupportsThinking}
             />
           ) : null}
           <button
@@ -631,7 +671,13 @@ export function Hall() {
             codexPicker={isCodexEngine ? { model: codexModel, effort: codexEffort, setModel: changeCodexModel, setEffort: changeCodexEffort } : null}
             claudePicker={isClaudeEngine ? { model: claudeModel, effort: claudeEffort, setModel: changeClaudeModel, setEffort: changeClaudeEffort } : null}
             zaiPicker={isZaiEngine ? { model: zaiModel, effort: zaiEffort, setModel: changeZaiModel, setEffort: changeZaiEffort } : null}
-            bananaEffort={isBananaEngine ? bananaEffort : null}
+            xaiPicker={isXaiEngine ? { model: xaiModel, effort: xaiEffort, setModel: changeXaiModel, setEffort: changeXaiEffort } : null}
+            bananaEffort={
+              isOpenRouterEngine || isFireworksEngine || (isLocalEngine && localSupportsThinking)
+                ? bananaEffort
+                : null
+            }
+            bananaEffortMode={isLocalEngine ? 'local-thinking' : 'reasoning'}
             onBananaEffortChange={changeBananaEffort}
           />
         </main>
@@ -721,7 +767,9 @@ function Composer({
   codexPicker,
   claudePicker,
   zaiPicker,
+  xaiPicker,
   bananaEffort,
+  bananaEffortMode,
   onBananaEffortChange,
 }: {
   disabled: boolean;
@@ -744,8 +792,11 @@ function Composer({
   claudePicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
   /** Non-null only for Z.ai — renders the GLM model+thinking selector. */
   zaiPicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
-  /** OpenRouter reasoning effort (non-null only for the Banana companion). */
+  /** Non-null only for xAI — renders the Grok model+thinking selector. */
+  xaiPicker: { model: string; effort: string; setModel: (m: string) => void; setEffort: (e: string) => void } | null;
+  /** Banana-engine reasoning effort (OpenRouter, Fireworks, or local LM Studio). */
   bananaEffort: string | null;
+  bananaEffortMode: 'reasoning' | 'local-thinking';
   onBananaEffortChange: (e: string) => void;
 }) {
   const [value, setValue] = useState('');
@@ -760,6 +811,9 @@ function Composer({
     { prefix: '/', commands: claudeCommands },
     { prefix: '$', commands: codexCommands },
   ]);
+  const bananaEffortOptions = bananaEffortMode === 'local-thinking'
+    ? LOCAL_THINKING_OPTIONS
+    : BANANA_REASONING_OPTIONS;
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
@@ -948,15 +1002,15 @@ function Composer({
       <div className="composer-footer">
         <div className={modelPicker ? 'has-model-picker' : undefined}>
           {modelPicker ? <ModelPicker state={modelPicker} /> : null}
-          {modelPicker && bananaEffort ? (
+          {bananaEffort ? (
             <select
-              aria-label="Reasoning effort"
+              aria-label={bananaEffortMode === 'local-thinking' ? 'Local thinking mode' : 'Reasoning effort'}
               value={bananaEffort}
               onChange={(e) => onBananaEffortChange(e.target.value)}
               style={{ fontSize: 12.5, border: '1px solid var(--rule, currentColor)', borderRadius: 6, background: 'transparent', color: 'inherit', padding: '2px 6px', cursor: 'pointer' }}
             >
-              {['low', 'medium', 'high'].map((e) => (
-                <option key={e} value={e}>{`effort · ${e}`}</option>
+              {bananaEffortOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
           ) : null}
@@ -988,6 +1042,19 @@ function Composer({
               efforts={ZAI_EFFORTS}
               modelAriaLabel="GLM model"
               effortAriaLabel="GLM thinking level"
+              effortLabel="thinking"
+            />
+          ) : null}
+          {xaiPicker ? (
+            <CodexEnginePicker
+              model={xaiPicker.model}
+              onModelChange={xaiPicker.setModel}
+              effort={xaiPicker.effort}
+              onEffortChange={xaiPicker.setEffort}
+              models={XAI_MODELS}
+              efforts={XAI_EFFORTS}
+              modelAriaLabel="Grok model"
+              effortAriaLabel="Grok thinking level"
               effortLabel="thinking"
             />
           ) : null}
@@ -1418,7 +1485,7 @@ async function interruptLiveSession(session: LiveSession, repoPath: string, chat
 function clearStoredTab(tab: ChatTab, repo: Repo | undefined): void {
   if (!repo) return;
   const suffix = tab.id === MAIN_CHAT_ID ? '' : `|${tab.id}`;
-  const allClis: CompanionId[] = ['assistant', 'claude', 'codex', 'codex-personal', 'banana', 'banana-local', 'banana-fireworks', 'zai'];
+  const allClis: CompanionId[] = ['assistant', 'claude', 'codex', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai'];
   for (const cli of allClis) {
     const key = `rivendell:chat-blocks:${cli}|${repo.path}${suffix}`;
     localStorage.removeItem(key);

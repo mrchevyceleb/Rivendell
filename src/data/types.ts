@@ -207,6 +207,16 @@ export type PlEntry = {
 
 export type CronRuntime = 'railway' | 'local';
 export type CronAiModel = 'claude' | 'codex' | 'mandrill';
+
+export type CronRun = {
+  id: string;
+  status: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  result: unknown;
+  error: string | null;
+};
 export type CronPermissionMode =
   | 'default'
   | 'acceptEdits'
@@ -224,10 +234,12 @@ export type CronJob = {
   actionType?: string;
   prompt?: string;
   aiModel?: CronAiModel;
-  /** Full companion engine id (assistant/claude/codex/codex-personal/banana/banana-local/zai). */
+  /** Full companion engine id (assistant/claude/codex/banana/banana-local/banana-fireworks/zai/xai). */
   engine?: string;
   /** Specific model id for the engine (glm-5.2, claude-opus-4-8, gpt-5.5, OpenRouter/LM Studio id). */
   modelId?: string;
+  /** Model-specific Codex reasoning effort persisted with Forge schedules. */
+  reasoningEffort?: string;
   repo?: string;
   toolName?: string;
   deliveryChannel?: string;

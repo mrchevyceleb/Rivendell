@@ -1,7 +1,10 @@
 import {
+  AlertTriangle,
   Bot,
   CalendarClock,
+  CheckCircle2,
   Code2,
+  History,
   Pencil,
   Pause,
   Play,
@@ -11,23 +14,67 @@ import {
   Sparkles,
   Trash2,
   X,
+  XCircle,
   Zap,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { apiJson } from '../data/api';
 import { CLAUDE_MODELS } from '../chat/components/CodexEnginePicker';
+import {
+  CODEX_MODELS,
+  codexModelSpec,
+  normalizeCodexEffort,
+} from '../chat/codexModels';
 import { ZAI_MODELS } from '../chat/hooks/useCompanionPicker';
-import type { CronAiModel, CronJob } from '../data/types';
+import type { CronAiModel, CronJob, CronRun } from '../data/types';
 import { Button, Chip, EmptyState, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
-import { useCronJobs } from '../hooks/useRoomData';
+import { useCronHistory, useCronJobs } from '../hooks/useRoomData';
+
+function runOutcome(status: string): 'ok' | 'failed' | 'running' | 'unknown' {
+  if (status === 'completed' || status === 'success') return 'ok';
+  if (status === 'failed') return 'failed';
+  if (status === 'running') return 'running';
+  return 'unknown';
+}
+
+// apiJson wraps upstream JSON error bodies inside the Error message; unwrap it
+// and friendlify the UUID error that synthetic/managed ids produce.
+function cleanHistoryError(err: unknown): string {
+  let msg = err instanceof Error ? err.message : String(err ?? '');
+  try { const parsed = JSON.parse(msg); if (parsed?.error) msg = parsed.error; } catch { /* not JSON, keep raw */ }
+  if (/invalid input syntax for type uuid/i.test(msg)) msg = 'Run history is not available for this task.';
+  return msg || 'Could not load run history.';
+}
+
+function runResultText(run: CronRun): string {
+  if (run.error) return run.error;
+  const r = run.result as { response?: string; error?: string; message?: string } | string | null | undefined;
+  if (r == null) return '';
+  if (typeof r === 'string') return r;
+  if (typeof r.response === 'string') return r.response;
+  if (typeof r.error === 'string') return r.error;
+  if (typeof r.message === 'string') return r.message;
+  try { return JSON.stringify(r); } catch { return ''; }
+}
+
+function formatDuration(ms: number | null): string {
+  if (ms == null || !Number.isFinite(ms)) return '';
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m ${rem}s`;
+}
 
 type CronDraft = {
   name: string;
   engine: string;
   model: string;
+  effort: string;
   schedMode: 'simple' | 'custom';
   freq: string;
   schedTime: string;
@@ -42,6 +89,7 @@ const emptyDraft: CronDraft = {
   name: '',
   engine: 'assistant',
   model: 'claude-opus-4-8',
+  effort: '',
   schedMode: 'simple',
   freq: 'daily',
   schedTime: '09:00',
@@ -61,59 +109,62 @@ const schedulePresets = [
   { label: 'M/F 7 AM', value: 'mon/fri 7am', cron: '0 7 * * 1,5' },
 ];
 
-const modelLabels: Record<CronAiModel, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  mandrill: 'Mandrill',
-};
-
-// Full engine set — mirrors the chat companion picker so a cron can run on ANY
-// engine: KG/Personal Claude, KG/Personal Codex, OpenRouter, Local LM Studio,
-// or Z.ai GLM. All execute on the local cron runner.
-const CRON_ENGINES: { id: string; label: string }[] = [
-  { id: 'assistant', label: 'Elrond · KG Claude' },
-  { id: 'claude', label: 'Personal Claude' },
-  { id: 'codex', label: 'KG Codex' },
-  { id: 'codex-personal', label: 'Personal Codex' },
-  { id: 'banana', label: 'OpenRouter' },
-  { id: 'banana-local', label: 'Local · LM Studio' },
-  { id: 'zai', label: 'Z.ai · GLM' },
+// The five engines Matt wants for scheduled work. Each one dispatches to a real
+// backend on the local cron runner (see assistant-mcp cron-engines.ts):
+//   assistant     → KG Claude (kim account, claude CLI)
+//   codex         → KG Codex (kim account, codex CLI)
+//   claude        → Personal Claude (personal account, claude CLI)
+//   banana-local  → LM Studio local model (HTTP completion, on-box)
+//   zai           → GLM 5.2 via Z.ai (claude CLI redirected to z.ai)
+const CRON_ENGINES: { id: string; label: string; hint: string }[] = [
+  { id: 'assistant', label: 'KG Claude', hint: 'Kim account · agentic CLI with tools' },
+  { id: 'codex', label: 'KG Codex', hint: 'Kim account · codex CLI with tools' },
+  { id: 'claude', label: 'Personal Claude', hint: 'Personal account · agentic CLI with tools' },
+  { id: 'banana-local', label: 'LM Studio · Local', hint: 'On-box local model · plain completion' },
+  { id: 'zai', label: 'GLM 5.2', hint: 'Z.ai GLM · agentic CLI with tools' },
 ];
+const KNOWN_ENGINES = new Set(CRON_ENGINES.map((e) => e.id));
 function engineLabel(id: string): string {
   return CRON_ENGINES.find((e) => e.id === id)?.label ?? id;
 }
+function engineHint(id: string): string {
+  return CRON_ENGINES.find((e) => e.id === id)?.hint ?? '';
+}
+// aiModel is a legacy coarse field the upstream still stores; the engine field
+// is the real dispatch key now. We only need claude/codex here.
 function coarseAiModel(engine: string): CronAiModel {
-  if (engine === 'codex' || engine === 'codex-personal') return 'codex';
-  if (engine === 'banana' || engine === 'banana-local') return 'mandrill';
-  return 'claude';
+  return engine === 'codex' ? 'codex' : 'claude';
 }
 function engineFromAiModel(m: CronAiModel): string {
-  if (m === 'codex') return 'codex';
-  if (m === 'mandrill') return 'banana';
-  return 'assistant';
+  return m === 'codex' ? 'codex' : 'assistant';
+}
+
+/**
+ * Clean display for ANY job, never "Mandrill". The engine field is the source of
+ * truth; legacy jobs without one fall back to runtime (local crons run on KG
+ * Claude by default). Returns the human label + optional specific model id.
+ */
+function engineDisplay(job: CronJob): { label: string; modelId?: string } {
+  if (job.engine && KNOWN_ENGINES.has(job.engine)) {
+    return { label: engineLabel(job.engine), modelId: job.modelId };
+  }
+  if (job.engine) {
+    return { label: prettifyEngineId(job.engine), modelId: job.modelId };
+  }
+  return { label: job.runtime === 'local' ? 'KG Claude' : 'Claude', modelId: job.modelId };
+}
+function prettifyEngineId(id: string): string {
+  const cleaned = id.replace(/[-_]/g, ' ').replace(/\bbanana\b/gi, 'LM Studio').replace(/\s+/g, ' ').trim();
+  return cleaned || id;
 }
 
 // ── Per-engine model menus (no typing). Local LM Studio models are fetched live.
 type ModelOpt = { id: string; label: string };
-const CODEX_MODELS: ModelOpt[] = [
-  { id: 'gpt-5.5', label: 'GPT-5.5' },
-  { id: 'gpt-5.3-codex', label: 'Codex 5.3' },
-  { id: 'gpt-5.3-codex-spark', label: 'Spark 5.3' },
-];
-const OPENROUTER_MODELS: ModelOpt[] = [
-  { id: 'openai/gpt-4o-mini', label: 'GPT-4o mini' },
-  { id: 'openai/gpt-4o', label: 'GPT-4o' },
-  { id: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
-  { id: 'google/gemini-flash-1.5', label: 'Gemini Flash 1.5' },
-  { id: 'deepseek/deepseek-chat', label: 'DeepSeek Chat' },
-  { id: 'meta-llama/llama-3.3-70b-instruct', label: 'Llama 3.3 70B' },
-];
 function staticModelsForEngine(engine: string): ModelOpt[] {
   if (engine === 'zai') return ZAI_MODELS;
-  if (engine === 'codex' || engine === 'codex-personal') return CODEX_MODELS;
+  if (engine === 'codex') return CODEX_MODELS;
   if (engine === 'assistant' || engine === 'claude') return CLAUDE_MODELS;
-  if (engine === 'banana') return OPENROUTER_MODELS;
-  return []; // banana-local: fetched live
+  return []; // banana-local: fetched live from LM Studio
 }
 
 // ── Schedule builder: pick frequency + time + day, never type a cron string ──
@@ -194,7 +245,12 @@ function parseCron(cron: string): SchedParts | null {
   return null;
 }
 
-const defaultNoRepoCwd = '/Users/mjohnst/ASSISTANT-HUB';
+// CWDs that mean "no specific repo" and should be hidden in the UI. Covers both
+// the Moria workspace (where Rivendell runs today) and the legacy Mac path.
+const NO_REPO_CWDS = new Set([
+  '/home/mrchevyceleb/ASSISTANT-HUB',
+  '/Users/mjohnst/ASSISTANT-HUB',
+]);
 
 export function Forge() {
   const { data: jobs = [], refetch } = useCronJobs();
@@ -204,6 +260,16 @@ export function Forge() {
   const [draft, setDraft] = useState<CronDraft>(emptyDraft);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [localModels, setLocalModels] = useState<ModelOpt[]>([]);
+  const [notice, setNotice] = useState<{ kind: 'error' | 'success'; text: string } | null>(null);
+  // Synchronous in-flight guard for save. busyId (state) only blocks clicks
+  // AFTER React re-renders, so a synchronous burst (rapid double-click, repeat
+  // Enter) sails past it and creates duplicate schedules. A ref flips instantly.
+  const savingRef = useRef(false);
+
+  const flash = useCallback((kind: 'error' | 'success', text: string) => {
+    setNotice({ kind, text });
+    if (kind === 'success') window.setTimeout(() => setNotice(null), 3500);
+  }, []);
 
   // Pull LM Studio's loaded models so the "Local" engine offers a dropdown, not a text box.
   useEffect(() => {
@@ -225,9 +291,16 @@ export function Forge() {
   }, [localModels, draft.engine, draft.model]);
 
   const modelOptions = draft.engine === 'banana-local' ? localModels : staticModelsForEngine(draft.engine);
-  const firstModelFor = (engine: string): string => {
+  const codexEffortOptions = draft.engine === 'codex'
+    ? codexModelSpec(draft.model).efforts
+    : [];
+  const initialSelectionFor = (engine: string): { model: string; effort: string } => {
     const list = engine === 'banana-local' ? localModels : staticModelsForEngine(engine);
-    return list[0]?.id ?? '';
+    const model = list[0]?.id ?? '';
+    return {
+      model,
+      effort: engine === 'codex' ? codexModelSpec(model).defaultEffort : '',
+    };
   };
 
   // Active first, then paused, then failed; stable within each group.
@@ -274,14 +347,29 @@ export function Forge() {
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (cannotSave) return;
-    const payload = normalizeDraft(draft);
-    const saved = await apiJson<CronJob>(isCreating ? '/api/cron' : `/api/cron/${encodeURIComponent(editingId || '')}`, {
-      method: isCreating ? 'POST' : 'PATCH',
-      body: JSON.stringify(payload),
-    });
-    setSelectedId(saved.id);
-    closeEditor();
-    await invalidate();
+    // Synchronous guard: a rapid double-click or repeated Enter fires multiple
+    // submit events before React re-renders, so busyId (state) can't block the
+    // burst. Flip the ref now and only the first call proceeds.
+    if (savingRef.current) return;
+    savingRef.current = true;
+    const savingId = editingId || 'new';
+    setBusyId(savingId);
+    try {
+      const payload = normalizeDraft(draft);
+      const saved = await apiJson<CronJob>(isCreating ? '/api/cron' : `/api/cron/${encodeURIComponent(editingId || '')}`, {
+        method: isCreating ? 'POST' : 'PATCH',
+        body: JSON.stringify(payload),
+      });
+      setSelectedId(saved.id);
+      closeEditor();
+      await invalidate();
+      flash('success', `Saved "${saved.name}".`);
+    } catch (err: any) {
+      flash('error', err?.message || 'Could not save the task.');
+    } finally {
+      savingRef.current = false;
+      setBusyId(null);
+    }
   };
 
   const toggle = async (job: CronJob) => {
@@ -293,6 +381,9 @@ export function Forge() {
         body: JSON.stringify({ status: cronIsPaused(job) ? 'active' : 'paused' }),
       });
       await invalidate();
+      flash('success', cronIsPaused(job) ? `Resumed "${job.name}".` : `Paused "${job.name}".`);
+    } catch (err: any) {
+      flash('error', err?.message || 'Could not update the task.');
     } finally {
       setBusyId(null);
     }
@@ -302,8 +393,11 @@ export function Forge() {
     if (job.readOnly) return;
     setBusyId(job.id);
     try {
-      await apiJson(`/api/cron/${encodeURIComponent(job.id)}/run-now`, { method: 'POST' });
+      const resp = await apiJson<{ runtime?: string }>(`/api/cron/${encodeURIComponent(job.id)}/run-now`, { method: 'POST' });
       await invalidate();
+      flash('success', `Triggered "${job.name}" on the ${resp?.runtime || 'local'} runner. History updates in a moment.`);
+    } catch (err: any) {
+      flash('error', err?.message || 'Could not trigger the task.');
     } finally {
       setBusyId(null);
     }
@@ -311,13 +405,16 @@ export function Forge() {
 
   const remove = async (job: CronJob) => {
     if (job.readOnly) return;
-    if (!window.confirm(`Delete "${job.name}"?`)) return;
+    if (!window.confirm(`Delete "${job.name}"? This cannot be undone.`)) return;
     setBusyId(job.id);
     try {
       await apiJson<void>(`/api/cron/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
       if (selectedId === job.id) setSelectedId(null);
       if (editingId === job.id) closeEditor();
       await invalidate();
+      flash('success', `Deleted "${job.name}".`);
+    } catch (err: any) {
+      flash('error', err?.message || 'Could not delete the task.');
     } finally {
       setBusyId(null);
     }
@@ -343,6 +440,17 @@ export function Forge() {
         }
       />
 
+      {notice ? (
+        <div
+          className={`cron-notice notice-${notice.kind}`}
+          role={notice.kind === 'error' ? 'alert' : 'status'}
+          onClick={() => setNotice(null)}
+        >
+          {notice.kind === 'error' ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}
+          <span>{notice.text}</span>
+        </div>
+      ) : null}
+
       <div className="forge-studio forge-studio-simple">
         <section className="cron-list-panel">
           <div className="section-head">
@@ -354,9 +462,11 @@ export function Forge() {
 
           <div className="cron-card-list">
             {sortedJobs.length ? (
-              sortedJobs.map((job) => (
+              sortedJobs.map((job) => {
+                const eng = engineDisplay(job);
+                return (
                 <article
-                  className={`cron-card status-${job.status} model-${job.aiModel || inferAiModel(job)} source-${job.source || 'assistant-mcp'} ${job.readOnly ? 'is-readonly' : ''} ${selected?.id === job.id ? 'is-selected' : ''}`}
+                  className={`cron-card status-${job.status} engine-${job.engine || (job.runtime === 'local' ? 'assistant' : 'claude')} source-${job.source || 'assistant-mcp'} ${job.readOnly ? 'is-readonly' : ''} ${selected?.id === job.id ? 'is-selected' : ''}`}
                   key={job.id}
                   onClick={() => setSelectedId(job.id)}
                 >
@@ -371,17 +481,13 @@ export function Forge() {
                     <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>
                       {job.status}
                     </Chip>
-                    {job.engine ? (
-                      <span title={job.modelId || engineLabel(job.engine)}>
-                        <Bot size={13} />
-                        {engineLabel(job.engine)}{job.modelId ? ` · ${job.modelId}` : ''}
-                      </span>
-                    ) : (
-                      <ModelChip model={job.aiModel || inferAiModel(job)} />
-                    )}
-                    {job.sourceLabel ? (
+                    <span title={`${eng.label}${eng.modelId ? ` · ${eng.modelId}` : ''}${job.reasoningEffort ? ` · ${job.reasoningEffort}` : ''}`}>
+                      <Bot size={13} />
+                      {eng.label}{eng.modelId ? ` · ${eng.modelId}` : ''}{job.reasoningEffort ? ` · ${job.reasoningEffort}` : ''}
+                    </span>
+                    {job.sourceLabel && job.source !== 'assistant-mcp' ? (
                       <span title={job.description || job.sourceLabel}>
-                        <Bot size={13} />
+                        <Sparkles size={13} />
                         {job.sourceLabel}
                       </span>
                     ) : null}
@@ -415,7 +521,8 @@ export function Forge() {
                     )}
                   </div>
                 </article>
-              ))
+                );
+              })
             ) : (
               <EmptyState
                 title="No scheduled tasks yet"
@@ -455,13 +562,14 @@ export function Forge() {
                   value={draft.engine}
                   onChange={(event) => {
                     const engine = event.target.value;
-                    setDraft({ ...draft, engine, model: firstModelFor(engine) });
+                    setDraft({ ...draft, engine, ...initialSelectionFor(engine) });
                   }}
                 >
                   {CRON_ENGINES.map((e) => (
                     <option key={e.id} value={e.id}>{e.label}</option>
                   ))}
                 </select>
+                <small className="cron-engine-hint">{engineHint(draft.engine)}</small>
               </div>
 
               <div className="cron-field">
@@ -469,7 +577,13 @@ export function Forge() {
                 <select
                   className="cron-engine-select"
                   value={draft.model}
-                  onChange={(event) => setDraft({ ...draft, model: event.target.value })}
+                  onChange={(event) => {
+                    const model = event.target.value;
+                    const effort = draft.engine === 'codex'
+                      ? normalizeCodexEffort(model, draft.effort)
+                      : draft.effort;
+                    setDraft({ ...draft, model, effort });
+                  }}
                 >
                   {modelOptions.length === 0 && (
                     <option value="">{draft.engine === 'banana-local' ? 'LM Studio offline' : 'No models'}</option>
@@ -479,6 +593,25 @@ export function Forge() {
                   ))}
                 </select>
               </div>
+
+              {draft.engine === 'codex' ? (
+                <div className="cron-field">
+                  Reasoning effort
+                  <select
+                    aria-label="Codex reasoning effort"
+                    className="cron-engine-select"
+                    value={draft.effort}
+                    onChange={(event) => setDraft({
+                      ...draft,
+                      effort: normalizeCodexEffort(draft.model, event.target.value),
+                    })}
+                  >
+                    {codexEffortOptions.map((effort) => (
+                      <option key={effort} value={effort}>{effort}</option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
 
               <div className="cron-field">
                 Schedule
@@ -570,19 +703,21 @@ export function Forge() {
               ) : null}
 
               <div className="cron-editor-actions">
-                <Button tone="ghost" type="button" onClick={closeEditor}>Cancel</Button>
-                <Button tone="gold" type="submit" disabled={cannotSave}>
+                <Button tone="ghost" type="button" onClick={closeEditor} disabled={busyId === (editingId || 'new')}>Cancel</Button>
+                <Button tone="gold" type="submit" disabled={cannotSave || busyId === (editingId || 'new')}>
                   <Save size={14} />
-                  Save task
+                  {busyId === (editingId || 'new') ? 'Saving…' : 'Save task'}
                 </Button>
               </div>
             </form>
           ) : selected ? (
             <CronDetails
+              key={selected.id}
               job={selected}
               onEdit={() => startEdit(selected)}
               onRun={() => runNow(selected)}
               onToggle={() => toggle(selected)}
+              onDelete={() => remove(selected)}
               busy={busyId === selected.id}
             />
           ) : (
@@ -604,15 +739,23 @@ function cronIsPaused(job: CronJob): boolean {
   return job.paused ?? job.status === 'paused';
 }
 
-function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
+function CronDetails({ job, onEdit, onRun, onToggle, onDelete, busy }: {
   job: CronJob;
   onEdit: () => void;
   onRun: () => void;
   onToggle: () => void;
+  onDelete: () => void;
   busy: boolean;
 }) {
-  const model = job.aiModel || inferAiModel(job);
+  const eng = engineDisplay(job);
   const repo = displayRepo(job);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  // TanStack Query: dedup + abort + single-flight polling, so a slow upstream
+  // can't stack overlapping requests or overwrite newer history.
+  const history = useCronHistory(job.id, !job.readOnly);
+  const runs = history.data?.runs ?? [];
+  const runsError = history.isError ? cleanHistoryError(history.error) : null;
+  const runsLoading = history.isLoading && !history.isError;
 
   return (
     <Surface className="cron-detail-card cron-detail-simple">
@@ -623,8 +766,8 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
         </div>
         <div className="cron-detail-chips">
           <Chip tone={job.status === 'active' ? 'emerald' : job.status === 'failed' ? 'rose' : 'neutral'}>{job.status}</Chip>
-          <ModelChip model={model} />
-          {job.sourceLabel ? <Chip tone="elf">{job.sourceLabel}</Chip> : null}
+          <Chip tone="elf">{eng.label}{eng.modelId ? ` · ${eng.modelId}` : ''}{job.reasoningEffort ? ` · ${job.reasoningEffort}` : ''}</Chip>
+          {job.sourceLabel && job.source !== 'assistant-mcp' ? <Chip tone="elf">{job.sourceLabel}</Chip> : null}
           {job.readOnly ? <Chip>Read only</Chip> : null}
         </div>
       </div>
@@ -637,10 +780,16 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
         <div>
           <dt>Engine</dt>
           <dd>
-            {job.engine ? engineLabel(job.engine) : modelLabels[model]}
-            {job.modelId ? <> · <code>{job.modelId}</code></> : null}
+            {eng.label}
+            {eng.modelId ? <> · <code>{eng.modelId}</code></> : null}
           </dd>
         </div>
+        {job.reasoningEffort ? (
+          <div>
+            <dt>Reasoning effort</dt>
+            <dd><code>{job.reasoningEffort}</code></dd>
+          </div>
+        ) : null}
         <div>
           <dt>Schedule</dt>
           <dd>{humanizeCron(job.schedule)} <code>{job.schedule}</code></dd>
@@ -650,8 +799,10 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
           <dd><code>{repo || 'No repo saved'}</code></dd>
         </div>
         <div>
-          <dt>Source</dt>
-          <dd>{job.sourceLabel || 'Forge'}</dd>
+          <dt>Last run</dt>
+          <dd>
+            {job.lastRunAt ? <>{timeAgoLabel(job.lastRunAt)} · {job.lastRunStatus || 'unknown'}</> : 'never'}
+          </dd>
         </div>
       </dl>
 
@@ -666,6 +817,16 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
           <pre>{job.lastRunError}</pre>
         </div>
       ) : null}
+
+      <CronHistory
+        runs={runs}
+        loading={runsLoading}
+        error={runsError}
+        readOnly={job.readOnly}
+        expanded={expanded}
+        onToggle={setExpanded}
+        onRefresh={() => history.refetch()}
+      />
 
       <div className="cron-detail-actions">
         {job.readOnly ? (
@@ -684,6 +845,10 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
               <Pencil size={14} />
               Edit
             </Button>
+            <Button tone="danger" onClick={onDelete} disabled={busy} title="Delete this task">
+              <Trash2 size={14} />
+              Delete
+            </Button>
           </>
         )}
       </div>
@@ -691,23 +856,82 @@ function CronDetails({ job, onEdit, onRun, onToggle, busy }: {
   );
 }
 
-function ModelChip({ model }: { model: CronAiModel }) {
-  const Icon = model === 'claude' ? Sparkles : model === 'codex' ? Code2 : Bot;
+function CronHistory({ runs, loading, error, readOnly, expanded, onToggle, onRefresh }: {
+  runs: CronRun[];
+  loading: boolean;
+  error: string | null;
+  readOnly?: boolean;
+  expanded: string | null;
+  onToggle: (id: string | null) => void;
+  onRefresh: () => void;
+}) {
   return (
-    <span className={`model-chip model-${model}`} title={`Uses ${modelLabels[model]}`}>
-      <Icon size={12} /> {modelLabels[model]}
-    </span>
+    <div className="cron-history">
+      <div className="cron-history-head">
+        <p className="r-eyebrow"><History size={13} /> Run history</p>
+        {!readOnly ? (
+          <button type="button" className="cron-history-refresh" onClick={onRefresh} title="Refresh history">
+            <RotateCcw size={13} />
+          </button>
+        ) : null}
+      </div>
+      {readOnly ? (
+        <p className="cron-history-empty">This task is managed by another system, so per-run history isn’t tracked here.</p>
+      ) : error ? (
+        <p className="cron-history-empty">{error}</p>
+      ) : loading && runs.length === 0 ? (
+        <p className="cron-history-empty">Loading runs…</p>
+      ) : runs.length === 0 ? (
+        <p className="cron-history-empty">No runs yet. Trigger it with “Run once.”</p>
+      ) : (
+        <ul className="cron-history-list">
+          {runs.map((run) => {
+            const outcome = runOutcome(run.status);
+            const Icon = outcome === 'ok' ? CheckCircle2 : outcome === 'failed' ? XCircle : RotateCcw;
+            const text = runResultText(run);
+            const isOpen = expanded === run.id;
+            return (
+              <li key={run.id} className={`cron-run outcome-${outcome}`}>
+                <button
+                  type="button"
+                  className="cron-run-head"
+                  onClick={() => onToggle(isOpen ? null : run.id)}
+                  title={text ? 'Show output' : ''}
+                >
+                  <Icon size={14} />
+                  <span className="cron-run-status">{run.status}</span>
+                  <span className="cron-run-time">{run.startedAt ? timeAgoLabel(run.startedAt) : ''}</span>
+                  {run.durationMs != null ? <span className="cron-run-dur">{formatDuration(run.durationMs)}</span> : null}
+                </button>
+                {isOpen && text ? (
+                  <pre className="cron-run-output">{text.slice(0, 1200)}</pre>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
 function draftFromJob(job: CronJob): CronDraft {
-  const engine = job.engine || engineFromAiModel(job.aiModel || inferAiModel(job));
+  // Clamp to one of the five known engines so editing a legacy/unknown job
+  // lands on a valid choice instead of a phantom dropdown value.
+  const fallback = job.aiModel === 'codex' ? 'codex' : 'assistant';
+  const rawEngine = job.engine && KNOWN_ENGINES.has(job.engine) ? job.engine : fallback;
   const cron = job.schedule || '';
   const parsed = parseCron(cron);
+  // Validate the stored model against the (possibly clamped) engine so a legacy
+  // job never carries an incompatible model id into a save.
+  const model = validModelFor(rawEngine, job.modelId);
   return {
     name: job.name,
-    engine,
-    model: job.modelId || staticModelsForEngine(engine)[0]?.id || '',
+    engine: rawEngine,
+    model,
+    effort: rawEngine === 'codex'
+      ? normalizeCodexEffort(model, job.reasoningEffort)
+      : '',
     schedMode: parsed ? 'simple' : 'custom',
     freq: parsed?.freq ?? 'daily',
     schedTime: parsed?.time ?? '09:00',
@@ -717,6 +941,14 @@ function draftFromJob(job: CronJob): CronDraft {
     repo: displayRepo(job),
     status: job.status === 'failed' ? 'paused' : job.status,
   };
+}
+
+function validModelFor(engine: string, modelId: string | undefined): string {
+  // LM Studio model ids are dynamic (fetched live), so trust whatever was stored.
+  if (engine === 'banana-local') return modelId || '';
+  const list = staticModelsForEngine(engine);
+  if (modelId && list.some((m) => m.id === modelId)) return modelId;
+  return list[0]?.id ?? '';
 }
 
 function normalizeDraft(draft: CronDraft): Partial<CronJob> {
@@ -735,6 +967,9 @@ function normalizeDraft(draft: CronDraft): Partial<CronJob> {
     aiModel,
     engine,
     modelId: draft.model.trim() || undefined,
+    reasoningEffort: engine === 'codex'
+      ? normalizeCodexEffort(draft.model, draft.effort)
+      : undefined,
     repo: repo || undefined,
     toolName: '',
     deliveryChannel: 'log_only',
@@ -758,14 +993,23 @@ function describeSchedule(schedule: string): string {
   return resolveScheduleInput(schedule).label;
 }
 
-function inferAiModel(job: CronJob): CronAiModel {
-  if (job.runtime === 'local') return 'claude';
-  return 'mandrill';
+function timeAgoLabel(value: string): string {
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return value;
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Intl.DateTimeFormat([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(ts));
 }
 
 function displayRepo(job: CronJob): string {
   if (job.repo) return job.repo;
-  if (job.cwd && job.cwd !== defaultNoRepoCwd) return job.cwd;
+  if (job.cwd && !NO_REPO_CWDS.has(job.cwd)) return job.cwd;
   return '';
 }
 

@@ -53,12 +53,13 @@ import { Conversation } from '../chat/components/desktop/Conversation';
 function companionAgentLabel(cli: string): string {
   switch (cli) {
     case 'assistant': return 'Elrond';
-    case 'claude': return 'Personal Claude';
+    case 'claude': return 'Claude Code';
     case 'codex': return 'Codex';
-    case 'codex-personal': return 'Personal Codex';
     case 'banana': return 'OpenRouter';
     case 'banana-local': return 'Local';
     case 'banana-fireworks': return 'Fireworks';
+    case 'zai': return 'GLM';
+    case 'xai': return 'Grok 4.5';
     default: return cli;
   }
 }
@@ -427,6 +428,7 @@ export function Workspace() {
   const chat = useChat({
     repo: assistantHubRepo,
     cli: picker.cli,
+    account: picker.account ?? undefined,
     chatId: 'workspace',
     enabled: Boolean(assistantHubRepo),
     model: picker.model,
@@ -783,7 +785,7 @@ export function Workspace() {
                   )}
 
                   <Button tone="ghost" onClick={() => sendToElrond(openDoc.path)}>
-                    <Send size={13} /> Ask {companionAgentLabel(picker.companion)}
+                    <Send size={13} /> Ask {companionAgentLabel(picker.cli)}
                   </Button>
 
                   <Button tone="ghost" onClick={() => { if (!dirty || confirm('Discard unsaved changes?')) { setOpenDoc(null); setDraft(''); } }}>
@@ -856,7 +858,7 @@ export function Workspace() {
             <CompanionControls picker={picker} />
             <Conversation
               compact
-              agent={companionAgentLabel(picker.companion)}
+              agent={companionAgentLabel(picker.cli)}
               repo={assistantHubRepo?.name}
               title="workspace thread"
               blocks={chat.blocks}
