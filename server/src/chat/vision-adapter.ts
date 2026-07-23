@@ -105,7 +105,14 @@ async function resolveVisionModel(baseUrl: string): Promise<string> {
   const models = await fetchLmStudioModels(baseUrl);
   const loaded = models.filter((m) => m.type === 'vlm' && m.state === 'loaded');
   if (loaded.length) {
-    return (loaded.find((m) => /qwen3-vl/i.test(m.id)) ?? loaded[0]).id;
+    // Prefer the currently-loaded big Qwen (qwen3.6-35b-a3b) — it's vision-capable
+    // and already resident, so no extra model load. Then a dedicated qwen3-vl, then
+    // any loaded VLM.
+    return (
+      loaded.find((m) => /qwen3\.6|35b-a3b/i.test(m.id)) ??
+      loaded.find((m) => /qwen3-vl/i.test(m.id)) ??
+      loaded[0]
+    ).id;
   }
   const anyVlm = models.find((m) => m.type === 'vlm');
   if (anyVlm) return anyVlm.id;
@@ -170,6 +177,12 @@ async function describeImage(
         model,
         temperature: 0.1,
         max_tokens: 2000,
+        // Thinking OFF for reasoning-capable local models (qwen3.6-35b-a3b dumps
+        // its description into reasoning_content and returns empty content
+        // otherwise). The `/no_think` prompt switch does NOT work on qwen3.6;
+        // reasoning_effort:'none' is the only reliable off switch. Harmless to
+        // omit for non-thinking VLMs (qwen3-vl), so it's gated to thinking models.
+        ...(/qwen3\.6|35b-a3b|qwq/i.test(model) ? { reasoning_effort: 'none' } : {}),
         messages: [
           { role: 'system', content: visionPrompt() },
           {
