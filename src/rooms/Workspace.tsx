@@ -45,8 +45,7 @@ import { useScribeSocket } from '../hooks/useScribeSocket';
 import { useChat } from '../chat/hooks/useChat';
 import { useRepos } from '../chat/hooks/useRepos';
 import { useCompanionPicker } from '../chat/hooks/useCompanionPicker';
-import { CompanionControls } from '../chat/components/CompanionControls';
-import { Conversation } from '../chat/components/desktop/Conversation';
+import { Threshold } from '../chat/components/desktop/Threshold';
 
 // ─── Companion display label ────────────────────────────────────────────────
 
@@ -855,22 +854,7 @@ export function Workspace() {
 
           {/* ── Right: Elrond chat ─────────────────────────────────────── */}
           <aside style={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%', borderLeft: '1px solid var(--r-line)', overflow: 'hidden' }}>
-            <CompanionControls picker={picker} />
-            <Conversation
-              compact
-              agent={companionAgentLabel(picker.cli)}
-              repo={assistantHubRepo?.name}
-              title="workspace thread"
-              blocks={chat.blocks}
-              status={chat.status}
-              usage={chat.usage}
-              errorText={chat.error}
-              onSend={chat.send}
-              onSteer={chat.steer}
-              onStop={chat.stop}
-              onFreshStart={chat.freshStart}
-              acceptImages={false}
-            />
+            <Threshold chat={chat} picker={picker} repo={assistantHubRepo} agent={companionAgentLabel(picker.cli)} />
           </aside>
         </div>
       </div>
