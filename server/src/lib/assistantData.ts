@@ -8,7 +8,7 @@ export type RivendellTask = {
   id: string;
   title: string;
   project: string;
-  status: 'in_hand' | 'horizon' | 'delegated' | 'done';
+  status: 'in_hand' | 'in_progress' | 'horizon' | 'delegated' | 'done';
   due: string;
   dueDate?: string | null;
   priority: 'low' | 'medium' | 'high';
@@ -479,17 +479,22 @@ function mapTask(task: AdminTask): RivendellTask {
 }
 
 function fromAdminTaskStatus(status?: string | null): RivendellTask['status'] {
-  if (status === 'completed' || status === 'cancelled') return 'done';
+  if (status === 'completed' || status === 'cancelled' || status === 'done') return 'done';
   if (status === 'blocked') return 'delegated';
-  if (status === 'not_started' || status === 'pending') return 'horizon';
-  return 'in_hand';
+  if (status === 'in_progress') return 'in_progress';
+  // "pending" = owned/ready (In Hand). "not_started" = backlog (Horizon).
+  if (status === 'pending' || status === 'in_hand') return 'in_hand';
+  if (status === 'not_started' || status === 'horizon') return 'horizon';
+  return 'horizon';
 }
 
 function toAdminTaskStatus(status: RivendellTask['status']): string {
   if (status === 'done') return 'completed';
   if (status === 'delegated') return 'blocked';
-  if (status === 'horizon') return 'not_started';
-  return 'in_progress';
+  if (status === 'in_progress') return 'in_progress';
+  if (status === 'in_hand') return 'pending';
+  // horizon
+  return 'not_started';
 }
 
 function fromAdminPriority(priority?: string | null): RivendellTask['priority'] {
@@ -505,7 +510,7 @@ function normalizePriority(priority?: string): 'low' | 'medium' | 'high' | 'urge
 }
 
 function sortTasks(a: RivendellTask, b: RivendellTask): number {
-  const order = ['in_hand', 'horizon', 'delegated', 'done'];
+  const order = ['horizon', 'in_hand', 'in_progress', 'delegated', 'done'];
   const statusDelta = order.indexOf(a.status) - order.indexOf(b.status);
   if (statusDelta) return statusDelta;
   return dueRank(a.due) - dueRank(b.due);

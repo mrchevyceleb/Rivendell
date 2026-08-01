@@ -4,7 +4,6 @@ import {
   ASSISTANT_HUB_PATH,
   CODEX_PROMPTS_DIR,
   ELROND_COMMANDS_DIR,
-  PERSONAL_CLAUDE_COMMANDS_DIR,
 } from './config.ts';
 
 export type CommandEntry = {
@@ -91,17 +90,17 @@ function sortCommands(a: CommandEntry, b: CommandEntry): number {
 export async function readCommands(): Promise<CommandCatalog> {
   // Each spawned CLI loads BOTH its per-account user commands and the project's
   // .claude/commands; mirror that union here so the Hall slash-menu matches what
-  // the model can actually run. (Hall maps the assistant/Elrond AND Personal
-  // Claude panes to `claude`, Codex to `codex`, Banana to `banana`.)
-  const [elrondUser, codexPrompts, personalUser, assistantHubProject] = await Promise.all([
+  // the model can actually run. (Hall maps Elrond/Claude · kim to `claude`,
+  // Codex · kim to `codex`, Banana engines to `banana`.) Personal Claude/Codex
+  // command dirs are no longer scanned.
+  const [elrondUser, codexPrompts, assistantHubProject] = await Promise.all([
     markdownCommands(ELROND_COMMANDS_DIR),
     markdownCommands(CODEX_PROMPTS_DIR),
-    markdownCommands(PERSONAL_CLAUDE_COMMANDS_DIR),
     markdownCommands(join(ASSISTANT_HUB_PATH, '.claude', 'commands')),
   ]);
   return {
     claude: mergeCommandEntries(elrondUser, assistantHubProject),
     codex: codexPrompts,
-    banana: mergeCommandEntries(assistantHubProject, personalUser, elrondUser),
+    banana: mergeCommandEntries(assistantHubProject, elrondUser),
   };
 }

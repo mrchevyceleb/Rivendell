@@ -34,13 +34,23 @@ export type ModelProviderConfig = {
 };
 
 // OpenRouter quick-picks — real model ids routed DIRECT through OpenRouter
-// (the old `monkey/*` tiers died with the monkey-models proxy). Verified
-// present in the live OpenRouter catalogue.
+// (the old `monkey/*` tiers died with the monkey-models proxy). Keep these
+// pointed at the current top of the live OpenRouter catalogue.
 const OPENROUTER_TIERS: BananaModelOption[] = [
-  { id: 'openrouter/anthropic/claude-opus-4.6', label: 'Claude Opus 4.6', detail: 'top tier' },
-  { id: 'openrouter/anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6', detail: 'balanced' },
-  { id: 'openrouter/openai/gpt-5', label: 'GPT-5', detail: 'OpenAI' },
+  { id: 'openrouter/anthropic/claude-opus-4.8', label: 'Claude Opus 4.8', detail: 'top tier' },
+  { id: 'openrouter/anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', detail: 'balanced' },
+  { id: 'openrouter/openai/gpt-5.5', label: 'GPT-5.5', detail: 'OpenAI' },
   { id: 'openrouter/z-ai/glm-5.2', label: 'GLM 5.2', detail: 'long context' },
+];
+
+// Fireworks quick-picks — current serverless chat models from the control-plane
+// catalog. Empty tiers used to make the Fireworks picker feel "broken" until
+// the full list finished loading.
+const FIREWORKS_TIERS: BananaModelOption[] = [
+  { id: 'fireworks/accounts/fireworks/models/glm-5p2', label: 'GLM 5.2', detail: '1M ctx' },
+  { id: 'fireworks/accounts/fireworks/models/deepseek-v4-pro', label: 'DeepSeek V4 Pro', detail: '1M ctx' },
+  { id: 'fireworks/accounts/fireworks/models/kimi-k2p6', label: 'Kimi K2.6', detail: 'code' },
+  { id: 'fireworks/accounts/fireworks/models/minimax-m3', label: 'MiniMax M3', detail: '512K' },
 ];
 
 export const OPENROUTER_PROVIDER: ModelProviderConfig = {
@@ -48,7 +58,7 @@ export const OPENROUTER_PROVIDER: ModelProviderConfig = {
   idPrefix: 'openrouter',
   storageKey: 'rivendell:banana-model',
   favoritesKey: 'banana-model-favorites',
-  defaultModel: 'openrouter/anthropic/claude-sonnet-4.6',
+  defaultModel: 'openrouter/anthropic/claude-sonnet-5',
   tiers: OPENROUTER_TIERS,
   tiersHeading: 'Quick picks',
   listHeading: 'OpenRouter',
@@ -61,8 +71,8 @@ export const FIREWORKS_PROVIDER: ModelProviderConfig = {
   storageKey: 'rivendell:fireworks-model',
   favoritesKey: 'fireworks-model-favorites',
   defaultModel: 'fireworks/accounts/fireworks/models/glm-5p2',
-  tiers: [],
-  tiersHeading: '',
+  tiers: FIREWORKS_TIERS,
+  tiersHeading: 'Quick picks',
   listHeading: 'Fireworks',
   searchPlaceholder: 'Search Fireworks models...',
 };
@@ -71,7 +81,10 @@ export const FIREWORKS_PROVIDER: ModelProviderConfig = {
 export const MONKEY_TIERS = OPENROUTER_TIERS;
 export const DEFAULT_BANANA_MODEL = OPENROUTER_PROVIDER.defaultModel;
 
-const CACHE_TTL_MS = 60 * 1000;
+// Soft cache only. Every picker open still revalidates against the live API so
+// new Fireworks/OpenRouter models show up without a browser refresh. Keep a
+// short soft TTL so rapid open/close does not spam the endpoint.
+const CACHE_TTL_MS = 15 * 1000;
 
 // Cache briefly, PER endpoint, so long-lived Rivendell tabs notice catalogue
 // adds, removals, and metadata changes without a browser refresh.
@@ -88,14 +101,21 @@ function cacheFor(endpoint: string): CacheEntry {
 
 type RawModel = { id?: unknown; name?: unknown; context_length?: unknown };
 
-async function fetchModels(config: ModelProviderConfig): Promise<BananaModelOption[]> {
+async function fetchModels(
+  config: ModelProviderConfig,
+  opts: { force?: boolean } = {},
+): Promise<BananaModelOption[]> {
   const cache = cacheFor(config.endpoint);
-  const fresh = cache.models !== null && Date.now() - cache.at < CACHE_TTL_MS;
+  const fresh = !opts.force && cache.models !== null && Date.now() - cache.at < CACHE_TTL_MS;
   if (fresh) return cache.models as BananaModelOption[];
   if (cache.inflight) return cache.inflight;
   cache.inflight = (async () => {
     try {
-      const res = await fetch(config.endpoint);
+      // Bust any intermediate HTTP/proxy cache so "always stay fresh" is real.
+      const res = await fetch(`${config.endpoint}${config.endpoint.includes('?') ? '&' : '?'}_=${Date.now()}`, {
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
       if (!res.ok) throw new Error(`${config.listHeading} responded ${res.status}`);
       const body = (await res.json()) as { data?: RawModel[] };
       const list = Array.isArray(body.data) ? body.data : [];
@@ -133,6 +153,14 @@ function formatContext(n: number): string {
   return String(n);
 }
 
+/** Stale OpenRouter defaults that used to ship as the stored pick / tier. Map
+ *  them forward so a long-lived browser tab doesn't keep a dead model id. */
+const OPENROUTER_MODEL_MIGRATIONS: Record<string, string> = {
+  'openrouter/anthropic/claude-sonnet-4.6': 'openrouter/anthropic/claude-sonnet-5',
+  'openrouter/anthropic/claude-opus-4.6': 'openrouter/anthropic/claude-opus-4.8',
+  'openrouter/openai/gpt-5': 'openrouter/openai/gpt-5.5',
+};
+
 function readStoredModel(config: ModelProviderConfig): string {
   if (typeof window === 'undefined') return config.defaultModel;
   try {
@@ -147,6 +175,13 @@ function readStoredModel(config: ModelProviderConfig): string {
           localStorage.setItem(config.storageKey, config.defaultModel);
         } catch {}
         return config.defaultModel;
+      }
+      const migrated = OPENROUTER_MODEL_MIGRATIONS[stored];
+      if (migrated) {
+        try {
+          localStorage.setItem(config.storageKey, migrated);
+        } catch {}
+        return migrated;
       }
       return stored;
     }
@@ -211,19 +246,22 @@ export function useBananaModel(config: ModelProviderConfig = OPENROUTER_PROVIDER
     [config.favoritesKey],
   );
 
-  // Lazily load the catalogue — called when the picker opens so we don't pay
-  // the network cost unless the user actually wants to browse.
-  const loadOpenRouter = useCallback(() => {
+  // Load (and revalidate) the catalogue. Called when the picker opens so a
+  // long-lived tab always sees the latest Fireworks/OpenRouter models.
+  const loadOpenRouter = useCallback((opts: { force?: boolean } = {}) => {
     const cache = cacheFor(config.endpoint);
-    const fresh = cache.models !== null && Date.now() - cache.at < CACHE_TTL_MS;
+    const force = opts.force === true;
+    const fresh = !force && cache.models !== null && Date.now() - cache.at < CACHE_TTL_MS;
     if (fresh) {
       setModels(cache.models as BananaModelOption[]);
       return;
     }
+    // Show the last-known list immediately while the network revalidation runs,
+    // so opening the picker never flashes empty on a warm cache.
     if (cache.models) setModels(cache.models);
     setLoading(true);
     setError(null);
-    fetchModels(config)
+    fetchModels(config, { force })
       .then((list) => {
         setModels(list);
         setLoading(false);

@@ -98,8 +98,14 @@ export function useDocs() {
   return roomQuery<LibraryDoc[]>(['docs'], '/api/docs', emptyDocs);
 }
 
-export function useWorkspaceTree() {
-  return roomQuery<WorkspaceTreeResponse | null>(['workspace-tree'], '/api/docs/tree', null);
+export function useWorkspaceTree(opts?: { hideLegacy?: boolean }) {
+  const hideLegacy = opts?.hideLegacy !== false;
+  const qs = hideLegacy ? '' : '?hideLegacy=false';
+  return roomQuery<WorkspaceTreeResponse | null>(
+    ['workspace-tree', hideLegacy ? 'hide-legacy' : 'show-legacy'],
+    `/api/docs/tree${qs}`,
+    null,
+  );
 }
 
 export function usePins() {

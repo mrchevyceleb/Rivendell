@@ -1,5 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { getXaiAuth } from '../routes/xai-oauth.ts';
 
 // xAI's Anthropic-compatible endpoint (https://api.x.ai/v1/messages) rejects
 // `role: "system"` entries inside the `messages` array with a 400
@@ -13,13 +15,52 @@ import https from 'node:https';
 // This is a tiny localhost transform proxy that sits between the claude CLI
 // and xAI: it folds every `role: "system"` message into the top-level `system`
 // field, then forwards the request verbatim to xAI and streams the response
-// back unchanged. Auth (Authorization: Bearer <GROK_PERSONAL_API_KEY>) is set
-// by claude via ANTHROPIC_AUTH_TOKEN and forwarded as-is; xAI accepts Bearer.
+// back unchanged.
+//
+// It is ALSO where auth happens. The claude CLI sends whatever
+// ANTHROPIC_AUTH_TOKEN held when it spawned, and a process env is immutable
+// once running — so a SuperGrok OAuth token baked in at spawn goes stale in
+// place (they live ~6h; sessions live longer) and xAI starts 403ing with
+// "The OAuth2 access token could not be validated".
+//
+// So no token is baked in at all. xaiEnv() seeds the child with PROXY_SECRET,
+// a random per-process value that never expires; the proxy recognises it and
+// swaps it for a freshly-refreshed subscription token on every request. That
+// kills the staleness bug at the root (nothing expirable is frozen into an
+// env) and doubles as caller identity, so a stray local process that finds the
+// port can't spend Matt's plan. Callers that don't present the secret (the
+// GROK_PERSONAL_API_KEY path) forward their own header untouched.
 //
 // Started once per server process on an ephemeral 127.0.0.1 port and reused by
 // every xAI chat session (xaiEnv points ANTHROPIC_BASE_URL at it).
 
 const XAI_UPSTREAM = process.env.RIVENDELL_XAI_UPSTREAM?.trim() || 'https://api.x.ai';
+
+// Per-process credential. xaiEnv() seeds the child's ANTHROPIC_AUTH_TOKEN with
+// THIS instead of a real token, which is what makes the whole scheme work:
+// nothing expirable is ever frozen into a child env, and the proxy can tell its
+// own claude children apart from any other process that stumbles onto the port.
+// Without it, binding 127.0.0.1 would hand Matt's subscription to any local
+// caller that asked — loopback is not identity on a shared machine.
+const PROXY_SECRET = randomBytes(32).toString('hex');
+
+/** The value xaiEnv() must put in ANTHROPIC_AUTH_TOKEN for OAuth injection. */
+export function xaiProxySecret(): string {
+  return PROXY_SECRET;
+}
+
+function presentsProxySecret(header: string | undefined): boolean {
+  if (!header) return false;
+  const m = /^Bearer\s+(.+)$/i.exec(header.trim());
+  if (!m) return false;
+  const got = Buffer.from(m[1]);
+  const want = Buffer.from(PROXY_SECRET);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+// A token with a CR/LF or other control char would let a malformed credential
+// file smuggle extra headers into the upstream request.
+const HEADER_SAFE = /^[\x20-\x7E]+$/;
 
 let server: http.Server | null = null;
 let port = 0;
@@ -69,6 +110,17 @@ function transformRequest(body: string): string {
     for (const tool of obj.tools as Array<Record<string, unknown>>) {
       const schema = tool?.input_schema as Record<string, unknown> | undefined;
       if (schema && !Array.isArray(schema.required)) schema.required = [];
+      // xAI's deserializer REQUIRES a string `description` on every custom tool
+      // (one that carries an input_schema); a missing one 422s the WHOLE request
+      // ("tools[0]: missing field `description`") and derails the turn. Anthropic
+      // omits it on some tools. Backfill a placeholder so a single
+      // description-less tool can't sink a Grok turn. Scoped to tools WITH an
+      // input_schema (real custom/MCP tools) — Anthropic server tools (no
+      // input_schema, e.g. WebSearch) are left untouched; those are disabled for
+      // xai at the CLI layer, since xAI couldn't execute them even if they parsed.
+      if (schema && typeof tool.description !== 'string') {
+        tool.description = typeof tool.name === 'string' && tool.name ? tool.name : 'tool';
+      }
     }
   }
   return JSON.stringify(obj);
@@ -109,14 +161,21 @@ function startServer(): Promise<string> {
       req.on('error', cleanup);
       req.on('aborted', cleanup);
       res.on('close', cleanup);
-      req.on('end', () => {
+      const fail = (code: number, message: string) => {
+        if (res.headersSent || res.writableEnded) return;
+        try {
+          res.writeHead(code, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ type: 'error', error: { type: 'proxy_error', code, message } }));
+        } catch {}
+      };
+      const handleEnd = async () => {
         if (aborted) return;
         let outBody: string;
         try {
           outBody = transformRequest(Buffer.concat(chunks).toString('utf8'));
         } catch (err) {
           console.warn(`[xai-proxy] transform error: ${(err as Error).message}`);
-          try { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { code: 400, message: 'xAI proxy: failed to parse request' } })); } catch {}
+          fail(400, 'xAI proxy: failed to parse request');
           return;
         }
         const headers: Record<string, string> = {
@@ -128,6 +187,32 @@ function startServer(): Promise<string> {
         if (req.headers['x-api-key']) headers['x-api-key'] = String(req.headers['x-api-key']);
         if (req.headers['anthropic-version']) headers['anthropic-version'] = String(req.headers['anthropic-version']);
         if (req.headers['anthropic-beta']) headers['anthropic-beta'] = String(req.headers['anthropic-beta']);
+
+        // Only a child WE seeded gets the subscription. It proves that by
+        // presenting the proxy secret, which we then swap for a live token —
+        // so a frozen env can never carry an expiring credential, and an
+        // unrelated local process can't spend Matt's plan.
+        if (presentsProxySecret(headers['authorization'])) {
+          const auth = await getXaiAuth();
+          if (aborted || res.writableEnded) return; // client vanished mid-refresh
+          if (auth.mode !== 'oauth') {
+            // Never forward the secret upstream, and never silently drop to the
+            // metered key: say plainly that the subscription needs reconnecting.
+            const why = auth.mode === 'error' ? auth.reason : 'no SuperGrok token stored';
+            console.warn(`[xai-proxy] refusing request: ${why}`);
+            fail(503, `SuperGrok subscription unavailable (${why}). Reconnect at /xai-oauth.`);
+            return;
+          }
+          if (!HEADER_SAFE.test(auth.token)) {
+            console.warn('[xai-proxy] stored token contains non-header-safe characters');
+            fail(503, 'SuperGrok token is malformed. Reconnect at /xai-oauth.');
+            return;
+          }
+          headers['authorization'] = `Bearer ${auth.token}`;
+          delete headers['x-api-key']; // never let a stale key outrank the sub
+        }
+        // Anything else (the GROK_PERSONAL_API_KEY path, or the
+        // RIVENDELL_XAI_BASE_URL override) forwards its own header untouched.
 
         upstream = https.request(
           XAI_UPSTREAM + (req.url || ''),
@@ -151,6 +236,16 @@ function startServer(): Promise<string> {
         });
         upstream.on('aborted', () => cleanup());
         try { upstream.write(outBody); upstream.end(); } catch { cleanup(); }
+      };
+      // handleEnd is async, and 'end' is an EventEmitter callback — a rejection
+      // escaping it would be an unhandledRejection, which kills the whole
+      // always-on server rather than failing one request.
+      req.on('end', () => {
+        handleEnd().catch((err) => {
+          console.warn(`[xai-proxy] request handler error: ${(err as Error).message}`);
+          fail(500, 'xAI proxy: internal error');
+          cleanup();
+        });
       });
     });
     srv.on('error', reject);

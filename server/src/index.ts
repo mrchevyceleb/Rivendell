@@ -23,6 +23,7 @@ import { summaryRouter } from './routes/summary.ts';
 import { artifactsRouter } from './routes/artifacts.ts';
 import { mcpRouter } from './routes/mcp.ts';
 import { filesRouter } from './routes/files.ts';
+import { jarvisRouter } from './routes/jarvis.ts';
 import { internalRouter } from './routes/internal.ts';
 import { xaiOauthRouter } from './routes/xai-oauth.ts';
 import { primeXaiOauthToken } from './chat/runner.ts';
@@ -55,6 +56,7 @@ app.use('/api/scribe', scribeRouter);
 app.use('/api/artifacts', artifactsRouter);
 app.use('/api/mcp', mcpRouter);
 app.use('/api/files', filesRouter);
+app.use('/api/jarvis', jarvisRouter);
 // Localhost-only headless runner (cron agentic loop). Gated by MCP_AUTH_TOKEN.
 app.use('/internal', internalRouter);
 

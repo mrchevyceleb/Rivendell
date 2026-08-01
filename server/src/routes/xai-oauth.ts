@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { randomBytes, createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -15,55 +16,188 @@ const CLIENT_ID = process.env.XAI_OAUTH_CLIENT_ID || 'b1a00492-073a-47ea-816f-4c
 const SCOPE = 'openid profile email offline_access grok-cli:access api:access';
 const REDIRECT_URI = 'http://127.0.0.1:56121/callback';
 const TOKEN_PATH = join(homedir(), '.rivendell', 'xai-oauth.json');
+// Guards the read-modify-write around a refresh. The token file is shared with
+// a SEPARATE process (assistant-mcp cron), and xAI rotates refresh tokens, so
+// two processes refreshing at once can invalidate the whole family and force
+// Matt through the browser login again. An in-process promise cannot see the
+// other process; a lock file can.
+const LOCK_PATH = `${TOKEN_PATH}.lock`;
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
+const REFRESH_TIMEOUT_MS = 20_000;
+const LOCK_STALE_MS = 60_000;
+const LOCK_WAIT_MS = 30_000;
 
 const b64url = (buf: Buffer) => buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
 // Pending PKCE state between GET (build URL) and POST (exchange).
 let pending: { verifier: string; state: string; tokenEndpoint: string } | null = null;
 
-/** Read + (if expired) refresh the stored OAuth token. Returns the access token
- *  or null. Exported so the chat runner can use the subscription token. */
-export async function getXaiOauthToken(): Promise<string | null> {
-  if (!existsSync(TOKEN_PATH)) return null;
-  let creds: { access: string; refresh?: string; expires?: number; tokenEndpoint?: string };
-  try { creds = JSON.parse(readFileSync(TOKEN_PATH, 'utf8')); } catch { return null; }
-  if (!creds.access) return null;
-  if (!creds.expires || creds.expires > Date.now()) return creds.access;
-  if (!creds.refresh) return null;
-  // Refresh.
-  const tokenEndpoint = creds.tokenEndpoint || `${ISSUER}/oauth2/token`;
+type XaiCreds = { access: string; refresh?: string; expires?: number; tokenEndpoint?: string };
+
+/** Why the caller can (or can't) have a subscription token right now.
+ *  `unconfigured` is the ONLY state that may fall back to the metered API key —
+ *  every other failure must surface, never quietly bill Matt per token. */
+export type XaiAuth =
+  | { mode: 'oauth'; token: string }
+  | { mode: 'unconfigured' }
+  | { mode: 'error'; reason: string };
+
+type ReadResult = { state: 'ok'; creds: XaiCreds } | { state: 'missing' } | { state: 'invalid' };
+
+function parseCreds(raw: string): XaiCreds | null {
   try {
-    const resp = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLIENT_ID, refresh_token: creds.refresh }),
-    });
-    if (!resp.ok) return null;
-    const j = await resp.json() as any;
-    if (!j.access_token) return null;
-    const next = {
-      access: j.access_token,
-      refresh: j.refresh_token || creds.refresh,
-      expires: Date.now() + (j.expires_in || 3600) * 1000 - REFRESH_SKEW_MS,
-      tokenEndpoint,
-    };
-    writeFileSync(TOKEN_PATH, JSON.stringify(next, null, 2), { mode: 0o600 });
-    return next.access;
+    const creds = JSON.parse(raw) as XaiCreds;
+    return creds && typeof creds.access === 'string' && creds.access ? creds : null;
   } catch { return null; }
 }
 
-/** Synchronous reader for the cached OAuth token. Used at spawn time where we
- *  can't await. Returns the stored access token if present (the background
- *  refresh in the chat runner keeps it fresh); null if never logged in. */
-export function getXaiOauthTokenSync(): string | null {
-  if (!existsSync(TOKEN_PATH)) return null;
+/** Async read for the per-request hot path — keeps blocking fs off the event
+ *  loop that also drives every live chat stream. */
+async function readCredsAsync(): Promise<ReadResult> {
+  let raw: string;
   try {
-    const creds = JSON.parse(readFileSync(TOKEN_PATH, 'utf8'));
-    return typeof creds.access === 'string' && creds.access ? creds.access : null;
-  } catch {
-    return null;
+    raw = await readFile(TOKEN_PATH, 'utf8');
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? { state: 'missing' } : { state: 'invalid' };
   }
+  const creds = parseCreds(raw);
+  return creds ? { state: 'ok', creds } : { state: 'invalid' };
+}
+
+function readCredsSync(): XaiCreds | null {
+  if (!existsSync(TOKEN_PATH)) return null;
+  try { return parseCreds(readFileSync(TOKEN_PATH, 'utf8')); } catch { return null; }
+}
+
+/** Decode a JWT's `exp` (ms). Lets us recover a real expiry from legacy or
+ *  half-written files whose `expires` field is missing or nonsense. */
+function jwtExpiryMs(token: string): number | null {
+  const part = token.split('.')[1];
+  if (!part) return null;
+  try {
+    const json = Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    const exp = (JSON.parse(json) as { exp?: number }).exp;
+    return typeof exp === 'number' && Number.isFinite(exp) ? exp * 1000 : null;
+  } catch { return null; }
+}
+
+/** Effective expiry (ms). An absent/zero/garbage `expires` must NOT read as
+ *  "valid forever" — that would stamp a dead token onto every request and never
+ *  refresh. Fall back to the JWT's own exp, and treat truly unknown as expired. */
+function expiryOf(creds: XaiCreds): number {
+  if (typeof creds.expires === 'number' && Number.isFinite(creds.expires) && creds.expires > 0) return creds.expires;
+  const exp = jwtExpiryMs(creds.access);
+  return exp ? exp - REFRESH_SKEW_MS : 0;
+}
+
+/** Replace the token file atomically. writeFileSync truncates in place, which
+ *  lets a concurrent reader (assistant-mcp) observe empty or partial JSON. */
+function writeCreds(creds: XaiCreds): void {
+  mkdirSync(dirname(TOKEN_PATH), { recursive: true });
+  const tmp = `${TOKEN_PATH}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  renameSync(tmp, TOKEN_PATH); // same dir -> atomic; readers see old or new, never torn
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Hold the cross-process credential lock for the duration of `fn`.
+ *  Returns null if the lock could not be taken before LOCK_WAIT_MS. */
+async function withCredLock<T>(fn: () => Promise<T>): Promise<T | null> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let held = false;
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync(dirname(LOCK_PATH), { recursive: true });
+      closeSync(openSync(LOCK_PATH, 'wx')); // O_EXCL — fails if any process holds it
+      held = true;
+      break;
+    } catch {
+      // Reclaim a lock abandoned by a crashed process.
+      try {
+        const st = statSync(LOCK_PATH);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) { unlinkSync(LOCK_PATH); continue; }
+      } catch { /* vanished between open and stat — just retry */ }
+      await sleep(100);
+    }
+  }
+  if (!held) return null;
+  try { return await fn(); } finally { try { unlinkSync(LOCK_PATH); } catch {} }
+}
+
+// One refresh in flight per process. The proxy calls this on every upstream
+// request and the claude CLI fires several in parallel; the lock file stops
+// cross-process races, this stops us from queueing on our own lock.
+let refreshInFlight: Promise<XaiAuth> | null = null;
+
+async function refreshLocked(): Promise<XaiAuth> {
+  const result = await withCredLock(async (): Promise<XaiAuth> => {
+    // Re-read under the lock: another process may have refreshed while we waited.
+    const read = await readCredsAsync();
+    if (read.state === 'missing') return { mode: 'unconfigured' };
+    if (read.state === 'invalid') return { mode: 'error', reason: 'token file is unreadable or malformed' };
+    const creds = read.creds;
+    if (expiryOf(creds) > Date.now()) return { mode: 'oauth', token: creds.access }; // someone beat us to it
+    if (!creds.refresh) return { mode: 'error', reason: 'no refresh token stored' };
+    const tokenEndpoint = creds.tokenEndpoint || `${ISSUER}/oauth2/token`;
+    try {
+      const resp = await fetch(tokenEndpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+        body: new URLSearchParams({ grant_type: 'refresh_token', client_id: CLIENT_ID, refresh_token: creds.refresh }),
+        // Without this a hung token endpoint pins refreshInFlight (and every
+        // Grok request behind it) until the transport-level timeout.
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        return { mode: 'error', reason: `xAI refused the refresh: ${resp.status} ${body.slice(0, 200)}`.trim() };
+      }
+      const j = await resp.json() as { access_token?: string; refresh_token?: string; expires_in?: number };
+      if (!j.access_token) return { mode: 'error', reason: 'refresh response carried no access_token' };
+      const next: XaiCreds = {
+        access: j.access_token,
+        refresh: j.refresh_token || creds.refresh,
+        expires: Date.now() + (j.expires_in || 3600) * 1000 - REFRESH_SKEW_MS,
+        tokenEndpoint,
+      };
+      writeCreds(next);
+      return { mode: 'oauth', token: next.access };
+    } catch (err) {
+      return { mode: 'error', reason: `refresh request failed: ${(err as Error).message}` };
+    }
+  });
+  if (!result) return { mode: 'error', reason: 'timed out waiting for the credential lock' };
+  if (result.mode === 'error') console.warn(`[xai-oauth] ${result.reason}`);
+  return result;
+}
+
+/** Resolve the current subscription auth, refreshing if we're inside the expiry
+ *  skew. Call it per request — never cache the result across a token lifetime. */
+export async function getXaiAuth(): Promise<XaiAuth> {
+  const read = await readCredsAsync();
+  if (read.state === 'missing') return { mode: 'unconfigured' };
+  if (read.state === 'invalid') return { mode: 'error', reason: 'token file is unreadable or malformed' };
+  if (expiryOf(read.creds) > Date.now()) return { mode: 'oauth', token: read.creds.access };
+  if (!refreshInFlight) {
+    refreshInFlight = refreshLocked().finally(() => { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+/** Access token, or null if unavailable for any reason. Prefer getXaiAuth()
+ *  where the reason matters (null can't tell "never logged in" from "broken"). */
+export async function getXaiOauthToken(): Promise<string | null> {
+  const auth = await getXaiAuth();
+  return auth.mode === 'oauth' ? auth.token : null;
+}
+
+/** Synchronous reader for the stored token. MAY BE EXPIRED — only used on the
+ *  RIVENDELL_XAI_BASE_URL override path, where requests bypass our proxy and
+ *  nothing can re-stamp the header. The normal path seeds the child with the
+ *  proxy secret instead, so no expirable material is ever frozen into an env. */
+export function getXaiOauthTokenSync(): string | null {
+  return readCredsSync()?.access ?? null;
 }
 
 /** Has a SuperGrok OAuth token ever been stored? */
@@ -184,8 +318,7 @@ xaiOauthRouter.post('/exchange', async (req, res) => {
       expires: Date.now() + (j.expires_in || 3600) * 1000 - REFRESH_SKEW_MS,
       tokenEndpoint: pending.tokenEndpoint,
     };
-    mkdirSync(dirname(TOKEN_PATH), { recursive: true });
-    writeFileSync(TOKEN_PATH, JSON.stringify(creds, null, 2), { mode: 0o600 });
+    writeCreds(creds);
     pending = null;
     res.json({ ok: true });
   } catch (err: any) {

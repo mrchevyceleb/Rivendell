@@ -22,7 +22,7 @@ function mapWorkspaceError(err: any): { status: number; message: string } {
   if (code === 'ENOENT') return { status: 404, message: msg };
   if (code === 'EEXIST') return { status: 409, message: msg };
   if (code === 'EISDIR' || code === 'ENOTDIR') return { status: 400, message: msg };
-  if (code === 'EACCES' || code === 'EPERM') return { status: 403, message: msg };
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EHUBPOLICY') return { status: 403, message: msg };
   if (code === 'ECONFLICT') return { status: 409, message: msg };
   if (code === 'E2BIG') return { status: 413, message: msg };
   if (msg.includes('outside the Elrond workspace')) return { status: 400, message: msg };
@@ -49,13 +49,15 @@ docsRouter.get('/workspace', asyncHandler(async (_req, res) => {
   res.json({ root: WORKSPACE_DISPLAY_LABEL, displayPath: WORKSPACE_DISPLAY_PATH });
 }));
 
-docsRouter.get('/tree', asyncHandler(async (_req, res) => {
-  res.json(await readWorkspaceTree());
+docsRouter.get('/tree', asyncHandler(async (req, res) => {
+  const hideLegacy = String(req.query.hideLegacy ?? 'true') !== 'false';
+  res.json(await readWorkspaceTree({ hideLegacy }));
 }));
 
 docsRouter.get('/children', asyncHandler(async (req, res) => {
   const path = String(req.query.path || '');
-  res.json(await readWorkspaceChildren(path));
+  const hideLegacy = String(req.query.hideLegacy ?? 'true') !== 'false';
+  res.json(await readWorkspaceChildren(path, { hideLegacy }));
 }));
 
 docsRouter.get('/file', asyncHandler(async (req, res) => {

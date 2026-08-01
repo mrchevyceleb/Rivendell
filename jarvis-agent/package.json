@@ -1,0 +1,23 @@
+{
+  "name": "jarvis-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/agent.ts start",
+    "dev": "tsx src/agent.ts dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@livekit/agents": "1.5.3",
+    "@livekit/agents-plugin-elevenlabs": "1.5.3",
+    "@livekit/agents-plugin-silero": "1.5.3",
+    "@livekit/rtc-node": "^0.13.31",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

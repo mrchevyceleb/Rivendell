@@ -1,6 +1,7 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
@@ -9,6 +10,26 @@ import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/f
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { resolveCodexSelection } from './codex-models.ts';
+import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
+
+/**
+ * Which codex binary to run.
+ *
+ * Do NOT rely on bare 'codex' resolving through PATH here. Rivendell is started
+ * by npm, which prepends every ancestor node_modules/.bin, so a stale
+ * @openai/codex in ~/node_modules shadows the real install and every turn fails
+ * with a 400 the transcript never shows. Prefer the standalone install, allow an
+ * explicit override, and only then fall back to PATH.
+ */
+function resolveCodexBin(): string {
+  const explicit = process.env.RIVENDELL_CODEX_BIN;
+  if (explicit) return explicit;
+  const standalone = join(homedir(), '.local', 'bin', 'codex');
+  return existsSync(standalone) ? standalone : 'codex';
+}
+
+const CODEX_BIN = resolveCodexBin();
+console.log(`[chat codex] binary: ${CODEX_BIN}`);
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   const descendants = child.pid ? collectDescendantPids(child.pid) : [];
@@ -142,6 +163,7 @@ const CODEX_TURN_PREAMBLE = [
   'If you see "stdin is closed for this session", rerun the command with tty=true.',
   'When searching files, use `rg` or `rg --files` with scoped paths and exclusions for `node_modules`, `.git`, build output, and CloudStorage sync trees. Do not run broad recursive `grep` or `find` over `/Users/mjohnst`, `~/samwise`, or ASSISTANT-HUB.',
   'Give spawned subagents the same search constraint before asking them to inspect code.',
+  HUB_WRITE_LOCK_PROMPT,
   '</samwise-codex-runtime>',
 ].join('\n');
 
@@ -517,6 +539,16 @@ export class CodexSession {
     // interpolated into this config fragment, so only allow-listed strings
     // can reach the CLI.
     const codexReasoning = `model_reasoning_effort="${codexEffort}"`;
+    // Matt's real Chrome, the same MCP server the claude lanes get. Passed as
+    // -c overrides rather than written into ~/.codex/config.toml so this stays
+    // scoped to Rivendell.
+    const browserMcpEntry =
+      process.env.RIVENDELL_BROWSER_MCP ||
+      `${process.env.HOME || '/home/mrchevyceleb'}/samwise/Personal-Apps/rivendell-browser-bridge/bridge/mcp-server.mjs`;
+    const browserMcpArgs = [
+      '-c', 'mcp_servers.rivendell-browser.command="node"',
+      '-c', `mcp_servers.rivendell-browser.args=["${browserMcpEntry}"]`,
+    ];
     const args: string[] = this.threadId
       ? [
           'exec',
@@ -524,6 +556,7 @@ export class CodexSession {
           '--json',
           '-m', codexModel,
           '-c', codexReasoning,
+          ...browserMcpArgs,
           '--dangerously-bypass-approvals-and-sandbox',
           ...imageArgs,
           this.threadId,
@@ -534,6 +567,7 @@ export class CodexSession {
           '--json',
           '-m', codexModel,
           '-c', codexReasoning,
+          ...browserMcpArgs,
           '--dangerously-bypass-approvals-and-sandbox',
           ...imageArgs,
           prompt,
@@ -563,7 +597,7 @@ export class CodexSession {
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; everything else keeps the per-repo account-map resolution.
     const forcedAccount = accountFromChatId(this.chatId);
-    const child = spawn('codex', args, {
+    const child = spawn(CODEX_BIN, args, {
       cwd: this.cwd,
       env: forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd),
       detached: true,

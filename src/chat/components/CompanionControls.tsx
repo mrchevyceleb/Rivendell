@@ -13,8 +13,8 @@ import { ModelPicker } from './ModelPicker';
 import { LocalModelPicker } from './LocalModelPicker';
 
 // Compact companion + model/effort bar for the embedded Workspace chat. Picks
-// the engine (KG vs personal Claude/Codex, OpenRouter, Local) and surfaces the
-// right model/effort control for whichever engine is active.
+// the engine (kim Claude/Codex, OpenRouter, Fireworks, Local, Z.ai, xAI) and
+// surfaces the right model/effort control for whichever engine is active.
 
 const selectStyle: React.CSSProperties = {
   fontSize: 12,
@@ -84,7 +84,21 @@ export function CompanionControls({ picker }: { picker: CompanionPicker }) {
         />
       )}
 
-      {picker.isOpenRouter && <ModelPicker state={picker.bananaModel} />}
+      {picker.isOpenRouter && (
+        <>
+          <ModelPicker state={picker.bananaModel} />
+          <select
+            aria-label="Reasoning effort"
+            style={selectStyle}
+            value={picker.bananaEffort}
+            onChange={(e) => picker.setBananaEffort(e.target.value)}
+          >
+            {REASONING_EFFORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </>
+      )}
 
       {picker.isFireworks && (
         <>

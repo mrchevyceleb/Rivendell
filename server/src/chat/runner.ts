@@ -12,8 +12,10 @@ import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memor
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
-import { ensureXaiProxy, xaiProxyBaseUrl } from './xai-proxy.ts';
-import { getXaiOauthToken, getXaiOauthTokenSync } from '../routes/xai-oauth.ts';
+import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
+import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
+import { isVoiceChatId, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
+import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -188,8 +190,13 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
 // dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the Grok token authenticates
 // (never Matt's Anthropic subscription). Auth uses GROK_PERSONAL_API_KEY from
 // the assistant Doppler project (Bearer, which xAI accepts). Grok 4.5 has a
-// 500K context window; set the auto-compact window so Claude Code doesn't
-// compact prematurely.
+// 500K context window.
+//
+// Claude Code (v2.1.x) resolves the effective auto-compact window as
+// Math.min(modelContext, CLAUDE_CODE_AUTO_COMPACT_WINDOW). For non-claude-*
+// model ids, modelContext defaults to 200K UNLESS CLAUDE_CODE_MAX_CONTEXT_TOKENS
+// is set. Without the max-context env, AUTO_COMPACT_WINDOW=500000 is silently
+// capped to 200K and compact fires around ~170K (observed 2026-07-15).
 const XAI_BASE_URL = process.env.RIVENDELL_XAI_BASE_URL?.trim() || '';
 const XAI_GROK45_MODEL = 'grok-4.5';
 const XAI_COMPACT_WINDOW = '500000';
@@ -220,10 +227,23 @@ function xaiEnv(): NodeJS.ProcessEnv {
   // at the proxy, which forwards to https://api.x.ai. RIVENDELL_XAI_BASE_URL
   // (the proxy URL) is set at startup once the proxy is listening.
   env.ANTHROPIC_BASE_URL = XAI_BASE_URL || xaiProxyBaseUrl();
-  // Prefer the SuperGrok subscription OAuth token (flat-rate, auto-refreshed)
-  // over the metered GROK_PERSONAL_API_KEY. The same Bearer works on xAI's
-  // /v1/messages endpoint, so the claude CLI + proxy path is unchanged.
-  env.ANTHROPIC_AUTH_TOKEN = getXaiOauthTokenSync() || process.env.GROK_PERSONAL_API_KEY || '';
+  // Prefer the SuperGrok subscription (flat-rate) over the metered
+  // GROK_PERSONAL_API_KEY.
+  //
+  // Deliberately NOT a real token: a child's env freezes at spawn, so any token
+  // put here is dead within ~6h while the session lives on — that was the
+  // "OAuth2 access token could not be validated" bug. Instead we seed the
+  // proxy's non-expiring per-process secret, and the proxy swaps it for a live
+  // token on every request. The RIVENDELL_XAI_BASE_URL override bypasses our
+  // proxy, so that path still needs a real (and, yes, expirable) token.
+  if (!XAI_BASE_URL && hasXaiOauthToken()) {
+    env.ANTHROPIC_AUTH_TOKEN = xaiProxySecret();
+  } else {
+    env.ANTHROPIC_AUTH_TOKEN = getXaiOauthTokenSync() || process.env.GROK_PERSONAL_API_KEY || '';
+  }
+  // Both knobs required: MAX_CONTEXT tells Claude Code Grok is 500K (not the
+  // 200K non-claude default); AUTO_COMPACT_WINDOW is the compact threshold.
+  env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = XAI_COMPACT_WINDOW;
   env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = XAI_COMPACT_WINDOW;
   env.SAMWISE_ACCOUNT = 'xai';
   return env;
@@ -265,6 +285,18 @@ export async function primeXaiOauthToken(): Promise<void> {
 const ASSISTANT_MCP_WORKSPACE = process.env.ELROND_WORKSPACE_PATH || '/home/mrchevyceleb/ASSISTANT-HUB';
 const ASSISTANT_MCP_SERVER_URL =
   process.env.ASSISTANT_MCP_URL || 'https://matt-assistant-production.up.railway.app/mcp';
+const BROWSER_MCP_ENTRY =
+  process.env.RIVENDELL_BROWSER_MCP ||
+  `${process.env.HOME || '/home/mrchevyceleb'}/samwise/Personal-Apps/rivendell-browser-bridge/bridge/mcp-server.mjs`;
+const BROWSER_ONLY_MCP_CONFIG = JSON.stringify({
+  mcpServers: {
+    'rivendell-browser': {
+      type: 'stdio',
+      command: 'node',
+      args: [BROWSER_MCP_ENTRY],
+    },
+  },
+});
 const ASSISTANT_MCP_CONFIG = JSON.stringify({
   mcpServers: {
     'assistant-mcp': {
@@ -272,6 +304,54 @@ const ASSISTANT_MCP_CONFIG = JSON.stringify({
       command: 'node',
       args: [`${ASSISTANT_MCP_WORKSPACE}/assistant-mcp/proxy/mcp-proxy.js`],
       env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
+    },
+    // Matt's REAL Chrome, via the rivendell-browser-bridge sidebar. Distinct
+    // from the playwright MCP: that drives a throwaway browser on this box,
+    // this drives the window Matt is actually looking at, already logged in
+    // everywhere. Writes are gated by the extension on his machine, so Elrond
+    // cannot act unsupervised no matter what he decides here.
+    'rivendell-browser': {
+      type: 'stdio',
+      command: 'node',
+      args: [BROWSER_MCP_ENTRY],
+    },
+  },
+});
+
+// Grok (xAI) can't use Claude Code's built-in web tools. WebSearch is an
+// Anthropic SERVER tool (web_search_20250305) whose wire shape carries no
+// `description`, and xAI's Anthropic-compatible /v1/messages runs a STRICT tool
+// deserializer that 422s any tool missing one ("tools[0]: missing field
+// `description`"), so every Grok WebSearch call fails; WebFetch's post-fetch
+// summarization call against xAI returns "No response from model". Both are
+// disabled for xai in the spawn args below. xAI's endpoint has no server-side
+// search of its own either (it silently ignores `search_parameters`), so Grok's
+// only route to working web search is a CLIENT-side MCP tool. It gets a SCOPED,
+// read-only one: a fork of the assistant-mcp proxy that exposes ONLY
+// web_search/deep_research/quick_search. Deliberately NOT the full 65-tool
+// assistant-mcp — that would hand Grok gmail_send / calendar / task-delete under
+// --dangerously-skip-permissions. --strict-mcp-config (below) makes this the
+// EXACT MCP surface, ignoring the stale full-assistant-mcp entry that
+// ~/.claude-xai/.claude.json still carries (its proxy path no longer exists).
+const GROK_SEARCH_MCP_SCRIPT =
+  process.env.GROK_SEARCH_MCP_SCRIPT ||
+  '/home/mrchevyceleb/samwise/Personal-Apps/Rivendell/server/scripts/grok-search-mcp.mjs';
+const GROK_SEARCH_MCP_CONFIG = JSON.stringify({
+  mcpServers: {
+    search: {
+      type: 'stdio',
+      command: 'node',
+      args: [GROK_SEARCH_MCP_SCRIPT],
+      env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
+    },
+    // Matt's real Chrome. Added INSIDE the strict config on purpose: the point
+    // of --strict-mcp-config is to keep Grok away from the full assistant-mcp
+    // surface, not to keep it away from the browser Matt is driving it from.
+    // Scope stays search + browser, nothing wider.
+    'rivendell-browser': {
+      type: 'stdio',
+      command: 'node',
+      args: [BROWSER_MCP_ENTRY],
     },
   },
 });
@@ -286,7 +366,8 @@ const ASSISTANT_AGENT_PROMPT =
   "For file search, use `rg` or `rg --files` with scoped paths and explicit exclusions. " +
   "Do not run broad recursive `grep` or `find` over `/Users/mjohnst`, `~/samwise`, " +
   "or ASSISTANT-HUB without excluding `node_modules`, `.git`, and generated output; " +
-  "give the same constraint to any subagent you launch.";
+  "give the same constraint to any subagent you launch. " +
+  HUB_WRITE_LOCK_PROMPT;
 
 // Each session keeps a rolling tail of recent events so a reconnecting client
 // gets the in-flight turn's output even if its WS dropped mid-stream. Bigger
@@ -375,6 +456,11 @@ class ClaudeSession {
       }
     }, 2000).unref();
 
+    // xai also blocks the built-in web tools: they are unusable against xAI's
+    // Anthropic endpoint (WebSearch is a server tool xAI 422s for a missing
+    // `description`; WebFetch's summarization call returns "No response from
+    // model"), and Grok gets a working client-side search via --mcp-config below.
+    const disallowedTools = cli === 'xai' ? 'AskUserQuestion WebSearch WebFetch' : 'AskUserQuestion';
     const args: string[] = [
       '-p',
       '--input-format', 'stream-json',
@@ -387,17 +473,39 @@ class ClaudeSession {
       // question silently collapses and the model thinks the user "declined".
       // Block the tool so the model asks inline in plain text, which the user can
       // actually reply to in the composer. (Same fix as samwise-2.)
-      '--disallowedTools', 'AskUserQuestion',
+      '--disallowedTools', disallowedTools,
       '--dangerously-skip-permissions',
       '--model', this.spawnModel,
       '--effort', this.spawnEffort,
     ];
     if (resumeId) args.push('--resume', resumeId);
+    // Voice mode is derived from the chatId (`jarvis-*`, set by the
+    // jarvis-agent worker) so it survives respawns/recycles with no protocol
+    // changes — see voicePrompt.ts.
+    const voice = isVoiceChatId(chatId);
     if (cli === 'assistant') {
-      args.push('--append-system-prompt', ASSISTANT_AGENT_PROMPT);
+      args.push(
+        '--append-system-prompt',
+        voice ? `${ASSISTANT_AGENT_PROMPT}\n\n${VOICE_STYLE_ADDENDUM}` : ASSISTANT_AGENT_PROMPT,
+      );
       // Keep --mcp-config last: it's variadic and would greedily swallow any
       // plain (non-dash) arg that followed it.
       args.push('--mcp-config', ASSISTANT_MCP_CONFIG);
+    } else if (cli === 'xai') {
+      if (voice) args.push('--append-system-prompt', VOICE_STYLE_ADDENDUM);
+      // Grok's scoped web-search backend. --strict-mcp-config forces this to be
+      // the ONLY MCP surface (ignoring the stale assistant-mcp entry in
+      // ~/.claude-xai/.claude.json). Keep --mcp-config last (variadic).
+      args.push('--strict-mcp-config', '--mcp-config', GROK_SEARCH_MCP_CONFIG);
+    } else if (voice) {
+      args.push('--append-system-prompt', VOICE_STYLE_ADDENDUM);
+    }
+
+    // Matt's real Chrome for the other sidebar lanes. Merging (no
+    // --strict-mcp-config) so nothing the account config already has is lost.
+    // Keep --mcp-config last: it is variadic and swallows any plain arg after it.
+    if (cli === 'claude' || cli === 'zai') {
+      args.push('--mcp-config', BROWSER_ONLY_MCP_CONFIG);
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact

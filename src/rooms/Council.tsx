@@ -1,4 +1,4 @@
-import { Check, Filter, GripVertical, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { Check, Filter, GripVertical, Play, Plus, RotateCcw, Sparkles, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { DragEvent, FormEvent, MouseEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -10,8 +10,9 @@ import { useTasks } from '../hooks/useRoomData';
 import { statusLabel } from '../utils/format';
 
 const columns: Array<{ key: Task['status']; title: string; detail: string }> = [
-  { key: 'in_hand', title: 'In Hand', detail: 'Owned by you' },
   { key: 'horizon', title: 'On the Horizon', detail: 'Upcoming' },
+  { key: 'in_hand', title: 'In Hand', detail: 'Owned by you' },
+  { key: 'in_progress', title: 'In Progress', detail: 'Actively working' },
   { key: 'delegated', title: "In Council's Care", detail: 'With Elrond' },
   { key: 'done', title: 'Done', detail: 'Closed' },
 ];
@@ -303,7 +304,7 @@ export function Council() {
                       onDrop={(event) => handleDrop(column.key, index, event)}
                     >
                       <div className="task-card-head">
-                        <GripVertical size={15} />
+                        <GripVertical size={14} />
                         <div>
                           <strong>{task.title}</strong>
                           <p>{task.project}</p>
@@ -318,34 +319,61 @@ export function Council() {
                           <Chip tone={dueRelativeTone(task)}>{dueRelativeTag(task)}</Chip>
                         ) : null}
                       </div>
-                      <div className="task-actions">
-                        <label className="task-status-select">
-                          <span>Move to</span>
-                          <select value={task.status} onChange={(event) => moveToStatus(task, event.target.value as Task['status'])}>
+                      <div className="task-actions" onClick={(event) => event.stopPropagation()}>
+                        <label className="task-status-select" title="Move column">
+                          <span>Move</span>
+                          <select
+                            value={task.status}
+                            aria-label="Move task"
+                            onChange={(event) => moveToStatus(task, event.target.value as Task['status'])}
+                          >
                             {columns.map((target) => (
                               <option key={target.key} value={target.key}>{target.title}</option>
                             ))}
                           </select>
                         </label>
                         {task.status === 'done' ? (
-                          <button type="button" onClick={() => reopenTask(task)}>
-                            <RotateCcw size={13} />
-                            Reopen
+                          <button type="button" className="task-action-btn" title="Reopen" onClick={() => reopenTask(task)}>
+                            <RotateCcw size={12} />
+                            <span>Reopen</span>
                           </button>
                         ) : (
-                          <button type="button" onClick={() => completeTask(task)}>
-                            <Check size={13} />
-                            Complete
+                          <button type="button" className="task-action-btn is-primary" title="Complete" onClick={() => completeTask(task)}>
+                            <Check size={12} />
+                            <span>Done</span>
                           </button>
                         )}
-                        {task.status !== 'delegated' && task.status !== 'done' ? (
-                          <button type="button" onClick={() => void move(task.id, 'delegated', boardTasks.filter((item) => item.status === 'delegated').length)}>
-                            Send to Elrond
+                        {task.status === 'horizon' ? (
+                          <button
+                            type="button"
+                            className="task-action-btn"
+                            title="Take into Hand"
+                            onClick={() => void move(task.id, 'in_hand', boardTasks.filter((item) => item.status === 'in_hand').length)}
+                          >
+                            <Play size={12} />
+                            <span>Take</span>
                           </button>
                         ) : null}
-                        {task.status === 'horizon' ? (
-                          <button type="button" onClick={() => void move(task.id, 'in_hand', boardTasks.filter((item) => item.status === 'in_hand').length)}>
-                            Start
+                        {task.status === 'in_hand' ? (
+                          <button
+                            type="button"
+                            className="task-action-btn"
+                            title="Start work"
+                            onClick={() => void move(task.id, 'in_progress', boardTasks.filter((item) => item.status === 'in_progress').length)}
+                          >
+                            <Play size={12} />
+                            <span>Start</span>
+                          </button>
+                        ) : null}
+                        {task.status !== 'delegated' && task.status !== 'done' ? (
+                          <button
+                            type="button"
+                            className="task-action-btn"
+                            title="Send to Elrond"
+                            onClick={() => void move(task.id, 'delegated', boardTasks.filter((item) => item.status === 'delegated').length)}
+                          >
+                            <Sparkles size={12} />
+                            <span>Elrond</span>
                           </button>
                         ) : null}
                       </div>

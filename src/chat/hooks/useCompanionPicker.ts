@@ -7,11 +7,12 @@ import {
   readStoredCodexEffort,
   readStoredCodexModel,
 } from '../codexModels';
+import { DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from '../components/CodexEnginePicker';
 
 // Companion + model/effort selection for an embedded chat (the Workspace room).
-// Unlike Hall, this exposes every engine family directly in one flat list. For
-// Claude Code and Codex, the selected repo decides KG vs personal through
-// account-map.json.
+// Unlike Hall, this exposes every engine family directly in one flat list.
+// Claude Code and Codex lanes are pinned to the kim login — the personal Claude
+// and Codex accounts have been removed.
 //
 // Model/effort choices share localStorage keys with Hall so a model pick in one
 // place carries to the other; only the companion choice is panel-scoped.
@@ -36,17 +37,15 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'xai', cli: 'xai', label: 'xAI · Grok 4.5' },
 ];
 
-// The two logins Rivendell can pin a lane to. The canonical account map lives
-// at ~/samwise/.accounts/account-map.json (consumed server-side); these are the
-// only two accounts configured on Moria.
-export type RepoAccount = 'kim' | 'personal';
+// Login Rivendell can pin a Claude/Codex lane to. Personal Claude/Codex are
+// gone; kim is the only subscription account left on these engines.
+export type RepoAccount = 'kim';
 
 // Plain-words, one-line explanation of the ACTIVE lane's auth, shown under the
 // picker so "which account is this?" is never a mystery.
 export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null): string {
   const who =
     account === 'kim' ? 'the kim login (R-Link / Kim Garst)'
-    : account === 'personal' ? 'your personal login'
     : 'the login mapped to the selected repo';
   switch (cli) {
     case 'assistant':      return `Elrond on Claude Code, signed in as ${who}.`;
@@ -109,7 +108,9 @@ export function readStoredZaiEffort(): string {
 // xAI coding-plan models (Anthropic-compatible, run through the claude CLI
 // redirected to https://api.x.ai). Grok 4.5 is the current coding-plan model.
 export const DEFAULT_XAI_MODEL = 'grok-4.5';
-export const DEFAULT_XAI_EFFORT = 'high';
+// Grok's top thinking budget. Rivendell defaults the whole picker to xAI Grok
+// 4.5 at max thinking, so this is the out-of-the-box reasoning level too.
+export const DEFAULT_XAI_EFFORT = 'max';
 export const XAI_MODELS: { id: string; label: string }[] = [
   { id: DEFAULT_XAI_MODEL, label: 'Grok 4.5' },
 ];
@@ -146,14 +147,15 @@ export type CompanionPicker = ReturnType<typeof useCompanionPicker>;
 
 export function useCompanionPicker(storageKey: string) {
   const [companion, setCompanionState] = useState<string>(() => {
-    // Migrate stale lanes removed from the picker (assistant / claude-personal /
-    // codex-personal) to the new default so a stored selection doesn't silently
-    // fall through to the first lane on every load.
-    const raw = readLS(storageKey, 'claude-kim');
+    // Default lane is xAI Grok 4.5 (see DEFAULT_XAI_* — max thinking). Also
+    // migrate stale lanes removed from the picker (assistant / claude-personal /
+    // codex-personal / any personal-* lane) to that default so a stored
+    // selection doesn't silently fall through to the first lane on every load.
+    const raw = readLS(storageKey, 'xai');
     const valid = WORKSPACE_COMPANIONS.some((c) => c.id === raw);
-    if (!valid) {
-      if (typeof window !== 'undefined') localStorage.setItem(storageKey, 'claude-kim');
-      return 'claude-kim';
+    if (!valid || /personal/i.test(raw)) {
+      if (typeof window !== 'undefined') localStorage.setItem(storageKey, 'xai');
+      return 'xai';
     }
     return raw;
   });
@@ -169,7 +171,7 @@ export function useCompanionPicker(storageKey: string) {
   const bananaModel = useBananaModel();
   const fireworksModel = useFireworksModel();
 
-  const [claudeModel, setClaudeModelState] = useState(() => readLS('rivendell:claude-model', 'claude-opus-4-8'));
+  const [claudeModel, setClaudeModelState] = useState(() => normalizeClaudeModel(readLS('rivendell:claude-model', DEFAULT_CLAUDE_MODEL)));
   const [claudeEffort, setClaudeEffortState] = useState(() => readLS('rivendell:claude-effort', 'xhigh'));
   const [codexModel, setCodexModelState] = useState(readStoredCodexModel);
   const [codexEffort, setCodexEffortState] = useState(() => readStoredCodexEffort(codexModel));
@@ -186,7 +188,11 @@ export function useCompanionPicker(storageKey: string) {
     set(v);
     if (typeof window !== 'undefined') localStorage.setItem(key, v);
   };
-  const setClaudeModel = persist('rivendell:claude-model', setClaudeModelState);
+  const setClaudeModel = (value: string) => {
+    const model = normalizeClaudeModel(value);
+    setClaudeModelState(model);
+    if (typeof window !== 'undefined') localStorage.setItem('rivendell:claude-model', model);
+  };
   const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState);
   const setCodexModel = (value: string) => {
     const model = normalizeCodexModel(value);

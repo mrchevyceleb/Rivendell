@@ -78,7 +78,7 @@ tasksRouter.delete('/:id', asyncHandler(async (req, res) => {
 }));
 
 function asStatus(value: unknown): TaskStatus | undefined {
-  return value === 'in_hand' || value === 'horizon' || value === 'delegated' || value === 'done' ? value : undefined;
+  return value === 'in_hand' || value === 'in_progress' || value === 'horizon' || value === 'delegated' || value === 'done' ? value : undefined;
 }
 
 function asPriority(value: unknown): TaskPriority | undefined {

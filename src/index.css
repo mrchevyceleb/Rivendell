@@ -1043,12 +1043,12 @@ button {
 }
 
 .kanban-grid {
-  padding: 24px 36px 42px;
+  padding: 18px 28px 32px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(220px, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(5, minmax(200px, 1fr));
+  gap: 14px;
   align-items: start;
-  min-width: 920px;
+  min-width: 1100px;
 }
 
 .council-panel {
@@ -1128,7 +1128,7 @@ button {
   --column-wash: rgba(106, 163, 255, 0.08);
   position: relative;
   overflow: hidden;
-  min-height: 438px;
+  min-height: 360px;
   padding: 0;
   border-color: color-mix(in srgb, var(--column-accent) 30%, var(--r-line));
   background:
@@ -1147,14 +1147,19 @@ button {
   background: linear-gradient(90deg, var(--column-accent), transparent 82%);
 }
 
+.kanban-column[data-status='horizon'] {
+  --column-accent: var(--r-amber);
+  --column-wash: rgba(232, 154, 61, 0.13);
+}
+
 .kanban-column[data-status='in_hand'] {
   --column-accent: #7cb6ff;
   --column-wash: rgba(124, 182, 255, 0.12);
 }
 
-.kanban-column[data-status='horizon'] {
-  --column-accent: var(--r-amber);
-  --column-wash: rgba(232, 154, 61, 0.13);
+.kanban-column[data-status='in_progress'] {
+  --column-accent: var(--r-star, #c9a227);
+  --column-wash: rgba(201, 162, 39, 0.14);
 }
 
 .kanban-column[data-status='delegated'] {
@@ -1188,8 +1193,8 @@ button {
 }
 
 .kanban-column header {
-  min-height: 84px;
-  padding: 18px 16px 15px;
+  min-height: 64px;
+  padding: 12px 12px 11px;
   border-bottom: 1px solid color-mix(in srgb, var(--column-accent) 22%, var(--r-line));
   background:
     linear-gradient(90deg, color-mix(in srgb, var(--column-accent) 9%, transparent), transparent 72%),
@@ -1202,18 +1207,18 @@ button {
   margin: 0;
   font-family: var(--r-display);
   color: var(--r-star);
-  font-size: 19px;
+  font-size: 16px;
   font-weight: 500;
 }
 
 .kanban-column header span {
   color: var(--r-ink-soft);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .kanban-column header code {
-  min-width: 30px;
-  min-height: 30px;
+  min-width: 26px;
+  min-height: 26px;
   display: grid;
   place-items: center;
   border: 1px solid color-mix(in srgb, var(--column-accent) 44%, var(--r-line));
@@ -1221,15 +1226,15 @@ button {
   color: var(--r-star);
   background: color-mix(in srgb, var(--column-accent) 12%, var(--r-bg-deep));
   font-family: var(--r-mono);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .kanban-stack {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px;
-  min-height: 352px;
+  gap: 8px;
+  padding: 10px;
+  min-height: 280px;
 }
 
 .task-card,
@@ -1243,12 +1248,13 @@ button {
 
 .task-card {
   border-color: color-mix(in srgb, var(--priority-color, var(--r-line-strong)) 36%, var(--r-line));
-  border-left: 4px solid var(--priority-color, var(--r-line-strong));
+  border-left: 3px solid var(--priority-color, var(--r-line-strong));
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.026), transparent 42%),
     var(--r-bg-card);
   cursor: grab;
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.24);
+  padding: 10px 10px 8px;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
   transition: opacity 0.16s ease, transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
 }
 
@@ -1257,7 +1263,7 @@ button {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--priority-color, var(--r-gold)) 8%, transparent), transparent 54%),
     var(--r-bg-raised);
-  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.34);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.28);
 }
 
 .task-card.is-dragging {
@@ -1268,8 +1274,8 @@ button {
 
 .task-card-head {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
   align-items: start;
 }
 
@@ -1279,13 +1285,22 @@ button {
 }
 
 .task-card strong {
-  font-size: 14px;
-  line-height: 1.35;
+  font-size: 13px;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .task-card p {
-  margin-top: 5px;
+  margin-top: 3px;
   color: var(--r-ink-soft);
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .task-meta,
@@ -1294,14 +1309,15 @@ button {
 .tag-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
 .task-meta {
-  margin-top: 9px;
+  margin-top: 7px;
   color: var(--r-ink-soft);
-  font-size: 12px;
+  font-size: 11px;
+  gap: 5px;
 }
 
 .task-meta > span:not(.r-chip) {
@@ -1309,17 +1325,76 @@ button {
   border-radius: 999px;
   background: rgba(196, 213, 247, 0.045);
   color: var(--r-ink-soft);
-  padding: 3px 8px;
+  padding: 2px 7px;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.task-meta .r-chip {
+  min-height: 0;
+  padding: 2px 7px;
+  font-size: 10px;
+  line-height: 1.3;
 }
 
 .task-actions {
-  margin-top: 13px;
-  padding-top: 11px;
+  margin-top: 8px;
+  padding-top: 7px;
   border-top: 1px solid rgba(196, 213, 247, 0.08);
+  gap: 4px;
+  flex-wrap: nowrap;
 }
 
 .task-status-select {
-  display: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 104px;
+  color: var(--r-ink-mute);
+  font-size: 10px;
+}
+
+.task-status-select > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.task-status-select select {
+  width: 100%;
+  min-height: 26px;
+  border: 1px solid var(--r-line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--r-bg-raised) 64%, transparent);
+  color: var(--r-ink-soft);
+  padding: 3px 20px 3px 7px;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--r-ink-mute) 50%),
+    linear-gradient(135deg, var(--r-ink-mute) 50%, transparent 50%);
+  background-position:
+    calc(100% - 11px) 11px,
+    calc(100% - 7px) 11px;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+
+.task-status-select select:hover,
+.task-status-select select:focus {
+  border-color: var(--r-line-gold);
+  color: var(--r-gold);
+  outline: none;
 }
 
 .task-actions button,
@@ -1334,6 +1409,28 @@ button {
   align-items: center;
   gap: 5px;
   cursor: pointer;
+}
+
+.task-actions .task-action-btn {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 3px 7px;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.task-actions .task-action-btn.is-primary {
+  border-color: color-mix(in srgb, var(--r-emerald) 42%, var(--r-line));
+  color: color-mix(in srgb, var(--r-emerald) 78%, var(--r-ink));
+  background: color-mix(in srgb, var(--r-emerald) 10%, transparent);
+}
+
+.task-actions .task-action-btn.is-primary:hover {
+  border-color: var(--r-emerald);
+  color: var(--r-emerald);
+  background: color-mix(in srgb, var(--r-emerald) 16%, transparent);
 }
 
 .task-actions button:hover,
@@ -3913,6 +4010,15 @@ button {
   flex-wrap: wrap;
 }
 
+/* Model picker menu is absolutely positioned above the footer. Keep the row
+   overflow-visible on desktop too so the Fireworks/OpenRouter dropdown is never
+   clipped by a parent overflow rule. */
+.composer-footer > div.has-model-picker {
+  overflow: visible;
+  position: relative;
+  z-index: 20;
+}
+
 .composer-footer button {
   border: 1px solid var(--r-line);
   border-radius: 7px;
@@ -3961,11 +4067,13 @@ button {
 
 .model-picker-menu {
   position: absolute;
-  bottom: calc(100% + 8px);
   left: 0;
-  z-index: 40;
-  width: 320px;
-  max-width: 78vw;
+  z-index: 60;
+  width: 360px;
+  max-width: min(92vw, 420px);
+  max-height: min(70vh, 520px);
+  overflow-x: hidden;
+  overflow-y: auto;
   /* Use the themed card surface so the menu is readable in BOTH light and dark
      (the old `--r-card` was never defined → fell back to a hardcoded dark color,
      which made the menu unreadable in light mode). */
@@ -3977,6 +4085,19 @@ button {
   display: grid;
   gap: 12px;
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.5);
+}
+
+/* Open direction is chosen at runtime from the trigger's viewport position so
+   the menu never lands off-screen. `is-up` for a bottom-anchored composer,
+   `is-down` for a top toolbar (the Studio chat companion bar). */
+.model-picker-menu.is-up {
+  bottom: calc(100% + 8px);
+  top: auto;
+}
+
+.model-picker-menu.is-down {
+  top: calc(100% + 8px);
+  bottom: auto;
 }
 
 .model-picker-section {
@@ -4075,7 +4196,8 @@ button {
 .model-picker-list {
   display: grid;
   gap: 3px;
-  max-height: 220px;
+  max-height: min(38vh, 280px);
+  min-height: 120px;
   overflow-y: auto;
 }
 
@@ -4768,33 +4890,34 @@ button {
   }
 
   .task-actions {
-    display: grid;
-    grid-template-columns: 1fr;
-    align-items: stretch;
+    flex-wrap: wrap;
+    gap: 5px;
   }
 
   .task-status-select {
-    display: grid;
-    gap: 6px;
-    color: var(--r-ink-mute);
-    font-size: 11px;
-    text-transform: uppercase;
+    flex: 1 1 120px;
+    max-width: none;
   }
 
   .task-status-select select {
-    width: 100%;
-    min-height: 42px;
-    border: 1px solid var(--r-line);
-    border-radius: 7px;
-    background: var(--r-bg-deep);
-    color: var(--r-ink);
-    padding: 8px 10px;
+    min-height: 34px;
+    font-size: 12px;
+    padding: 5px 24px 5px 9px;
+    background-position:
+      calc(100% - 13px) 14px,
+      calc(100% - 9px) 14px;
+  }
+
+  .task-actions .task-action-btn {
+    min-height: 34px;
+    padding: 5px 10px;
+    font-size: 12px;
   }
 
   .task-actions button,
   .cron-card-actions button,
   .pin-card-actions button {
-    min-height: 40px;
+    min-height: 34px;
   }
 
   .cron-card-actions button {
@@ -5411,6 +5534,7 @@ button {
     position: fixed;
     left: 12px;
     right: 12px;
+    top: auto;
     bottom: 84px;
     width: auto;
     max-width: none;

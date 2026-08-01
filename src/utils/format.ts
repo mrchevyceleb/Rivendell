@@ -19,5 +19,12 @@ export function timeAgo(input: string | number): string {
 }
 
 export function statusLabel(status: string): string {
-  return status.replaceAll('_', ' ');
+  const labels: Record<string, string> = {
+    horizon: 'on the horizon',
+    in_hand: 'in hand',
+    in_progress: 'in progress',
+    delegated: "in council's care",
+    done: 'done',
+  };
+  return labels[status] ?? status.replaceAll('_', ' ');
 }

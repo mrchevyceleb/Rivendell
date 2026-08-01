@@ -1,6 +1,6 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -609,7 +609,7 @@ function resolveOpenRouterKey(): string {
 /** Default OpenRouter model used when the `banana` engine is sent an empty or
  *  non-OpenRouter id (e.g. a stale `monkey/*` tier). Keeps a turn from silently
  *  falling back to Banana's built-in (now dead) monkey default. */
-const OPENROUTER_DEFAULT_MODEL = 'openrouter/anthropic/claude-sonnet-4.6';
+const OPENROUTER_DEFAULT_MODEL = 'openrouter/anthropic/claude-sonnet-5';
 
 // ── Fireworks (direct, PERSONAL key) ─────────────────────────────────────
 // Fireworks AI exposes an OpenAI-compatible API. We register a custom
@@ -913,17 +913,13 @@ function toProviderModelConfig(model: unknown): [string, Record<string, unknown>
   return [id, config];
 }
 
-// Cap how many models we embed into the Banana config. The whole catalog (300+
-// models) serialized into the BANANA_CONFIG_CONTENT *env var* exceeds Linux's
-// ~128KB per-arg limit and makes `spawn` fail with E2BIG. The baseURL+apiKey
-// override forwards ANY model id to OpenRouter, so models past the cap still
-// route — they just aren't pre-registered in the provider config.
-const CONFIG_MODEL_CAP = 100;
+// Full OpenRouter catalog (~350 models / ~150KB JSON) is written to a config
+// FILE (BANANA_CONFIG), not BANANA_CONFIG_CONTENT. Putting that blob in the
+// spawn env exceeds Linux's ~128KB per-arg limit (E2BIG). Banana still requires
+// every pick to exist in provider.models (ProviderModelNotFoundError), so the
+// picker and the registered config must stay 1:1 with the live catalog.
 async function openrouterConfigModels(): Promise<Record<string, Record<string, unknown>>> {
-  // Cap on catalog ROWS (deterministic) so the picker can advertise exactly this
-  // registered set. 100 entries is ~50KB — comfortably under the ~128KB per-arg
-  // limit that caused spawn E2BIG.
-  const rows = (await fetchOpenRouterCatalog()).slice(0, CONFIG_MODEL_CAP);
+  const rows = await fetchOpenRouterCatalog();
   const out: Record<string, Record<string, unknown>> = {};
   for (const row of rows) {
     const next = toProviderModelConfig(row);
@@ -933,11 +929,9 @@ async function openrouterConfigModels(): Promise<Record<string, Record<string, u
 }
 
 export async function listBananaOpenRouterModels(): Promise<BananaPickerModel[]> {
-  // Only advertise models that are actually REGISTERED in the spawned config
-  // (the first CONFIG_MODEL_CAP rows that yield a provider entry). Banana 2.1.20
-  // throws ProviderModelNotFoundError for any id missing from provider.models,
-  // so the picker must never offer an unregistered id.
-  const rows = (await fetchOpenRouterCatalog()).slice(0, CONFIG_MODEL_CAP);
+  // Advertise the full live catalog. openrouterConfigModels() registers the
+  // same set via the Banana config file, so every pick is runnable.
+  const rows = await fetchOpenRouterCatalog();
   return rows
     .filter((row) => toProviderModelConfig(row) !== null)
     .map(toPickerModel)
@@ -1009,7 +1003,7 @@ function toFireworksProviderModelConfig(model: unknown): [string, Record<string,
 }
 
 async function fireworksConfigModels(): Promise<Record<string, Record<string, unknown>>> {
-  const rows = (await fetchFireworksCatalog()).slice(0, CONFIG_MODEL_CAP);
+  const rows = await fetchFireworksCatalog();
   const out: Record<string, Record<string, unknown>> = {};
   for (const row of rows) {
     const next = toFireworksProviderModelConfig(row);
@@ -1021,7 +1015,7 @@ async function fireworksConfigModels(): Promise<Record<string, Record<string, un
 /** Picker catalog for the Fireworks engine — bare ids (the client prefixes
  *  `fireworks/`). Only chat-capable models, matching the registered config. */
 export async function listFireworksModels(): Promise<BananaPickerModel[]> {
-  const rows = (await fetchFireworksCatalog()).slice(0, CONFIG_MODEL_CAP);
+  const rows = await fetchFireworksCatalog();
   return rows
     .filter((row) => toFireworksProviderModelConfig(row) !== null)
     .map(toFireworksPickerModel)
@@ -1301,22 +1295,34 @@ function readClaudeMcpServers(
   return merged;
 }
 
-/** Stable signature for an inline Banana config. The actual config passed to
+/** Stable signature for a Banana config blob. The actual config written for
  *  `banana serve` is left untouched — only the comparison key is canonicalized
  *  so semantically identical configs with shuffled key order (Claude rewriting
  *  ~/.claude.json, OpenRouter returning models in a new order) don't trigger
  *  a serve restart and wipe every chat's context. */
-function canonicalConfigSignature(inlineConfig: string | null): string {
-  if (!inlineConfig) return '';
+function canonicalConfigSignature(configContent: string | null): string {
+  if (!configContent) return '';
   let parsed: unknown;
   try {
-    parsed = JSON.parse(inlineConfig);
+    parsed = JSON.parse(configContent);
   } catch {
     // Unparseable input falls back to the raw string — better to over-restart
     // than to silently treat two genuinely different blobs as equal.
-    return inlineConfig;
+    return configContent;
   }
   return canonicalJson(parsed);
+}
+
+/** On-disk Banana config path. Full OpenRouter+Fireworks catalogs are too large
+ *  for BANANA_CONFIG_CONTENT (spawn E2BIG); BANANA_CONFIG points at this file. */
+const BANANA_SERVE_CONFIG_PATH = join(homedir(), '.rivendell', 'banana-serve-config.json');
+
+async function writeBananaServeConfig(configContent: string): Promise<string> {
+  await mkdir(dirname(BANANA_SERVE_CONFIG_PATH), { recursive: true });
+  const tmpPath = `${BANANA_SERVE_CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpPath, configContent, 'utf8');
+  await rename(tmpPath, BANANA_SERVE_CONFIG_PATH);
+  return BANANA_SERVE_CONFIG_PATH;
 }
 
 function canonicalJson(value: unknown): string {
@@ -1913,7 +1919,7 @@ class BananaServer {
   /** When the serve child died, the next ensure() restarts after this delay. */
   private restartBackoffMs = 0;
   private lastDeathAtMs = 0;
-  /** Inline config content used by the currently running serve process. */
+  /** Config signature used by the currently running serve process. */
   private configSignature = '';
   /** Rejects the in-flight start promise when a config-change restart supersedes it. */
   private startReject: ((e: Error) => void) | null = null;
@@ -1923,11 +1929,11 @@ class BananaServer {
    *  on the serve); it is excluded from the "is a sibling turn live?" check so a
    *  chat can still pick up a config change for its OWN next turn. */
   async ensure(projectPathHint?: string, caller?: BananaSession): Promise<void> {
-    const inlineConfig = await bananaConfigContent({ projectPathHint, cli: caller?.cli });
+    const configContent = await bananaConfigContent({ projectPathHint, cli: caller?.cli });
     // Compare on a canonical signature: ~/.claude.json and OpenRouter's catalog
     // can return semantically identical content with shuffled key/row order,
     // which would otherwise restart the serve and wipe every chat's context.
-    const configSignature = canonicalConfigSignature(inlineConfig);
+    const configSignature = canonicalConfigSignature(configContent);
     if (this.readyPromise && !this.dead) {
       if (configSignature !== this.configSignature) {
         // A config-change restart SIGTERMs the shared serve and fails every
@@ -1954,7 +1960,7 @@ class BananaServer {
       this.readyPromise = null;
     }
     if (!this.readyPromise) {
-      this.readyPromise = this.start(inlineConfig, configSignature);
+      this.readyPromise = this.start(configContent, configSignature);
     }
     const waitingOn = this.readyPromise;
     try {
@@ -2061,7 +2067,7 @@ class BananaServer {
 
   // ── private ────────────────────────────────────────────────
 
-  private async start(inlineConfig: string | null, configSignature: string): Promise<void> {
+  private async start(configContent: string | null, configSignature: string): Promise<void> {
     if (this.starting) {
       // A concurrent ensure() is already starting; wait on its promise.
       if (this.readyPromise) return this.readyPromise;
@@ -2078,14 +2084,23 @@ class BananaServer {
 
     const bin = resolveBananaBin();
     const args = ['serve', '--port', String(port), '--hostname', '127.0.0.1'];
-    // Build the spawn env: always a random BANANA_SERVER_PASSWORD, and
-    // (unless disabled) the BANANA_CONFIG_CONTENT override that routes the
-    // `openrouter` provider through the monkey-models proxy.
+    // Build the spawn env: always a random BANANA_SERVER_PASSWORD. Full provider
+    // catalogs go through BANANA_CONFIG (file path) — BANANA_CONFIG_CONTENT is
+    // too large once OpenRouter's full model list is registered (~150KB → E2BIG).
     const serveEnv: NodeJS.ProcessEnv = {
       ...process.env,
       BANANA_SERVER_PASSWORD: this.password,
     };
-    if (inlineConfig) serveEnv.BANANA_CONFIG_CONTENT = inlineConfig;
+    // Drop any parent inline config so it cannot fight the file we just wrote
+    // (and so a stale env blob cannot reintroduce the E2BIG path).
+    delete serveEnv.BANANA_CONFIG_CONTENT;
+    delete serveEnv.OPENCODE_CONFIG_CONTENT;
+    if (configContent) {
+      const configPath = await writeBananaServeConfig(configContent);
+      serveEnv.BANANA_CONFIG = configPath;
+      // Prefer our generated file over any parent OPENCODE_CONFIG path.
+      delete serveEnv.OPENCODE_CONFIG;
+    }
     const child = spawn(bin, args, {
       cwd: process.cwd(),
       // Never run unsecured: inject a random Basic-auth password.

@@ -24,7 +24,7 @@ export type Task = {
   id: string;
   title: string;
   project: string;
-  status: 'in_hand' | 'horizon' | 'delegated' | 'done';
+  status: 'in_hand' | 'in_progress' | 'horizon' | 'delegated' | 'done';
   due: string;
   dueDate?: string | null;
   priority: 'low' | 'medium' | 'high';
@@ -161,6 +161,7 @@ export type WorkspaceTreeResponse = {
   tree: FileTreeNode;
   fileCount: number;
   dirCount: number;
+  hideLegacy?: boolean;
 };
 
 export type WorkspaceChildrenResponse = {

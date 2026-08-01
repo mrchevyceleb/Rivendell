@@ -1,6 +1,6 @@
-// Studio tab model. Tabs are *content* (a file, a chat, or Forge), not rooms.
+// Studio tab model. Tabs are *content* (a file, a chat, Forge, or Council), not rooms.
 
-export type StudioTabKind = 'file' | 'chat' | 'forge';
+export type StudioTabKind = 'file' | 'chat' | 'forge' | 'council';
 
 export type StudioTab = {
   id: string;

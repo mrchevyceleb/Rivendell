@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { tasks as seedTasks } from '../data/mock.ts';
 
-export type TaskStatus = 'in_hand' | 'horizon' | 'delegated' | 'done';
+export type TaskStatus = 'in_hand' | 'in_progress' | 'horizon' | 'delegated' | 'done';
 export type TaskPriority = 'low' | 'medium' | 'high';
 
 export type StoredTask = {
@@ -22,7 +22,7 @@ export type StoredTask = {
 };
 
 const TASKS_FILE = join(STATE_DIR, 'tasks.json');
-const STATUS_ORDER: TaskStatus[] = ['in_hand', 'horizon', 'delegated', 'done'];
+const STATUS_ORDER: TaskStatus[] = ['horizon', 'in_hand', 'in_progress', 'delegated', 'done'];
 
 export async function listTasks(): Promise<StoredTask[]> {
   return sortTasks(await readTasks());

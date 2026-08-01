@@ -23,10 +23,13 @@ const GROK_WINDOW_TOKENS = 500_000; // Grok 4.5 context window
 
 // Pick the starting context window for a given CLI before we've seen any model
 // id. Codex uses the selected catalog entry; current Claude (Opus 4.6/4.7/4.8,
-// Sonnet 4.6) is 1M; GLM 5.2 is 1M; banana/OpenRouter defaults to 200K.
+// Sonnet 4.6) is 1M; GLM 5.2 is 1M; xAI/Grok is 500K; banana/OpenRouter defaults to 200K.
 function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (isCodexCli(cli)) return contextWindowForCodexModel(model);
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
+  // xAI always runs Grok (500K). Pin before system/init arrives so the meter
+  // never flashes the 200K non-claude default.
+  if (cli === 'xai') return GROK_WINDOW_TOKENS;
   return windowForClaudeModel(model); // Claude/Z.ai model ids carry the real window.
 }
 
@@ -60,7 +63,8 @@ function windowForClaudeModel(model: string | undefined): number {
   if (m.includes('haiku')) return DEFAULT_WINDOW_TOKENS;
   if (m.includes('glm-5.2')) return LARGE_WINDOW_TOKENS;
   if (m.includes('glm')) return DEFAULT_WINDOW_TOKENS;
-  if (m.includes('grok-4.5') || m.includes('grok-4-5')) return GROK_WINDOW_TOKENS;
+  // Any Grok id (grok-4.5, grok-4-5, future grok-*) is 500K on xAI.
+  if (m.includes('grok')) return GROK_WINDOW_TOKENS;
   if (m.includes('opus') || m.includes('sonnet') || m.includes('fable') || m.includes('mythos')) return LARGE_WINDOW_TOKENS;
   return DEFAULT_WINDOW_TOKENS;
 }
@@ -362,9 +366,9 @@ export function useChat(opts: {
   contextWindowTokens?: number | null;
   /** Reasoning/thinking effort for engines that expose one. */
   effort?: string;
-  /** Account-pinned login for this lane ('kim' | 'personal'), or undefined for
-   *  the repo-resolved default. Rides inside the chatId so the server spawns the
-   *  CLI under that account and keeps kim/personal as separate sessions. */
+  /** Account-pinned login for this lane ('kim'), or undefined for the
+   *  repo-resolved default. Rides inside the chatId so the server spawns the
+   *  CLI under that account. Personal Claude/Codex lanes are gone. */
   account?: string;
 }) {
   const {
@@ -663,7 +667,9 @@ export function useChat(opts: {
             msg.event?.subtype === 'init' &&
             typeof msg.event?.model === 'string'
           ) {
-            windowTokensRef.current = windowForClaudeModel(msg.event.model);
+            // Prefer CLI-aware window (xai -> 500K) over bare model match so a
+            // future grok id rename can't drop the meter back to 200K.
+            windowTokensRef.current = windowForCli(cli, msg.event.model, contextWindowTokens);
           }
           // Power the context meter from per-API-call usage.
           //

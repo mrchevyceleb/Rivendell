@@ -66,7 +66,7 @@ Rooms: `/` Hall, `/council`, `/dashboard`, `/tidings`, `/hearth`, `/library`, `/
 See `.env.example`. Key vars:
 
 - `PORT` (8091), `HOST` (0.0.0.0).
-- `ELROND_WORKSPACE_PATH` — defaults to `~/ASSISTANT-HUB` (Syncthing-managed; moved off OneDrive). Library reads this as a file tree; `node_modules` and `.git` load on demand.
+- `ELROND_WORKSPACE_PATH` — defaults to `~/ASSISTANT-HUB` (Syncthing-managed; moved off OneDrive). Library/Studio reads this as a Notion-simple space tree (`inbox/`, `projects/`, `areas/`, `resources/`, `scratch/`, `Shares/`, `archive/`, `legacy/`). Hub write policy lives in `server/src/lib/hubPaths.ts` + hub `AGENTS.md`. Agents must not create top-level hub files.
 - `RIVENDELL_WORKER_ENABLED` (true), `RIVENDELL_WORKER_RUNNER` (`dry-run` | `claude`), `RIVENDELL_WORKER_POLL_MS`. Default to `dry-run` unless explicitly running real headless Claude Code.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — required for durable queue and Scribe events.
 - `RAILWAY_MCP_URL`, `ASSISTANT_MCP_TOKEN` — Railway MCP bridge. Routes fall back to local mock data when unset.

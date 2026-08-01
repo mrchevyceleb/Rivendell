@@ -28,6 +28,14 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
   } = state;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  // Which way the menu opens + how tall it may be. Chosen at open time from the
+  // trigger's live viewport position: the menu is used both in a BOTTOM composer
+  // (Hall — open up) and in a TOP toolbar (the Studio chat's CompanionControls —
+  // open down). A fixed `bottom: 100%` used to shove it off the top of the
+  // screen in the toolbar, so the dropdown looked empty. Flip toward whichever
+  // side has more room and cap the height to that space so it never clips.
+  const [placement, setPlacement] = useState<'up' | 'down'>('down');
+  const [menuMaxH, setMenuMaxH] = useState<number | undefined>(undefined);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const countId = useId();
 
@@ -53,9 +61,25 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
       setOpen(false);
       return;
     }
-    // Fetch the provider catalogue lazily, only when the picker opens.
+    // Decide open direction + height from the trigger's live position so the
+    // menu opens into real space instead of off-screen. wrapRef is closed here,
+    // so its rect is just the trigger.
+    const rect = wrapRef.current?.getBoundingClientRect();
+    if (rect && typeof window !== 'undefined') {
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const spaceAbove = rect.top;
+      const dir = spaceBelow >= spaceAbove ? 'down' : 'up';
+      setPlacement(dir);
+      const room = (dir === 'down' ? spaceBelow : spaceAbove) - 16;
+      setMenuMaxH(Math.max(220, Math.min(520, Math.round(room))));
+    } else {
+      setPlacement('down');
+      setMenuMaxH(undefined);
+    }
+    // Always revalidate the provider catalogue when the picker opens so new
+    // Fireworks/OpenRouter models show up without a browser refresh.
     setQuery('');
-    loadOpenRouter();
+    loadOpenRouter({ force: true });
     setOpen(true);
   };
 
@@ -117,7 +141,12 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
       </button>
 
       {open ? (
-        <div className="model-picker-menu" role="listbox" aria-label="Choose a Banana model">
+        <div
+          className={`model-picker-menu is-${placement}`}
+          style={menuMaxH ? { maxHeight: menuMaxH } : undefined}
+          role="listbox"
+          aria-label="Choose a Banana model"
+        >
           {tiers.length > 0 ? (
             <div className="model-picker-section">
               <p className="model-picker-heading">{tiersHeading}</p>
@@ -183,7 +212,7 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
             <div className="model-picker-heading-row">
               <p className="model-picker-heading">{listHeading}</p>
               <span id={countId} className="model-picker-count" role="status" aria-live="polite">
-                {countLabel}
+                {loading && models.length > 0 ? `refreshing · ${countLabel}` : countLabel}
               </span>
             </div>
             <div className="model-picker-search">
@@ -198,9 +227,9 @@ export function ModelPicker({ state }: { state: ModelPickerState }) {
               />
             </div>
             <div className="model-picker-list r-scroll">
-              {loading ? (
-                <p className="model-picker-empty">Loading OpenRouter models...</p>
-              ) : error ? (
+              {loading && filtered.length === 0 ? (
+                <p className="model-picker-empty">Loading {listHeading} models...</p>
+              ) : error && filtered.length === 0 ? (
                 <p className="model-picker-empty model-picker-error">{error}</p>
               ) : filtered.length === 0 ? (
                 <p className="model-picker-empty">

@@ -3,6 +3,10 @@ import { existsSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { basename, dirname, extname, relative, resolve, sep } from 'node:path';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
+import {
+  assertHubStructureWrite,
+  HUB_DEFAULT_HIDDEN_ROOTS,
+} from './hubPaths.ts';
 
 export type FileTreeNode = {
   name: string;
@@ -71,13 +75,16 @@ export function workspaceRoot(): string {
 // syncs ASSISTANT-HUB to every device, so a friendly relative-style label is
 // what we want the UI to show regardless of which machine Matt is on.
 export const WORKSPACE_DISPLAY_LABEL = 'ASSISTANT-HUB';
-export const WORKSPACE_DISPLAY_PATH = '~/Documents/ASSISTANT-HUB';
+export const WORKSPACE_DISPLAY_PATH = '~/ASSISTANT-HUB';
 
-export async function readWorkspaceTree(): Promise<{ root: string; displayPath: string; tree: FileTreeNode; fileCount: number; dirCount: number }> {
+export async function readWorkspaceTree(opts?: {
+  hideLegacy?: boolean;
+}): Promise<{ root: string; displayPath: string; tree: FileTreeNode; fileCount: number; dirCount: number; hideLegacy: boolean }> {
   const absRoot = workspaceRoot();
   if (!existsSync(absRoot)) {
     throw new Error(`Elrond workspace does not exist: ${absRoot}`);
   }
+  const hideLegacy = opts?.hideLegacy !== false;
   let fileCount = 0;
   let dirCount = 0;
 
@@ -96,7 +103,7 @@ export async function readWorkspaceTree(): Promise<{ root: string; displayPath: 
       const shouldDefer = mode === 'shallow' || (relPath !== '' && DEFERRED_DIRS.has(node.name));
       node.deferred = shouldDefer;
       if (!shouldDefer) {
-        node.children = await readChildren(absPath, relPath, 'recursive', walk);
+        node.children = await readChildren(absPath, relPath, 'recursive', walk, { hideLegacy, isRoot: relPath === '' });
       }
     } else {
       fileCount += 1;
@@ -106,13 +113,17 @@ export async function readWorkspaceTree(): Promise<{ root: string; displayPath: 
   };
 
   const tree = await walk(absRoot, '', 'recursive');
-  return { root: WORKSPACE_DISPLAY_LABEL, displayPath: WORKSPACE_DISPLAY_PATH, tree, fileCount, dirCount };
+  return { root: WORKSPACE_DISPLAY_LABEL, displayPath: WORKSPACE_DISPLAY_PATH, tree, fileCount, dirCount, hideLegacy };
 }
 
-export async function readWorkspaceChildren(relPath: string): Promise<{ root: string; path: string; children: FileTreeNode[] }> {
+export async function readWorkspaceChildren(
+  relPath: string,
+  opts?: { hideLegacy?: boolean },
+): Promise<{ root: string; path: string; children: FileTreeNode[] }> {
   const { absPath, inside } = resolveWorkspacePath(relPath, true);
   const s = await stat(absPath);
   if (!s.isDirectory()) throw new Error('Requested path is not a directory');
+  const hideLegacy = opts?.hideLegacy !== false;
 
   const children = await readChildren(absPath, inside, 'shallow', async (childAbsPath, childRelPath, mode) => {
     const childStat = await stat(childAbsPath);
@@ -125,7 +136,7 @@ export async function readWorkspaceChildren(relPath: string): Promise<{ root: st
     };
     if (childStat.isDirectory()) node.deferred = mode === 'shallow' || DEFERRED_DIRS.has(node.name);
     return node;
-  });
+  }, { hideLegacy, isRoot: inside === '' });
 
   return { root: WORKSPACE_DISPLAY_LABEL, path: inside, children };
 }
@@ -169,9 +180,18 @@ async function readChildren(
   relPath: string,
   mode: 'recursive' | 'shallow',
   readNode: (absPath: string, relPath: string, mode: 'recursive' | 'shallow') => Promise<FileTreeNode>,
+  opts?: { hideLegacy?: boolean; isRoot?: boolean },
 ): Promise<FileTreeNode[]> {
   const entries = await readdir(absPath, { withFileTypes: true });
-  const sorted = entries.sort((a, b) => {
+  const filtered = entries.filter((entry) => {
+    if (opts?.isRoot) {
+      // Dot dirs/files stay on disk but clutter the Notion-style sidebar.
+      if (entry.name.startsWith('.')) return false;
+      if (opts.hideLegacy !== false && HUB_DEFAULT_HIDDEN_ROOTS.has(entry.name)) return false;
+    }
+    return true;
+  });
+  const sorted = filtered.sort((a, b) => {
     if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
@@ -262,6 +282,7 @@ export async function writeWorkspaceFile(
   opts?: { expectedModifiedAt?: string },
 ): Promise<{ path: string; size: number; modifiedAt: string }> {
   const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  assertHubStructureWrite(inside, 'write');
   await assertInsideWorkspace(absPath);
   const byteLen = Buffer.byteLength(content, 'utf8');
   if (byteLen > EDIT_MAX_BYTES) throw Object.assign(new Error('file too large to save'), { code: 'E2BIG' });
@@ -287,6 +308,7 @@ export async function createWorkspaceEntry(
   kind: 'file' | 'directory',
 ): Promise<FileTreeNode> {
   const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  assertHubStructureWrite(inside, 'create', { kind });
   if (existsSync(absPath)) throw Object.assign(new Error('already exists'), { code: 'EEXIST' });
   if (kind === 'directory') {
     await mkdir(absPath, { recursive: true });
@@ -308,6 +330,9 @@ export async function createWorkspaceEntry(
 export async function renameWorkspaceEntry(fromRel: string, toRel: string): Promise<{ path: string }> {
   const from = resolveWorkspacePath(fromRel, false);
   const to = resolveWorkspacePath(toRel, false);
+  // Promote from legacy must be copy-out in the client; rename-from legacy is blocked.
+  assertHubStructureWrite(from.inside, 'rename-from');
+  assertHubStructureWrite(to.inside, 'rename-to');
   await assertInsideWorkspace(from.absPath);
   // to path doesn't exist yet so realpath would fail; lexical check already done above
   if (!existsSync(from.absPath)) throw Object.assign(new Error('source not found'), { code: 'ENOENT' });
@@ -319,6 +344,7 @@ export async function renameWorkspaceEntry(fromRel: string, toRel: string): Prom
 
 export async function deleteWorkspaceEntry(relPath: string): Promise<{ path: string }> {
   const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  assertHubStructureWrite(inside, 'delete');
   await assertInsideWorkspace(absPath);
   if (!existsSync(absPath)) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
   const s = await stat(absPath);

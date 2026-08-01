@@ -3,11 +3,20 @@ import { CODEX_MODELS, codexEffortsForModel } from '../codexModels';
 // Model + reasoning-effort selector for Codex. The chosen values ride the WS
 // send/steer payload and reach `codex -m` / `-c model_reasoning_effort`.
 export const CLAUDE_MODELS = [
-  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  { id: 'claude-opus-5', label: 'Opus 5' },
+  { id: 'claude-fable-5', label: 'Fable 5' },
 ];
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+// Default Claude model when nothing (valid) is stored. Opus 5 is the flagship.
+export const DEFAULT_CLAUDE_MODEL = 'claude-opus-5';
+
+// Coerce a stored/legacy Claude model id onto the current option set so a stale
+// value (e.g. the retired `claude-opus-4-8`) can never leave the <select> on a
+// value with no matching <option>, which would strand the picker on a blank.
+export function normalizeClaudeModel(model: string | null | undefined): string {
+  return CLAUDE_MODELS.some((m) => m.id === model) ? (model as string) : DEFAULT_CLAUDE_MODEL;
+}
 
 export function CodexEnginePicker(props: {
   model: string;

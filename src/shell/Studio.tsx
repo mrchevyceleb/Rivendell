@@ -1,6 +1,8 @@
 import {
+  Aperture,
   FileText,
   Hammer,
+  LayoutGrid,
   MessageSquare,
   MessageSquarePlus,
   Moon,
@@ -11,8 +13,10 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
+import { useJarvis } from '../jarvis/JarvisProvider';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Forge } from '../rooms/Forge';
+import { Council } from '../rooms/Council';
 import { useRepos } from '../chat/hooks/useRepos';
 import { normalizeWorkspacePath } from '../chat/utils/proxyLinks';
 import { useWorkspaceTree } from '../hooks/useRoomData';
@@ -53,6 +57,7 @@ function fileName(path: string): string {
 let chatSeq = 0;
 
 export function Studio() {
+  const jarvis = useJarvis();
   const boot = useMemo(readTabs, []);
   const [tabs, setTabs] = useState<StudioTab[]>(boot.tabs);
   const [active, setActive] = useState<string>(boot.active);
@@ -72,6 +77,9 @@ export function Studio() {
   const [dirtyById, setDirtyById] = useState<Record<string, boolean>>({});
   const [reveal, setReveal] = useState<{ path: string; n: number } | null>(null);
   const revealSeq = useRef(0);
+  // Inline rename for chat tabs (right-click or double-click a chat tab).
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState('');
   const [treeWidth, setTreeWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem('rivendell:studio-tree-w'));
     return v >= 180 && v <= 640 ? v : 300;
@@ -125,6 +133,13 @@ export function Studio() {
       params.delete('path');
       const search = params.toString();
       window.history.replaceState({}, '', `${window.location.pathname}${search ? `?${search}` : ''}`);
+      return;
+    }
+    // First visit with only chat tabs: open Notion-style home.md once.
+    const seen = localStorage.getItem('rivendell:opened-hub-home');
+    if (!seen) {
+      localStorage.setItem('rivendell:opened-hub-home', '1');
+      openFileTab('home.md', 'home.md');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -173,6 +188,48 @@ export function Studio() {
     setActive(id);
   }, []);
 
+  const openCouncilTab = useCallback(() => {
+    const id = 'council';
+    setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, { id, kind: 'council', title: 'Council' }]));
+    setActive(id);
+  }, []);
+
+  // Retarget open file tabs after a tree drag-move (path prefix rewrite).
+  const handlePathsMoved = useCallback((from: string, to: string) => {
+    setTabs((prev) => prev.map((tab) => {
+      if (tab.kind !== 'file' || !tab.path) return tab;
+      if (tab.path === from || tab.path.startsWith(`${from}/`)) {
+        const nextPath = tab.path === from ? to : `${to}${tab.path.slice(from.length)}`;
+        return { ...tab, id: `file:${nextPath}`, path: nextPath, title: fileName(nextPath) };
+      }
+      return tab;
+    }));
+    setActive((cur) => {
+      if (!cur.startsWith('file:')) return cur;
+      const path = cur.slice('file:'.length);
+      if (path === from || path.startsWith(`${from}/`)) {
+        const nextPath = path === from ? to : `${to}${path.slice(from.length)}`;
+        return `file:${nextPath}`;
+      }
+      return cur;
+    });
+    setDirtyById((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const [id, dirty] of Object.entries(prev)) {
+        if (!id.startsWith('file:')) { next[id] = dirty; continue; }
+        const path = id.slice('file:'.length);
+        if (path === from || path.startsWith(`${from}/`)) {
+          const nextPath = path === from ? to : `${to}${path.slice(from.length)}`;
+          next[`file:${nextPath}`] = dirty;
+        } else {
+          next[id] = dirty;
+        }
+      }
+      return next;
+    });
+  }, []);
+
+
   const closeTab = useCallback((id: string) => {
     setTabs((prev) => {
       const idx = prev.findIndex((t) => t.id === id);
@@ -186,6 +243,19 @@ export function Studio() {
       setActive((cur) => (cur !== id ? cur : (next[Math.max(0, idx - 1)] ?? next[0]).id));
       return next;
     });
+  }, []);
+
+  // Persist a new tab title (trims; an empty title is ignored so a tab can never
+  // lose its label). setTabs auto-saves to localStorage, so renames survive reload.
+  const renameTab = useCallback((id: string, title: string) => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, title: trimmed } : t)));
+  }, []);
+
+  const startRename = useCallback((tab: StudioTab) => {
+    setDraftTitle(tab.title);
+    setEditingTabId(tab.id);
   }, []);
 
   const registerChatApi = useCallback((chatId: string, api: ChatTabApi | null) => {
@@ -234,7 +304,7 @@ export function Studio() {
   const activeFileDirty = activeTab?.kind === 'file' ? Boolean(dirtyById[activeTab.id]) : false;
 
   const tabIcon = (kind: StudioTab['kind']) =>
-    kind === 'file' ? <FileText size={13} /> : kind === 'forge' ? <Hammer size={13} /> : <MessageSquare size={13} />;
+    kind === 'file' ? <FileText size={13} /> : kind === 'council' ? <LayoutGrid size={13} /> : kind === 'forge' ? <Hammer size={13} /> : <MessageSquare size={13} />;
 
   const rootStyle: React.CSSProperties | undefined =
     zoom !== 1 ? { zoom, width: `calc(100vw / ${zoom})`, height: `calc(100dvh / ${zoom})` } : undefined;
@@ -263,13 +333,46 @@ export function Studio() {
             {tabs.map((tab) => {
               const isActive = tab.id === active;
               const dirty = tab.kind === 'file' && dirtyById[tab.id];
+              const isChat = tab.kind === 'chat';
+              const isEditing = editingTabId === tab.id;
+              const commit = () => { renameTab(tab.id, draftTitle); setEditingTabId(null); };
               return (
-                <div key={tab.id} className={`studio-tab ${isActive ? 'active' : ''}`} role="tab" aria-selected={isActive}>
-                  <button className="studio-tab-main" onClick={() => activate(tab.id)} title={tab.path ?? tab.title}>
-                    {tabIcon(tab.kind)}
-                    <span className="tab-title">{tab.title}</span>
-                    {dirty ? <span className="tab-dirty">●</span> : null}
-                  </button>
+                <div
+                  key={tab.id}
+                  className={`studio-tab ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''}`}
+                  role="tab"
+                  aria-selected={isActive}
+                  onContextMenu={isChat ? (e) => { e.preventDefault(); startRename(tab); } : undefined}
+                >
+                  {isEditing ? (
+                    <span className="studio-tab-main is-editing">
+                      {tabIcon(tab.kind)}
+                      <input
+                        className="studio-tab-rename"
+                        value={draftTitle}
+                        autoFocus
+                        aria-label="Rename tab"
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setDraftTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); commit(); }
+                          else if (e.key === 'Escape') { e.preventDefault(); setEditingTabId(null); }
+                        }}
+                        onBlur={commit}
+                      />
+                    </span>
+                  ) : (
+                    <button
+                      className="studio-tab-main"
+                      onClick={() => activate(tab.id)}
+                      onDoubleClick={isChat ? () => startRename(tab) : undefined}
+                      title={isChat ? `${tab.title} · right-click to rename` : (tab.path ?? tab.title)}
+                    >
+                      {tabIcon(tab.kind)}
+                      <span className="tab-title">{tab.title}</span>
+                      {dirty ? <span className="tab-dirty">●</span> : null}
+                    </button>
+                  )}
                   <button className="studio-tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }} title="Close" aria-label={`Close ${tab.title}`}>
                     <X size={12} />
                   </button>
@@ -279,7 +382,16 @@ export function Studio() {
           </nav>
 
           <div className="studio-topbar-actions">
+            <button
+              className="jarvis-summon-btn"
+              onClick={jarvis.summon}
+              title={jarvis.wakeActive ? 'Jarvis (listening for wake word · Ctrl+J)' : 'Summon Jarvis (Ctrl+J)'}
+            >
+              <Aperture size={16} />
+              {jarvis.wakeActive && <span className="jarvis-summon-dot" />}
+            </button>
             <button onClick={openChatTab} title="New chat with Elrond"><MessageSquarePlus size={16} /></button>
+            <button onClick={openCouncilTab} title="Open Council (task kanban)"><LayoutGrid size={16} /></button>
             <button onClick={openForgeTab} title="Open Forge (cron & deploy)"><Hammer size={16} /></button>
             <span className="studio-zoom">
               <button onClick={() => stepZoom(-0.1)} title="Smaller"><ZoomOut size={16} /></button>
@@ -304,6 +416,7 @@ export function Studio() {
                 dirtyPaths={dirtyPaths}
                 onOpenFile={openFileTab}
                 onAskElrond={askElrond}
+                onPathsMoved={handlePathsMoved}
                 revealPath={reveal?.path}
                 revealNonce={reveal?.n}
               />
@@ -321,8 +434,10 @@ export function Studio() {
                   <FileTab id={tab.id} path={tab.path} onDirtyChange={onDirtyChange} onAskElrond={askElrond} />
                 ) : tab.kind === 'chat' && tab.chatId ? (
                   <ChatTab chatId={tab.chatId} repo={assistantHubRepo} registerApi={registerChatApi} />
+                ) : tab.kind === 'council' ? (
+                  <div className="studio-room-pane r-scroll"><Council /></div>
                 ) : tab.kind === 'forge' ? (
-                  <Forge />
+                  <div className="studio-room-pane r-scroll"><Forge /></div>
                 ) : null}
               </div>
             ))}

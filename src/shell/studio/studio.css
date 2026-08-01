@@ -143,6 +143,22 @@
 .studio-tab .tab-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .studio-tab .tab-dirty { color: var(--r-gold); font-size: 9px; flex-shrink: 0; }
 
+/* Inline tab rename (right-click / double-click a chat tab) */
+.studio-tab-main.is-editing { cursor: text; }
+.studio-tab-rename {
+  min-width: 0;
+  width: 108px;
+  max-width: 140px;
+  background: var(--r-bg-card);
+  border: 1px solid var(--r-gold);
+  border-radius: 5px;
+  color: var(--r-ink);
+  font-family: var(--r-body);
+  font-size: 12.5px;
+  padding: 1px 5px;
+  outline: none;
+}
+
 .studio-tab-close {
   display: inline-flex;
   align-items: center;
@@ -408,4 +424,111 @@
 
   /* Trim the status bar to the essentials */
   .studio-status-right { display: none; }
+}
+
+/* ---------- Hub spaces (Notion-ish roots) ---------- */
+.hub-spaces {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 4px;
+  border-bottom: 1px solid var(--r-line);
+  background: linear-gradient(180deg, color-mix(in oklab, var(--r-bg-soft) 80%, transparent), transparent);
+}
+.hub-space-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--r-line);
+  background: var(--r-bg);
+  color: var(--r-ink-mute);
+  font-size: 11px;
+  font-family: var(--r-sans);
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+  user-select: none;
+}
+.hub-space-chip:hover {
+  color: var(--r-ink);
+  border-color: var(--r-gold);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--r-gold) 18%, transparent);
+}
+.hub-space-chip:active { transform: translateY(0) scale(0.98); }
+.hub-space-chip.home {
+  color: var(--r-star);
+  border-color: color-mix(in oklab, var(--r-star) 45%, var(--r-line));
+}
+.hub-space-chip.legacy {
+  opacity: 0.72;
+  font-style: italic;
+}
+.hub-space-chip span {
+  display: inline-block;
+  animation: hub-bob 3.4s ease-in-out infinite;
+}
+.hub-space-chip:nth-child(2n) span { animation-delay: 0.4s; }
+.hub-space-chip:nth-child(3n) span { animation-delay: 0.8s; }
+@keyframes hub-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1.5px); }
+}
+
+.hub-ticker {
+  overflow: hidden;
+  border-bottom: 1px solid var(--r-line);
+  background: color-mix(in oklab, var(--r-bg-deep) 90%, var(--r-gold));
+  height: 18px;
+  display: flex;
+  align-items: center;
+}
+.hub-ticker-track {
+  display: inline-block;
+  white-space: nowrap;
+  font-family: var(--r-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--r-ink-mute);
+  padding-left: 100%;
+  animation: hub-ticker 22s linear infinite;
+}
+@keyframes hub-ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-100%); }
+}
+
+.studio-tree-actions button.active {
+  color: var(--r-gold);
+  background: var(--r-bg-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-space-chip span { animation: none !important; }
+  .hub-ticker-track { animation: none !important; padding-left: 10px; }
+}
+
+.studio-room-pane {
+  height: 100%;
+  overflow: auto;
+  padding: 12px 16px 24px;
+  background: var(--r-bg);
+}
+
+/* Tree drag-move affordances */
+.tree-node.is-dragging > button {
+  opacity: 0.45;
+}
+.tree-node > button.drop-target,
+.tree-node.is-drop-target > button {
+  outline: 1px solid var(--r-gold);
+  background: color-mix(in oklab, var(--r-gold) 14%, var(--r-bg));
+  color: var(--r-ink);
+}
+.tree-node > button {
+  cursor: grab;
+}
+.tree-node > button:active {
+  cursor: grabbing;
 }
