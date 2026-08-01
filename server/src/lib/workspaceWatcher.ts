@@ -6,23 +6,58 @@ import { workspaceRoot } from './workspace.ts';
 import { isHubRootPollution } from './hubPaths.ts';
 import { emitScribe } from '../worker/scribe.ts';
 
-const IGNORED = [
-  '**/.git/**',
-  '**/node_modules/**',
-  '**/dist/**',
-  '**/.next/**',
-  '**/.turbo/**',
-  '**/.venv/**',
-  '**/__pycache__/**',
-  '**/*.swp',
-  '**/*.swx',
-  '**/*~',
-  '**/.DS_Store',
-];
+// Directories chokidar must PRUNE (never recurse into). Matching the directory
+// itself — not just its contents — is what stops chokidar from crawling huge
+// subtrees (node_modules, .git, build output) and stat'ing every file inside,
+// which OOM-killed the server on the 37k-file Syncthing-managed hub. The regex
+// anchors on a path segment so it prunes at any depth on posix AND windows.
+const PRUNE_RE =
+  /(^|[/\\])(node_modules|\.git|dist|\.next|\.turbo|\.venv|__pycache__|\.stfolder|\.stversions|\.stignore)([/\\]|$)/;
+
+// Individual throwaway files to ignore (matched as anymatch globs).
+const IGNORED_FILES = ['**/*.swp', '**/*.swx', '**/*~', '**/.DS_Store'];
+
+const IGNORED: Array<string | RegExp> = [PRUNE_RE, ...IGNORED_FILES];
 
 type WatcherOp = 'add' | 'change' | 'unlink' | 'addDir' | 'unlinkDir';
 
 let watcher: ReturnType<typeof chokidar.watch> | null = null;
+
+// Burst coalescer: Syncthing lands files in batches, and emitting one Scribe
+// row per file floods Supabase (and the activity log). Queue changes for a short
+// window, then emit a single summarized event. Pollution canaries stay immediate.
+const COALESCE_MS = 400;
+const MAX_PATHS_IN_PAYLOAD = 50;
+let pending: Array<{ op: WatcherOp; rel: string }> = [];
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPending(): void {
+  flushTimer = null;
+  const batch = pending;
+  pending = [];
+  if (!batch.length) return;
+  const uniq = [...new Set(batch.map((b) => b.rel))];
+  const text =
+    uniq.length === 1
+      ? `Workspace: ${batch[0]!.op} ${uniq[0]}`
+      : `Workspace: ${batch.length} changes · ${uniq[0]}`;
+  void emitScribe({
+    level: 'system',
+    text,
+    payload: {
+      kind: 'workspace-change',
+      paths: uniq.slice(0, MAX_PATHS_IN_PAYLOAD),
+      count: batch.length,
+      by: 'fs',
+    },
+  });
+}
+
+function queueChange(op: WatcherOp, rel: string): void {
+  pending.push({ op, rel });
+  if (flushTimer) return;
+  flushTimer = setTimeout(flushPending, COALESCE_MS);
+}
 
 function toPosixRel(root: string, absPath: string): string {
   return relative(root, absPath).split('\\').join('/');
@@ -39,18 +74,17 @@ export function startWorkspaceWatcher(): void {
     ignored: IGNORED,
     persistent: true,
     ignoreInitial: true,
-    awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
+    // No awaitWriteFinish: it turned every pending write into a 50ms polling
+    // loop, which multiplies into a stat storm on a large tree. Pure inotify +
+    // the coalescer above handles multi-chunk writes without the polling cost.
   });
 
   const handle = (op: WatcherOp) => (absPath: string) => {
     const rel = toPosixRel(root, absPath);
     if (!rel || rel.startsWith('..')) return;
-    void emitScribe({
-      level: 'system',
-      text: `Workspace: ${op} ${rel}`,
-      payload: { kind: 'workspace-change', op, path: rel, by: 'fs' },
-    });
+    queueChange(op, rel);
     // Root pollution canary: something landed outside the closed hub schema.
+    // Emitted immediately (not coalesced) so it's never buried in a burst.
     if ((op === 'add' || op === 'addDir') && isHubRootPollution(rel)) {
       void emitScribe({
         level: 'note',
@@ -86,6 +120,10 @@ export function startWorkspaceWatcher(): void {
 }
 
 export function stopWorkspaceWatcher(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushPending();
+  }
   void watcher?.close();
   watcher = null;
 }
