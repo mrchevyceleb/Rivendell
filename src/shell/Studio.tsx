@@ -6,6 +6,7 @@ import {
   MessageSquare,
   MessageSquarePlus,
   Moon,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Sun,
@@ -15,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useJarvis } from '../jarvis/JarvisProvider';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useIsMobile } from '../chat/hooks/useMediaQuery';
 import { Forge } from '../rooms/Forge';
 import { Council } from '../rooms/Council';
 import { useRepos } from '../chat/hooks/useRepos';
@@ -58,9 +60,16 @@ let chatSeq = 0;
 
 export function Studio() {
   const jarvis = useJarvis();
+  const isMobile = useIsMobile();
   const boot = useMemo(readTabs, []);
   const [tabs, setTabs] = useState<StudioTab[]>(boot.tabs);
   const [active, setActive] = useState<string>(boot.active);
+  // Mobile-only "⋯ More" menu (Jarvis / Council / Forge / theme live here so the
+  // narrow top bar stays uncluttered and every control keeps a real tap target).
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement | null>(null);
+  const moreBtnRef = useRef<HTMLButtonElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const [treeCollapsed, setTreeCollapsed] = useState(() => {
     const stored = localStorage.getItem(STUDIO_TREE_KEY);
     if (stored === 'true') return true;
@@ -123,6 +132,30 @@ export function Studio() {
   useEffect(() => { localStorage.setItem(STUDIO_TABS_KEY, JSON.stringify(tabs)); }, [tabs]);
   useEffect(() => { localStorage.setItem(STUDIO_ACTIVE_KEY, active); }, [active]);
   useEffect(() => { localStorage.setItem(STUDIO_TREE_KEY, String(treeCollapsed)); }, [treeCollapsed]);
+
+  // Close the mobile "More" menu on outside pointer / Escape. Escape also returns
+  // focus to the trigger so keyboard users aren't dropped onto <body>.
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setMoreOpen(false); moreBtnRef.current?.focus(); }
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [moreOpen]);
+  // On open, move focus into the popover (first item) for keyboard users.
+  useEffect(() => {
+    if (moreOpen) moreMenuRef.current?.querySelector('button')?.focus();
+  }, [moreOpen]);
+  // Leaving mobile width tears the menu down so it can't linger as a stray popover.
+  useEffect(() => { if (!isMobile) setMoreOpen(false); }, [isMobile]);
 
   // ── deep link: ?path=foo opens that file ──
   useEffect(() => {
@@ -381,27 +414,80 @@ export function Studio() {
             })}
           </nav>
 
-          <div className="studio-topbar-actions">
-            <button
-              className="jarvis-summon-btn"
-              onClick={jarvis.summon}
-              title={jarvis.wakeActive ? 'Jarvis (listening for wake word · Ctrl+J)' : 'Summon Jarvis (Ctrl+J)'}
-            >
-              <Aperture size={16} />
-              {jarvis.wakeActive && <span className="jarvis-summon-dot" />}
-            </button>
-            <button onClick={openChatTab} title="New chat with Elrond"><MessageSquarePlus size={16} /></button>
-            <button onClick={openCouncilTab} title="Open Council (task kanban)"><LayoutGrid size={16} /></button>
-            <button onClick={openForgeTab} title="Open Forge (cron & deploy)"><Hammer size={16} /></button>
-            <span className="studio-zoom">
-              <button onClick={() => stepZoom(-0.1)} title="Smaller"><ZoomOut size={16} /></button>
-              <button className="studio-zoom-pct" onClick={() => setZoom(1)} title="Reset size">{Math.round(zoom * 100)}%</button>
-              <button onClick={() => stepZoom(0.1)} title="Bigger"><ZoomIn size={16} /></button>
-            </span>
-            <button onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} title="Toggle theme">
-              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-          </div>
+          {isMobile ? (
+            /* Mobile: keep the primary "new chat" in reach, fold the rest into ⋯ */
+            <div className="studio-topbar-actions studio-actions-mobile">
+              <button
+                className="studio-newchat-btn"
+                onClick={openChatTab}
+                title="New chat with Elrond"
+                aria-label="New chat with Elrond"
+              >
+                <MessageSquarePlus size={18} />
+              </button>
+              <div
+                className="studio-more"
+                ref={moreRef}
+                onBlur={(e) => { if (!moreRef.current?.contains(e.relatedTarget as Node)) setMoreOpen(false); }}
+              >
+                <button
+                  ref={moreBtnRef}
+                  className="studio-more-btn"
+                  onClick={() => setMoreOpen((o) => !o)}
+                  aria-haspopup="true"
+                  aria-expanded={moreOpen}
+                  title="More"
+                  aria-label={jarvis.wakeActive ? 'More actions · Jarvis listening for wake word' : 'More actions'}
+                >
+                  <MoreHorizontal size={18} />
+                  {jarvis.wakeActive && <span className="jarvis-summon-dot" aria-hidden="true" />}
+                </button>
+                {moreOpen ? (
+                  <div className="studio-more-menu" ref={moreMenuRef}>
+                    <button
+                      type="button"
+                      onClick={() => { jarvis.summon(); setMoreOpen(false); }}
+                      aria-label={jarvis.wakeActive ? 'Summon Jarvis · listening for wake word' : 'Summon Jarvis'}
+                    >
+                      <Aperture size={17} /> Summon Jarvis
+                      {jarvis.wakeActive ? <span className="studio-more-dot" aria-hidden="true" /> : null}
+                    </button>
+                    <button type="button" onClick={() => { openCouncilTab(); setMoreOpen(false); }}>
+                      <LayoutGrid size={17} /> Council
+                    </button>
+                    <button type="button" onClick={() => { openForgeTab(); setMoreOpen(false); }}>
+                      <Hammer size={17} /> Forge
+                    </button>
+                    <button type="button" onClick={() => { setTheme((t) => (t === 'dark' ? 'light' : 'dark')); setMoreOpen(false); }}>
+                      {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="studio-topbar-actions">
+              <button
+                className="jarvis-summon-btn"
+                onClick={jarvis.summon}
+                title={jarvis.wakeActive ? 'Jarvis (listening for wake word · Ctrl+J)' : 'Summon Jarvis (Ctrl+J)'}
+              >
+                <Aperture size={16} />
+                {jarvis.wakeActive && <span className="jarvis-summon-dot" />}
+              </button>
+              <button onClick={openChatTab} title="New chat with Elrond"><MessageSquarePlus size={16} /></button>
+              <button onClick={openCouncilTab} title="Open Council (task kanban)"><LayoutGrid size={16} /></button>
+              <button onClick={openForgeTab} title="Open Forge (cron & deploy)"><Hammer size={16} /></button>
+              <span className="studio-zoom">
+                <button onClick={() => stepZoom(-0.1)} title="Smaller"><ZoomOut size={16} /></button>
+                <button className="studio-zoom-pct" onClick={() => setZoom(1)} title="Reset size">{Math.round(zoom * 100)}%</button>
+                <button onClick={() => stepZoom(0.1)} title="Bigger"><ZoomIn size={16} /></button>
+              </span>
+              <button onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))} title="Toggle theme">
+                {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+              </button>
+            </div>
+          )}
         </header>
 
         {/* ── Body: tree | divider | content ── */}

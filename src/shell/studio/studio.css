@@ -391,13 +391,37 @@
    Mobile / narrow screens
    ============================================================ */
 @media (max-width: 760px) {
-  .studio { grid-template-rows: 44px 1fr 22px; }
+  /* Two rows: controls on top, a full-width tab strip below → size to content */
+  .studio { grid-template-rows: auto 1fr 22px; }
 
-  /* Top bar: keep the mark, drop the wordmark + zoom to save room */
-  .studio-brand { padding-right: 8px; margin-right: 2px; }
+  /* Top bar wraps: [tree] [mark] …… [+ new] [⋯] on row 1, tabs on row 2 */
+  .studio-topbar {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    row-gap: 0;
+  }
+  .studio-tree-toggle { order: 0; }
+  .studio-brand { order: 1; padding-right: 10px; margin-right: 0; border-right: none; }
   .studio-brand strong { display: none; }
   .studio-zoom { display: none; }
-  .studio-topbar { padding-left: 8px; }
+  .studio-topbar-actions {
+    order: 2;
+    margin-left: auto;
+    padding-left: 0;
+    border-left: none;
+    gap: 6px;
+  }
+  .studio-tabs {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+    height: 42px;
+    margin-top: 6px;
+    border-top: 1px solid var(--r-line);
+    gap: 0;
+  }
 
   /* Single column: the file tree slides OVER the content instead of squeezing it */
   .studio-body,
@@ -415,15 +439,102 @@
   }
   .studio-body.tree-collapsed .studio-tree { display: none; }
 
-  /* Roomier tap targets */
+  /* Roomier tap targets on the control row */
   .studio-tree-toggle,
-  .studio-topbar-actions button { width: 36px; height: 34px; }
-  .studio-tab { max-width: 152px; }
-  .studio-tab-main { font-size: 13px; }
-  .studio-tab-close { opacity: 1; }
+  .studio-topbar-actions button { width: 40px; height: 40px; }
+
+  /* Tab strip row: comfortable height, reachable close targets */
+  .studio-tab { max-width: 210px; height: 42px; border-bottom-width: 3px; }
+  .studio-tab-main { font-size: 14px; gap: 8px; padding: 0 4px 0 14px; }
+  .studio-tab-close { opacity: 1; width: 32px; height: 32px; margin-right: 4px; position: relative; }
+  .studio-tab-close svg { width: 15px; height: 15px; }
+  /* Extend the close tap target to ~44px without enlarging the visible icon,
+     so aiming for × is forgiving and doesn't accidentally re-select the tab. */
+  .studio-tab-close::after { content: ''; position: absolute; inset: -6px; border-radius: 8px; }
+
+  /* Primary action: make "new chat" unmistakable */
+  .studio-actions-mobile .studio-newchat-btn {
+    color: var(--r-gold);
+    border-color: color-mix(in srgb, var(--r-gold) 42%, transparent);
+    background: color-mix(in srgb, var(--r-gold) 12%, transparent);
+  }
+  .studio-actions-mobile .studio-newchat-btn:active { transform: scale(0.92); }
 
   /* Trim the status bar to the essentials */
   .studio-status-right { display: none; }
+}
+
+/* ---------- Mobile "⋯ More" overflow menu ---------- */
+.studio-more { position: relative; display: inline-flex; }
+.studio-more-btn { position: relative; }
+.studio-more-btn .jarvis-summon-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--r-gold);
+  box-shadow: 0 0 6px var(--r-gold);
+  animation: jarvis-dot-pulse 2.2s ease-in-out infinite;
+}
+.studio-more-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 210px;
+  padding: 6px;
+  background: var(--r-bg-card);
+  border: 1px solid var(--r-line-strong);
+  border-radius: 12px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.5);
+  animation: studio-more-in 0.14s ease;
+}
+@keyframes studio-more-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* Beats the in-media `.studio-topbar-actions button` sizing (0,2,1 > 0,1,1) */
+.studio-topbar-actions .studio-more-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  width: 100%;
+  height: auto;
+  min-height: 46px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--r-ink-soft);
+  font-family: var(--r-body);
+  font-size: 14.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.studio-topbar-actions .studio-more-menu button:hover,
+.studio-topbar-actions .studio-more-menu button:active {
+  background: color-mix(in srgb, var(--r-gold) 12%, transparent);
+  color: var(--r-ink);
+}
+.studio-more-menu svg { color: var(--r-ink-mute); flex-shrink: 0; }
+.studio-more-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--r-gold);
+  box-shadow: 0 0 6px var(--r-gold);
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-more-menu { animation: none; }
+  .studio-more-btn .jarvis-summon-dot { animation: none; }
 }
 
 /* ---------- Hub spaces (Notion-ish roots) ---------- */
