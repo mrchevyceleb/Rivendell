@@ -199,6 +199,16 @@
 .rc .send:active { transform: scale(.9); }
 .rc .send.streaming { background: var(--surface-hover); border-color: color-mix(in oklch, var(--accent) 40%, transparent); color: var(--accent-glow); animation: rc-glow-pulse 2s ease-in-out infinite; }
 .rc .send.streaming .ic-send { display: none; } .rc .send.streaming .ic-stop { display: block; }
+/* Steer: typing mid-stream turns the button amber with a redirect glyph
+   (inject guidance, don't stop) */
+.rc .send .ic-steer { display: none; }
+.rc .send.steer { background: linear-gradient(180deg, color-mix(in oklch, var(--amber) 82%, transparent), var(--amber)); border-color: transparent; color: var(--bg-deep); box-shadow: 0 0 16px color-mix(in oklch, var(--amber) 45%, transparent); }
+.rc .send.steer:hover { transform: scale(1.08); }
+.rc .send.steer .ic-send { display: none; }
+.rc .send.steer .ic-steer { display: block; transform: translateY(-1px); }
+/* Visible "Steer" cue text (desktop composer-row hint + mobile dock-meta) */
+.rc .steer-cue { color: var(--amber); font-weight: 500; }
+.rc-mobile .dock-meta .steer-cue { margin-left: auto; font-family: var(--font-mono); font-size: 11px; }
 
 /* slash-command popover */
 .rc .pop { position: absolute; left: 0; right: 0; bottom: calc(100% + 10px); border: 1px solid var(--border-strong);
@@ -343,15 +353,11 @@
 
 .rc-desktop .main { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .rc-desktop .top { display: flex; align-items: center; gap: 14px; padding: 14px 26px 12px; border-bottom: 1px solid var(--border); flex: none; }
-.rc-desktop .top h2 { font-size: 24px; }
+.rc-desktop .hall-title { margin: 0; font-family: var(--font-display); font-size: 19px; font-weight: 600; color: var(--fg); letter-spacing: 0.01em; }
 .rc-desktop .crumb { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .rc-desktop .top .presence { margin-left: auto; }
 .rc-desktop .themebtn { width: 34px; height: 34px; }
 .rc-desktop .themebtn svg { width: 15px; height: 15px; }
-.rc-desktop .roomtabs { display: flex; gap: 4px; }
-.rc-desktop .rtab { font-family: var(--font-display); font-size: 17px; color: var(--muted); padding: 4px 14px; border-radius: 999px; border: 1px solid transparent; transition: all .18s ease; }
-.rc-desktop .rtab:hover { color: var(--fg); }
-.rc-desktop .rtab.on { color: var(--fg); border-color: var(--border-strong); background: var(--surface-hover); }
 
 .rc-desktop .feed { flex: 1; min-height: 0; overflow-y: auto; padding: 26px 26px 30px; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 .rc-desktop .feed-inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
@@ -403,46 +409,9 @@
 .rc .leaf:hover { background: var(--surface-hover); color: var(--fg); }
 .rc .leaf .fico { color: var(--faint); }
 
-/* Council board (desktop 5-col) */
-.rc-desktop .view { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 26px 30px; display: none; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
-.rc-desktop .view.on { display: block; }
-.rc-desktop #rcViewCouncil { overflow-x: auto; }
-.rc-desktop .view-note { font-family: var(--font-display); font-style: italic; font-size: 14.5px; color: var(--muted); margin: 0 0 18px; }
-.rc-desktop .board { display: grid; grid-template-columns: repeat(5, minmax(210px, 1fr)); gap: 14px; min-width: 1080px; }
-.rc-desktop .colhead { font-family: var(--font-display); font-size: 16px; color: var(--fg-soft); display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
-.rc-desktop .colhead .cn2 { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
-.rc-desktop .col { display: flex; flex-direction: column; gap: 10px; align-content: start; }
-.rc-desktop .task { width: 100%; text-align: left; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-soft); padding: 10px 12px; transition: transform .18s var(--spring), border-color .2s ease; animation: rc-spring-in .3s var(--spring) both; }
-.rc-desktop .task:hover { transform: translateY(-2px); border-color: color-mix(in oklch, var(--accent) 36%, transparent); }
-.rc-desktop .task:active { transform: scale(.97); }
-.rc-desktop .task .tt { font-size: 13px; font-weight: 500; color: var(--fg); margin-bottom: 5px; }
-.rc-desktop .task .tm { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
-.rc-desktop .pdot { width: 6px; height: 6px; border-radius: 50%; }
-.rc-desktop .pdot.high { background: var(--amber); box-shadow: 0 0 7px var(--amber); }
-.rc-desktop .pdot.medium { background: var(--accent); }
-.rc-desktop .pdot.low { background: var(--faint); }
-.rc-desktop .task.done2 .tt { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--border-strong); }
-
-/* Forge jobs (desktop) */
-.rc-desktop .jobs { max-width: 720px; display: flex; flex-direction: column; gap: 12px; }
-.rc-desktop .job { border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-soft); overflow: hidden; }
-.rc-desktop .job.asleep { opacity: .55; }
-.rc-desktop .job-head { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 14px; text-align: left; cursor: pointer; }
-.rc-desktop .jdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.rc-desktop .jdot.ok { background: var(--emerald); }
-.rc-desktop .jdot.failed { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
-.rc-desktop .jdot.running { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: rc-breathe 2s ease-in-out infinite; }
-.rc-desktop .jdot.asleep { background: var(--faint); }
-.rc-desktop .jt { font-size: 13.5px; font-weight: 500; color: var(--fg); }
-.rc-desktop .js { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); }
-.rc-desktop .jr { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); text-align: right; line-height: 1.7; }
-.rc-desktop .jbtn { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border); display: grid; place-items: center; color: var(--muted); flex: none; transition: all .15s ease; }
-.rc-desktop .jbtn:hover { color: var(--fg); border-color: var(--border-strong); }
-.rc-desktop .jbtn:active { transform: scale(.9); }
-.rc-desktop .jbtn svg { width: 12px; height: 12px; }
-.rc-desktop .job-log { max-height: 0; overflow: hidden; transition: max-height .3s var(--ease-out); }
-.rc-desktop .job.open .job-log { max-height: 160px; }
-.rc-desktop .job-log pre { margin: 0; padding: 2px 14px 12px 34px; font-family: var(--font-mono); font-size: 11px; line-height: 1.9; color: var(--muted); white-space: pre-wrap; }
+/* Council board / Forge jobs desktop styles were removed with the desktop chat's
+   Council/Forge sections. Base `.rc .task`/`.job`/`.pdot`/`.jdot` rules above plus
+   the `.rc-mobile` overrides style the boards that still render inside Mobile. */
 
 /* IDE file tree (sidebar Files pane) */
 .rc-desktop .tree { padding: 0 10px; }

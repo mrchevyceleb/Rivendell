@@ -14,9 +14,7 @@ import {
   ModelChip,
 } from '../reimagine/CounselPicker';
 import {
-  CouncilBoard,
   ChronicleRows,
-  ForgeJobs,
   HubTree,
   HubsStrip,
   RibbonTicker,
@@ -26,7 +24,6 @@ import { Moon, StarSigil, Sun } from '../reimagine/icons';
 export function Conversation({ s, picker, repo }: ShellViewProps) {
   const [pane, setPane] = useState<'files' | 'chron'>('files');
   const [counselOpen, setCounselOpen] = useState(false);
-  const inHall = s.room === 'hall';
 
   return (
     <div className="rc rc-desktop">
@@ -101,18 +98,7 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
         {/* ── main column ── */}
         <div className="main">
           <header className="top">
-            <nav className="roomtabs">
-              {(['hall', 'council', 'forge'] as const).map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  className={`rtab${s.room === r ? ' on' : ''}`}
-                  onClick={() => s.setRoom(r)}
-                >
-                  {r === 'hall' ? 'The Hall' : r === 'council' ? 'The Council' : 'The Forge'}
-                </button>
-              ))}
-            </nav>
+            <h2 className="hall-title">The Hall</h2>
             <span className="crumb">
               {repo?.name ?? 'ASSISTANT-HUB'} · {repo?.branch ?? 'master'}
             </span>
@@ -132,7 +118,7 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
 
           <RibbonTicker events={s.chronicle} />
 
-          <main className="feed" ref={s.sticky.scrollRef} onScroll={s.sticky.onScroll} style={{ display: inHall ? undefined : 'none' }}>
+          <main className="feed" ref={s.sticky.scrollRef} onScroll={s.sticky.onScroll}>
             <div className="feed-inner">
               <ChatThread
                 blocks={s.blocks}
@@ -148,45 +134,31 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
             </div>
           </main>
 
-          <section className={`view${s.room === 'council' ? ' on' : ''}`} id="rcViewCouncil">
-            <p className="view-note">The task board of the house · touch a card to move it along its road</p>
-            <CouncilBoard stacked={false} />
-          </section>
+          <button
+            type="button"
+            className={`jump${s.sticky.unread > 0 || (!s.sticky.pinned && s.busy) ? ' show' : ''}`}
+            onClick={s.sticky.jumpToBottom}
+          >
+            To the latest word
+            {s.sticky.unread > 0 ? <span className="cnt">{s.sticky.unread}</span> : null}
+          </button>
 
-          <section className={`view${s.room === 'forge' ? ' on' : ''}`} id="rcViewForge">
-            <p className="view-note">Errands that run while you sleep · every outward step waits for your blessing</p>
-            <ForgeJobs />
-          </section>
-
-          {inHall ? (
-            <button
-              type="button"
-              className={`jump${s.sticky.unread > 0 || (!s.sticky.pinned && s.busy) ? ' show' : ''}`}
-              onClick={s.sticky.jumpToBottom}
-            >
-              To the latest word
-              {s.sticky.unread > 0 ? <span className="cnt">{s.sticky.unread}</span> : null}
-            </button>
-          ) : null}
-
-          {inHall ? (
-            <div className="dock">
-              <div className="dock-inner">
-                <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
-                <Composer
-                  value={s.value}
-                  onChange={s.setValue}
-                  onSend={s.send}
-                  onStop={s.stop}
-                  onSteer={s.steer}
-                  busy={s.busy}
-                  commands={s.commands}
-                  modelChip={<ModelChip picker={picker} onClick={() => setCounselOpen((o) => !o)} />}
-                  onMellon={(rect) => s.sparks.burst(rect.left + rect.width / 2, rect.top + rect.height / 2)}
-                />
-              </div>
+          <div className="dock">
+            <div className="dock-inner">
+              <CounselPopover picker={picker} open={counselOpen} onClose={() => setCounselOpen(false)} />
+              <Composer
+                value={s.value}
+                onChange={s.setValue}
+                onSend={s.send}
+                onStop={s.stop}
+                onSteer={s.steer}
+                busy={s.busy}
+                commands={s.commands}
+                modelChip={<ModelChip picker={picker} onClick={() => setCounselOpen((o) => !o)} />}
+                onMellon={(rect) => s.sparks.burst(rect.left + rect.width / 2, rect.top + rect.height / 2)}
+              />
             </div>
-          ) : null}
+          </div>
         </div>
       </div>
       {s.sparks.sparks}

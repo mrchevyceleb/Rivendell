@@ -124,16 +124,21 @@ export function Composer(props: ComposerProps) {
   const submit = () => {
     const v = props.value.trim();
     const imgs = payload();
-    if (!v && !imgs?.length) {
-      if (props.busy) props.onStop?.();
+    // While a turn streams, the button NEVER starts a new turn. Steer with the
+    // typed guidance (text is required; any attached images ride along), or, with
+    // nothing to steer, stop. This keeps the busy branch exhaustive so a caller
+    // without onSteer can never fall through to onSend and run a concurrent turn.
+    if (props.busy) {
+      if (v && props.onSteer) {
+        props.onSteer(v, imgs);
+        props.onChange('');
+        clearImages();
+      } else {
+        props.onStop?.();
+      }
       return;
     }
-    if (props.busy && props.onSteer) {
-      props.onSteer(v, imgs);
-      props.onChange('');
-      clearImages();
-      return;
-    }
+    if (!v && !imgs?.length) return;
     if (v.toLowerCase() === 'mellon' && props.onMellon && sendRef.current) {
       props.onMellon(sendRef.current.getBoundingClientRect());
     }
@@ -173,24 +178,40 @@ export function Composer(props: ComposerProps) {
     }
   };
 
-  const ready = (props.value.trim().length > 0 || images.length > 0) && !props.busy;
+  const trimmed = props.value.trim();
+  const hasContent = trimmed.length > 0 || images.length > 0;
+  const ready = hasContent && !props.busy;
+  // Steering is text-only (an image-only draft mid-stream can't steer, so the
+  // button stays STOP and keeps the attachment). Typing while busy flips the
+  // button to STEER; `submit()` routes it.
+  const canSteer = props.busy && trimmed.length > 0 && Boolean(props.onSteer);
 
   const sendBtn = (extraClass = '') => (
     <button
       ref={sendRef}
       type="button"
-      className={`send${ready ? ' ready' : ''}${props.busy ? ' streaming' : ''} ${extraClass}`}
-      aria-label={props.busy ? 'Stop' : 'Send'}
-      onClick={() => (props.busy ? props.onStop?.() : submit())}
+      className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${props.busy && !canSteer ? ' streaming' : ''} ${extraClass}`}
+      aria-label={canSteer ? 'Steer the current turn' : props.busy ? 'Stop generating' : 'Send'}
+      title={canSteer ? 'Steer the current turn' : props.busy ? 'Stop generating' : 'Send'}
+      onClick={submit}
     >
       <ArrowUp className="ic-send" />
+      <svg className="ic-steer" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <polyline points="15 14 20 9 15 4" />
+        <path d="M4 20v-7a4 4 0 0 1 4-4h12" />
+      </svg>
       <StopSquare className="ic-stop" />
     </button>
   );
 
   return (
     <>
-      {mobile && props.modelChip ? <div className="dock-meta">{props.modelChip}</div> : null}
+      {mobile && (props.modelChip || props.busy) ? (
+        <div className="dock-meta">
+          {props.modelChip}
+          {props.busy ? <span className="steer-cue">Steer the current turn ↪</span> : null}
+        </div>
+      ) : null}
       {popOpen ? (
         <div className="pop show" role="listbox">
           <div className="pop-h">Commands of the house</div>
@@ -221,7 +242,7 @@ export function Composer(props: ComposerProps) {
           ref={taRef}
           rows={1}
           value={props.value}
-          placeholder="Speak, friend…"
+          placeholder={props.busy ? 'Steer the current turn…' : 'Speak, friend…'}
           aria-label="Message Elrond"
           onChange={(e) => {
             setPopDismissed(false);
@@ -260,10 +281,14 @@ export function Composer(props: ComposerProps) {
         {!mobile ? (
           <div className="composer-row">
             {props.modelChip}
-            {props.hint ?? (
-              <span className="hint">
-                <b>/</b> commands · <b>shift+enter</b> new line
-              </span>
+            {props.busy ? (
+              <span className="hint steer-cue">Steer the current turn ↪</span>
+            ) : (
+              props.hint ?? (
+                <span className="hint">
+                  <b>/</b> commands · <b>shift+enter</b> new line
+                </span>
+              )
             )}
             {sendBtn()}
           </div>
