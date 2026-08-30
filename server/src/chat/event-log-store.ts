@@ -71,6 +71,13 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
 // live turn.
 const writeChains = new Map<string, Promise<void>>();
 
+/** Resolves once every queued append for `key` has hit disk — compaction
+ *  flushes its marker before rotating so the fresh session's log restore
+ *  can't race the append chain and miss it. */
+export function flushEventLog(key: string): Promise<void> {
+  return writeChains.get(key) ?? Promise.resolve();
+}
+
 export function appendEventLog(key: string, persisted: PersistedEvent): void {
   const path = logPath(key);
   const line = JSON.stringify(persisted) + '\n';
