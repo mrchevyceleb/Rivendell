@@ -1,0 +1,192 @@
+// useGrokCall — a live xAI realtime voice call with a Rivendell agent.
+// Mic (16 kHz worklet) → /ws/voice → Grok; Grok's 24 kHz PCM deltas → the
+// playback queue. iPhone-call semantics: barge-in, server VAD, mid-call
+// voice swap, duration clock, transcript.
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CallPlayback, base64ToInt16Array, createMicProcessorUrl, int16ArrayToBase64 } from './audio';
+
+export type CallState = 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'ended' | 'error';
+export type VoiceId = 'ara' | 'eve' | 'leo' | 'rex' | 'sal' | 'atlas' | 'aurora' | 'luna' | 'orion' | 'carina';
+export const GROK_VOICES: { id: VoiceId; label: string }[] = [
+  { id: 'ara', label: 'Ara' },
+  { id: 'eve', label: 'Eve' },
+  { id: 'leo', label: 'Leo' },
+  { id: 'rex', label: 'Rex' },
+  { id: 'sal', label: 'Sal' },
+  { id: 'atlas', label: 'Atlas' },
+  { id: 'aurora', label: 'Aurora' },
+  { id: 'luna', label: 'Luna' },
+  { id: 'orion', label: 'Orion' },
+  { id: 'carina', label: 'Carina' },
+];
+
+export type CallTurn = { role: 'user' | 'assistant'; text: string };
+
+export function useGrokCall() {
+  const [state, setState] = useState<CallState>('idle');
+  const [turns, setTurns] = useState<CallTurn[]>([]);
+  const [liveUser, setLiveUser] = useState('');
+  const [durationSec, setDurationSec] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [level, setLevel] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const playbackRef = useRef<CallPlayback | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const workletRef = useRef<AudioWorkletNode | null>(null);
+  const mutedRef = useRef(false);
+  const levelRaf = useRef(0);
+  const clockRef = useRef<number | null>(null);
+  // Cancellation token: bumped on teardown so late async steps (WS open,
+  // mic grant, resume) can never resurrect resources after a quick hangup.
+  const genRef = useRef(0);
+
+  const teardown = useCallback(() => {
+    if (clockRef.current) { window.clearInterval(clockRef.current); clockRef.current = null; }
+    cancelAnimationFrame(levelRaf.current);
+    try { workletRef.current?.disconnect(); } catch { /* gone */ }
+    workletRef.current = null;
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    void ctxRef.current?.close().catch(() => {});
+    ctxRef.current = null;
+    void playbackRef.current?.close();
+    playbackRef.current = null;
+    try { wsRef.current?.close(); } catch { /* gone */ }
+    wsRef.current = null;
+  }, []);
+
+  useEffect(() => teardown, [teardown]);
+
+  const start = useCallback(async (agentId: string, voice: string) => {
+    genRef.current += 1;
+    const gen = genRef.current;
+    const alive = () => gen === genRef.current;
+    setError(null);
+    setTurns([]);
+    setLiveUser('');
+    setDurationSec(0);
+    setState('connecting');
+
+    // mic + 16 kHz capture context
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      setError('microphone unavailable');
+      setState('error');
+      return;
+    }
+    if (!alive()) { stream.getTracks().forEach((t) => t.stop()); return; }
+    streamRef.current = stream;
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    ctxRef.current = ctx;
+    if (ctx.state === 'suspended') await ctx.resume();
+    if (!alive()) { void ctx.close(); stream.getTracks().forEach((t) => t.stop()); return; }
+    const processorUrl = createMicProcessorUrl();
+    await ctx.audioWorklet.addModule(processorUrl);
+    URL.revokeObjectURL(processorUrl);
+    if (!alive()) { void ctx.close(); stream.getTracks().forEach((t) => t.stop()); return; }
+
+    const playback = new CallPlayback();
+    playbackRef.current = playback;
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws/voice`);
+    wsRef.current = ws;
+
+    ws.onopen = () => { if (alive()) ws.send(JSON.stringify({ type: 'start', agentId, voice })); };
+    ws.onmessage = (ev) => {
+      if (!alive()) return;
+      let msg: Record<string, unknown>;
+      try { msg = JSON.parse(String(ev.data)); } catch { return; }
+      if (msg.type === 'state') {
+        const s = String(msg.state);
+        setState(s === 'working' ? 'thinking' : (s as CallState));
+        if (s === 'listening') playback.armComplete();
+        return;
+      }
+      if (msg.type === 'audio') {
+        void playback.play(base64ToInt16Array(String(msg.b64 ?? '')));
+        return;
+      }
+      if (msg.type === 'transcript') {
+        const role = msg.role === 'user' ? 'user' : 'assistant';
+        const text = String(msg.text ?? '');
+        if (!text.trim()) return;
+        if (role === 'user') { setLiveUser(text); return; }
+        setLiveUser('');
+        setTurns((prev) => [...prev, { role, text }]);
+        return;
+      }
+      if (msg.type === 'error') {
+        setError(String(msg.message ?? 'call error'));
+        setState('error');
+        return;
+      }
+      if (msg.type === 'interrupt') {
+        playbackRef.current?.clear(); // barge-in: drop queued TTS immediately
+        return;
+      }
+      if (msg.type === 'ended') {
+        setState('ended');
+        teardown(); // remote hang-up: release mic/timers right away
+        return;
+      }
+    };
+    ws.onclose = () => {
+      if (!alive()) return;
+      setState((s) => (s === 'ended' || s === 'error' ? s : 'ended'));
+      teardown();
+    };
+    ws.onerror = () => {
+      if (!alive()) return;
+      setError('connection failed');
+      setState('error');
+      teardown();
+    };
+
+    // mic worklet → ws (muted gates at the source)
+    const worklet = new AudioWorkletNode(ctx, 'riv-call-mic');
+    workletRef.current = worklet;
+    worklet.port.onmessage = ({ data }) => {
+      if (data?.pcmData && wsRef.current?.readyState === WebSocket.OPEN && !mutedRef.current) {
+        wsRef.current.send(JSON.stringify({ type: 'audio', b64: int16ArrayToBase64(new Int16Array(data.pcmData)) }));
+      }
+    };
+    ctx.createMediaStreamSource(stream).connect(worklet);
+
+    if (!alive()) return;
+    // duration clock + waveform level
+    clockRef.current = window.setInterval(() => setDurationSec((d) => d + 1), 1000);
+    const tick = () => {
+      if (!alive()) return;
+      setLevel(playbackRef.current?.level() ?? 0);
+      levelRaf.current = requestAnimationFrame(tick);
+    };
+    levelRaf.current = requestAnimationFrame(tick);
+
+    setState('connecting');
+  }, []);
+
+  const end = useCallback(() => {
+    wsRef.current?.send(JSON.stringify({ type: 'stop' }));
+    teardown();
+    setState('idle');
+  }, [teardown]);
+
+  const toggleMute = useCallback(() => {
+    setMuted((m) => { mutedRef.current = !m; return !m; });
+  }, []);
+
+  const setVoice = useCallback((voice: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'setVoice', voice }));
+  }, []);
+
+  return { state, turns, liveUser, durationSec, muted, level, error, start, end, toggleMute, setVoice };
+}
