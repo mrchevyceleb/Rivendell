@@ -1,0 +1,46 @@
+// Persona scope documents — each agent's "who I am / what I do" markdown.
+// Records (which agent owns which file) live in agents.ts; this module only
+// reads/writes the files with an mtime hot-reload cache.
+
+import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { STATE_DIR } from './config.ts';
+import { agentForChatId } from './agents.ts';
+
+export const PERSONAS_DIR = join(STATE_DIR, 'personas');
+
+const cache = new Map<string, { mtime: number; text: string }>();
+
+function readScopeFile(file: string): string {
+  const path = join(PERSONAS_DIR, file);
+  try {
+    const mtime = statSync(path).mtimeMs;
+    const hit = cache.get(path);
+    if (hit && hit.mtime === mtime) return hit.text;
+    const text = readFileSync(path, 'utf8').trim();
+    cache.set(path, { mtime, text });
+    return text;
+  } catch {
+    return '';
+  }
+}
+
+/** The agent's scope for a home-thread chatId ('' when no agent owns it). */
+export function personaPromptFor(chatId: string): string {
+  const agent = agentForChatId(chatId);
+  if (!agent) return '';
+  return readScopeFile(`${agent.id}.md`);
+}
+
+/** Scope text for an agent record's home (REST use). */
+export function personaScopeFor(home: string): string {
+  const agent = agentForChatId(home);
+  if (!agent) return '';
+  return readScopeFile(`${agent.id}.md`);
+}
+
+/** Write an agent's scope file (create/update path). */
+export function writeScopeFile(file: string, body: string): void {
+  mkdirSync(PERSONAS_DIR, { recursive: true });
+  writeFileSync(join(PERSONAS_DIR, file), body);
+}
