@@ -120,6 +120,16 @@ export function Edit(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Square pen (lucide square-pen) — the "fresh thread" affordance. */
+export function SquarePen(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+      <path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L13 14l-4 1 1-4z" />
+    </svg>
+  );
+}
+
 export function Play(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" {...props}>

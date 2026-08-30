@@ -19,11 +19,11 @@ export type ContextUsage = {
 const DEFAULT_WINDOW_TOKENS = 200_000;
 const LARGE_WINDOW_TOKENS = 1_000_000;
 const BANANA_WINDOW_TOKENS = 200_000; // banana default model context
-const GROK_WINDOW_TOKENS = 500_000; // Grok 4.5 context window
+const GROK_WINDOW_TOKENS = 500_000; // Grok 4.x context window
 
 // Pick the starting context window for a given CLI before we've seen any model
 // id. Codex uses the selected catalog entry; current Claude (Opus 4.6/4.7/4.8,
-// Sonnet 4.6) is 1M; GLM 5.2 is 1M; xAI/Grok is 500K; banana/OpenRouter defaults to 200K.
+// Sonnet 4.6) is 1M; GLM 5.3/5.2 is 1M; xAI/Grok is 500K; banana/OpenRouter defaults to 200K.
 function defaultWindowForCli(cli: CompanionId, model?: string): number {
   if (isCodexCli(cli)) return contextWindowForCodexModel(model);
   if (cli === 'banana' || cli === 'banana-local' || cli === 'banana-fireworks') return BANANA_WINDOW_TOKENS;
@@ -55,13 +55,13 @@ function shouldReadResultUsage(cli: CompanionId): boolean {
 
 // Map a model id to its real context window. Current Opus (4.6/4.7/4.8),
 // Sonnet 4.6, and Fable/Mythos 5 are all 1M; Haiku and older models are 200K;
-// GLM 5.2 is 1M on Z.ai's coding API; GLM 5.1 stays 200K.
+// GLM 5.3 / 5.2 are 1M on Z.ai's coding API; GLM 5.1 stays 200K.
 function windowForClaudeModel(model: string | undefined): number {
   if (!model) return LARGE_WINDOW_TOKENS;
   const m = model.toLowerCase();
   if (m.includes('[1m]') || m.includes('-1m')) return LARGE_WINDOW_TOKENS;
   if (m.includes('haiku')) return DEFAULT_WINDOW_TOKENS;
-  if (m.includes('glm-5.2')) return LARGE_WINDOW_TOKENS;
+  if (m.includes('glm-5.3') || m.includes('glm-5.2')) return LARGE_WINDOW_TOKENS;
   if (m.includes('glm')) return DEFAULT_WINDOW_TOKENS;
   // Any Grok id (grok-4.5, grok-4-5, future grok-*) is 500K on xAI.
   if (m.includes('grok')) return GROK_WINDOW_TOKENS;
@@ -80,6 +80,18 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
 
   if (ev.type === 'stream_event' && ev.event) {
     return reduce(blocks, ev.event, turnIdRef);
+  }
+
+  // Agent-to-agent delivery: a teammate's message landing in this thread.
+  if (ev.type === 'peer_message' && typeof ev.text === 'string') {
+    return [...blocks, {
+      kind: 'peer',
+      id: id(),
+      from: typeof ev.from === 'string' ? ev.from : 'Teammate',
+      fromRole: typeof ev.fromRole === 'string' ? ev.fromRole : undefined,
+      text: ev.text,
+      ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
+    }];
   }
 
   // Server-injected echo of the user's prompt — keeps the user's message in
@@ -614,6 +626,23 @@ export function useChat(opts: {
           pendingSendRef.current = false;
           compactingRef.current = false;
           setStatus('ready');
+        }
+        else if (msg.type === 'compacted') {
+          // Auto-compaction marker: the model's context rotated (juicy summary
+          // banked to RAG). The visible thread lives on — just draw the line.
+          setBlocks((prev) => {
+            const id = `compact-${msg.seq}`;
+            if (prev.some((b) => b.id === id)) return prev;
+            return [...prev, {
+              kind: 'compact',
+              id,
+              ts: msg.at ?? Date.now(),
+              words: msg.words ?? 0,
+              turns: msg.turns ?? 0,
+              count: msg.count ?? 1,
+              savedToRag: msg.savedToRag,
+            } as ChatBlock];
+          });
         }
         else if (msg.type === 'freshStarted') {
           setBlocks([]);

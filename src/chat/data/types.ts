@@ -64,6 +64,28 @@ export type ChatImagePreview = {
 export type ChatBlock =
   | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number }
   | {
+      /** Agent-to-agent delivery (team bus): a teammate's message arriving in
+       *  this thread — rendered with the SENDER's identity, not as a user turn. */
+      kind: 'peer';
+      id: string;
+      from: string;
+      fromRole?: string;
+      text: string;
+      ts: number;
+    }
+  | {
+      /** Auto-compaction marker — the thread's model context rotated with a
+       *  juicy durable summary saved to the RAG vault. The visible history
+       * above/below is untouched (forever-thread). */
+      kind: 'compact';
+      id: string;
+      ts: number;
+      words: number;
+      turns: number;
+      count: number;
+      savedToRag?: boolean;
+    }
+  | {
       kind: 'text';
       id: string;
       text: string;

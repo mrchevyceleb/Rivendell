@@ -7,7 +7,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CommandEntry } from '../../data/types';
-import { ArrowUp, Plus, StopSquare } from './icons';
+import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
 
 export type SendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 type PendingImage = { id: string; mediaType: string; base64: string; previewUrl: string };
@@ -19,6 +19,8 @@ export type ComposerProps = {
   onSend: (text: string, images?: SendImage[]) => void;
   onStop?: () => void;
   onSteer?: (text: string, images?: SendImage[]) => void;
+  /** Wipe the conversation and start a fresh thread (desktop row button). */
+  onFresh?: () => void;
   busy: boolean;
   commands?: CommandEntry[];
   commandPrefix?: string;
@@ -30,6 +32,17 @@ export type ComposerProps = {
   acceptImages?: boolean;
   /** Parent (mobile) can trigger the file picker by calling this ref. */
   openFileInputRef?: React.MutableRefObject<() => void>;
+  /** Grok shell: leading slot rendered inside the pill, before the textarea
+      (the + attach button). Desktop only — mobile has its own attach. */
+  leadingSlot?: React.ReactNode;
+  /** Rotating placeholder strings (grok.com style). Falls back to the static
+      'Speak, friend…' when omitted. */
+  placeholders?: string[];
+  /** Fixed placeholder (Grok Bot: "Message {agent}"). Wins over placeholders. */
+  placeholder?: string;
+  /** Grok Bot shell: rendered instead of the send disc when the composer is
+      empty and idle (the white mic disc). Typing flips it back to send. */
+  idleAction?: React.ReactNode;
   onMellon?: (sendRect: DOMRect) => void;
 };
 
@@ -59,6 +72,15 @@ export function Composer(props: ComposerProps) {
   const [popSel, setPopSel] = useState(0);
   const [popDismissed, setPopDismissed] = useState(false);
   const [images, setImages] = useState<PendingImage[]>([]);
+  const [phIdx, setPhIdx] = useState(0);
+
+  // grok.com rotates the empty-composer placeholder every few seconds.
+  const phrases = props.placeholders;
+  useEffect(() => {
+    if (!phrases || phrases.length < 2) return;
+    const iv = window.setInterval(() => setPhIdx((i) => (i + 1) % phrases.length), 6000);
+    return () => window.clearInterval(iv);
+  }, [phrases]);
 
   const matches = useMemo(() => {
     const m = /^\/([a-z]*)$/.exec(props.value);
@@ -204,6 +226,9 @@ export function Composer(props: ComposerProps) {
     </button>
   );
 
+  const trailingBtn = (extraClass = '') =>
+    !ready && !props.busy && props.idleAction ? props.idleAction : sendBtn(extraClass);
+
   return (
     <>
       {mobile && (props.modelChip || props.busy) ? (
@@ -225,7 +250,7 @@ export function Composer(props: ComposerProps) {
       ) : null}
       {props.attachMenu}
       <div className="composer">
-        {mobile ? props.attachButton : null}
+        {mobile ? props.attachButton : props.leadingSlot ?? null}
         {images.length > 0 ? (
           <div className="attach-tray">
             {images.map((img) => (
@@ -242,7 +267,7 @@ export function Composer(props: ComposerProps) {
           ref={taRef}
           rows={1}
           value={props.value}
-          placeholder={props.busy ? 'Steer the current turn…' : 'Speak, friend…'}
+          placeholder={props.busy ? 'Steer the current turn…' : props.placeholder ?? phrases?.[phIdx] ?? 'Speak, friend…'}
           aria-label="Message Elrond"
           onChange={(e) => {
             setPopDismissed(false);
@@ -280,6 +305,18 @@ export function Composer(props: ComposerProps) {
         />
         {!mobile ? (
           <div className="composer-row">
+            {props.onFresh ? (
+              <button
+                type="button"
+                className="freshbtn"
+                title="Start a fresh thread"
+                aria-label="Start a fresh thread"
+                onClick={props.onFresh}
+              >
+                <SquarePen />
+                fresh
+              </button>
+            ) : null}
             {props.modelChip}
             {props.busy ? (
               <span className="hint steer-cue">Steer the current turn ↪</span>
@@ -290,10 +327,10 @@ export function Composer(props: ComposerProps) {
                 </span>
               )
             )}
-            {sendBtn()}
+            {trailingBtn()}
           </div>
         ) : (
-          sendBtn()
+          trailingBtn()
         )}
       </div>
       {acceptImages ? (

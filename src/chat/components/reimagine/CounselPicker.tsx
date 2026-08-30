@@ -86,23 +86,6 @@ export function ModelChip({
   );
 }
 
-// ── companion sidebar footer (desktop) — §4.1.6 ───────────────────────────
-export function CompanionFooter({ picker, onClick }: { picker: CompanionPicker; onClick: () => void }) {
-  const { ring, name, short, word, effort } = counselChipInfo(picker);
-  return (
-    <button type="button" className="comp on" onClick={onClick} aria-label="Choose companion and model">
-      <span className="ring">{ring}</span>
-      <span>
-        <span className="nm">{name}</span>
-        <br />
-        <span className="sb">
-          {short} · {word} {effort}
-        </span>
-      </span>
-    </button>
-  );
-}
-
 // ── effort pills for a lane ────────────────────────────────────────────────
 function EffortPills({
   options,
@@ -305,10 +288,10 @@ export function CounselPopover({
       if (e.key === 'Escape') onClose();
     };
     const onDown = (e: MouseEvent) => {
-      // Close on outside click, but ignore clicks on the chip / companion footer
-      // that own this popover (they toggle it themselves).
+      // Close on outside click, but ignore clicks on the chip that owns this
+      // popover (it toggles the popover itself).
       const t = e.target as HTMLElement | null;
-      if (t?.closest('.modelpop') || t?.closest('.model-chip') || t?.closest('.comp')) return;
+      if (t?.closest('.modelpop') || t?.closest('.model-chip')) return;
       onClose();
     };
     document.addEventListener('keydown', onKey);

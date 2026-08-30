@@ -1,8 +1,9 @@
 // Shared state + behavior for the reimagined chat shells (desktop Conversation
-// + mobile Mobile). Owns theme, sticky-scroll + jump pill, spark bursts, the
-// composer draft, the Hall/Council/Forge(/Files) room switch, chronicle + slash
-// commands, and the wiring between the Composer and useChat. Both screens render
-// against the same hook so behavior is identical across breakpoints.
+// + mobile Mobile). Owns sticky-scroll + jump pill, spark bursts, the composer
+// draft, the Hall/Council/Forge room switch, chronicle + slash commands, the
+// fresh-thread action, and the wiring between the Composer and useChat. Both
+// screens render against the same hook so behavior is identical across
+// breakpoints. (No theme here — the Studio top bar owns the one real toggle.)
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CompanionPicker } from '../../hooks/useCompanionPicker';
@@ -10,14 +11,13 @@ import type { ChatBlock, CommandEntry, Repo } from '../../data/types';
 import type { SendImage } from './Composer';
 import type { ChronicleEvent } from '../../data/mock';
 import { useChat } from '../../hooks/useChat';
-import { useTheme } from '../../hooks/useTheme';
 import { useStickyScroll } from '../../hooks/useStickyScroll';
 import { useChronicle } from '../../hooks/useChronicle';
 import { useCommands } from '../../hooks/useCommands';
 import { useSparks } from './useSparks';
 
 export type ChatApi = ReturnType<typeof useChat>;
-export type RoomId = 'hall' | 'council' | 'forge' | 'files';
+export type RoomId = 'hall' | 'council' | 'forge';
 export type ShellState = ReturnType<typeof useChatShell>;
 
 // Props for the presentational shells (Conversation / Mobile). The shell STATE
@@ -37,7 +37,6 @@ export type ShellProps = {
 };
 
 export function useChatShell({ chat, picker }: ShellProps) {
-  const { theme, toggle } = useTheme();
   const sticky = useStickyScroll();
   const sparks = useSparks();
   const [room, setRoom] = useState<RoomId>('hall');
@@ -87,13 +86,8 @@ export function useChatShell({ chat, picker }: ShellProps) {
     setRoom('hall');
     setValue(`resume the errand: ${e.title}`);
   };
-  const pickFile = (path: string) => {
-    setRoom('hall');
-    setValue((v) => `${v.replace(/\s+$/, '')} @${path} `.trimStart());
-  };
 
   return {
-    theme, toggle,
     sticky, sparks,
     room, setRoom,
     value, setValue,
@@ -101,7 +95,8 @@ export function useChatShell({ chat, picker }: ShellProps) {
     commands,
     busy,
     send, steer, stop,
-    pickChronicle, pickFile,
+    fresh: chat.freshStart,
+    pickChronicle,
     blocks: chat.blocks as ChatBlock[],
     status: chat.status,
     error: chat.error,

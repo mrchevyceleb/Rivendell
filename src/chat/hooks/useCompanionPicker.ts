@@ -34,7 +34,7 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'banana-fireworks', cli: 'banana-fireworks', label: 'Fireworks' },
   { id: 'banana-local', cli: 'banana-local', label: 'Local · LM Studio' },
   { id: 'zai', cli: 'zai', label: 'Z.ai · GLM' },
-  { id: 'xai', cli: 'xai', label: 'xAI · Grok 4.5' },
+  { id: 'xai', cli: 'xai', label: 'xAI · Grok 4.6' },
 ];
 
 // Login Rivendell can pin a Claude/Codex lane to. Personal Claude/Codex are
@@ -51,8 +51,8 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'assistant':      return `Elrond on Claude Code, signed in as ${who}.`;
     case 'claude':         return `Claude Code, signed in as ${who}.`;
     case 'codex':           return `Codex, signed in as ${who}.`;
-    case 'zai':              return 'GLM 5.2 via your Z.ai coding plan (no Claude or Codex login).';
-    case 'xai':              return 'Grok 4.5 via your xAI coding plan (no Claude or Codex login).';
+    case 'zai':              return 'GLM 5.3 via your Z.ai coding plan (no Claude or Codex login).';
+    case 'xai':              return 'Grok 4.6 via your xAI coding plan (no Claude or Codex login).';
     case 'banana':           return 'OpenRouter, billed to your OpenRouter API key (no Claude or Codex login).';
     case 'banana-fireworks': return 'Fireworks, billed to your Fireworks API key (no Claude or Codex login).';
     case 'banana-local':     return 'A local model on Moria via LM Studio. No account, no cloud cost.';
@@ -61,22 +61,28 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
 }
 
 // Z.ai coding-plan models (Anthropic-compatible, run through the claude CLI).
-// GLM 5.2's id MUST carry the `[1m]` suffix to get its 1M context window; bare
-// `glm-5.2` serves the 200K variant and compacts far too early.
-export const DEFAULT_ZAI_MODEL = 'glm-5.2[1m]';
+// GLM 5.3 / 5.2 ids MUST carry the `[1m]` suffix to get the 1M context window;
+// the bare ids serve the 200K variant and compact far too early.
+export const DEFAULT_ZAI_MODEL = 'glm-5.3[1m]';
 export const DEFAULT_ZAI_EFFORT = 'high';
 export const ZAI_MODELS: { id: string; label: string }[] = [
-  { id: DEFAULT_ZAI_MODEL, label: 'GLM 5.2 · 1M' },
+  { id: DEFAULT_ZAI_MODEL, label: 'GLM 5.3 · 1M' },
+  { id: 'glm-5.3-flash[1m]', label: 'GLM 5.3 Flash · 1M' },
+  { id: 'glm-5.2[1m]', label: 'GLM 5.2 · 1M' },
   { id: 'glm-5.1', label: 'GLM 5.1 · 200K' },
 ];
-// GLM-5.2's two real thinking-effort levels. Z.ai recommends Max for coding.
+// GLM's two real thinking-effort levels. Z.ai recommends Max for coding.
 // (Claude Code maps low/medium/high -> GLM "high", xhigh/max -> GLM "max", so
 // exposing more than these two would just be duplicate labels for the same two.)
 export const ZAI_EFFORTS = ['high', 'max'];
 
 export function normalizeZaiModel(model: string): string {
-  // Migrate the legacy bare `glm-5.2` to the 1M id.
-  const normalized = model === 'glm-5.2' ? DEFAULT_ZAI_MODEL : model;
+  // Canonicalize the 1M variants; leave 5.2 selectable after the 5.3 default bump.
+  const normalized =
+    model === 'glm-5.3' ? DEFAULT_ZAI_MODEL
+    : model === 'glm-5.3-flash' ? 'glm-5.3-flash[1m]'
+    : model === 'glm-5.2' ? 'glm-5.2[1m]'
+    : model;
   return ZAI_MODELS.some((entry) => entry.id === normalized) ? normalized : DEFAULT_ZAI_MODEL;
 }
 
@@ -91,7 +97,13 @@ function readLS(key: string, fallback: string): string {
 
 export function readStoredZaiModel(): string {
   if (typeof window === 'undefined') return DEFAULT_ZAI_MODEL;
-  const raw = localStorage.getItem('rivendell:zai-model') || DEFAULT_ZAI_MODEL;
+  // One-time bump: everyone who was on the old default (5.2) moves to 5.3.
+  // 5.2 stays in the picker if someone re-selects it after this migration.
+  let raw = localStorage.getItem('rivendell:zai-model') || DEFAULT_ZAI_MODEL;
+  if (raw === 'glm-5.2' || raw === 'glm-5.2[1m]') {
+    raw = DEFAULT_ZAI_MODEL;
+    localStorage.setItem('rivendell:zai-model', raw);
+  }
   const model = normalizeZaiModel(raw);
   if (model !== raw) localStorage.setItem('rivendell:zai-model', model);
   return model;
@@ -106,13 +118,14 @@ export function readStoredZaiEffort(): string {
 }
 
 // xAI coding-plan models (Anthropic-compatible, run through the claude CLI
-// redirected to https://api.x.ai). Grok 4.5 is the current coding-plan model.
-export const DEFAULT_XAI_MODEL = 'grok-4.5';
+// redirected to https://api.x.ai). Grok 4.6 is the current coding-plan model.
+export const DEFAULT_XAI_MODEL = 'grok-4.6';
 // Grok's top thinking budget. Rivendell defaults the whole picker to xAI Grok
-// 4.5 at max thinking, so this is the out-of-the-box reasoning level too.
+// 4.6 at max thinking, so this is the out-of-the-box reasoning level too.
 export const DEFAULT_XAI_EFFORT = 'max';
 export const XAI_MODELS: { id: string; label: string }[] = [
-  { id: DEFAULT_XAI_MODEL, label: 'Grok 4.5' },
+  { id: 'grok-4.6', label: 'Grok 4.6' },
+  { id: 'grok-4.5', label: 'Grok 4.5' },
 ];
 // xAI's Anthropic endpoint maps Claude Code's effort onto Grok's thinking
 // budget. Exposing the full range would mostly duplicate the same behavior;
@@ -129,7 +142,13 @@ export function normalizeXaiEffort(effort: string): string {
 
 export function readStoredXaiModel(): string {
   if (typeof window === 'undefined') return DEFAULT_XAI_MODEL;
-  const raw = localStorage.getItem('rivendell:xai-model') || DEFAULT_XAI_MODEL;
+  // One-time bump: everyone who was on the old default (4.5) moves to 4.6.
+  // 4.5 stays in the picker if someone re-selects it after this migration.
+  let raw = localStorage.getItem('rivendell:xai-model') || DEFAULT_XAI_MODEL;
+  if (raw === 'grok-4.5') {
+    raw = DEFAULT_XAI_MODEL;
+    localStorage.setItem('rivendell:xai-model', raw);
+  }
   const model = normalizeXaiModel(raw);
   if (model !== raw) localStorage.setItem('rivendell:xai-model', model);
   return model;
@@ -147,7 +166,7 @@ export type CompanionPicker = ReturnType<typeof useCompanionPicker>;
 
 export function useCompanionPicker(storageKey: string) {
   const [companion, setCompanionState] = useState<string>(() => {
-    // Default lane is xAI Grok 4.5 (see DEFAULT_XAI_* — max thinking). Also
+    // Default lane is xAI Grok 4.6 (see DEFAULT_XAI_* — max thinking). Also
     // migrate stale lanes removed from the picker (assistant / claude-personal /
     // codex-personal / any personal-* lane) to that default so a stored
     // selection doesn't silently fall through to the first lane on every load.
