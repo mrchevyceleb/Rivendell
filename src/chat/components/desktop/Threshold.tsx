@@ -5,7 +5,7 @@
 // IDE). Narrow detection is container-width based (a Studio pane can be narrow
 // even on a wide viewport), falling back to the viewport on first paint.
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Conversation } from './Conversation';
 import { Mobile } from '../mobile/Mobile';
 import { useChatShell, type ShellProps, type ShellState } from '../reimagine/useChatShell';
@@ -43,15 +43,6 @@ export function Threshold(props: ShellProps) {
     measure(el.clientWidth);
     return () => ro.disconnect();
   }, []);
-
-  // Desktop is Hall-only (no room switcher), so normalize the SHARED room state
-  // when we're wide. Without this, selecting Council/Forge/Files on mobile then
-  // widening strands `s.room` on a hidden room: the desktop feed would be fine
-  // but narrowing again would snap back to that stale room, and anything keyed
-  // to `s.room` would read the wrong context.
-  useEffect(() => {
-    if (!narrow && s.room !== 'hall') s.setRoom('hall');
-  }, [narrow, s.room, s.setRoom]);
 
   const view: ViewProps = { s, picker: props.picker, repo: props.repo, agent: props.agent };
   return (

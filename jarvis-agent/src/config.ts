@@ -14,7 +14,7 @@ export const CONFIG = {
   /** Rivendell Hall chat bridge */
   rivendellWsUrl: process.env.RIVENDELL_WS_URL || 'ws://127.0.0.1:8091/api/ws',
   rivendellRepo: process.env.RIVENDELL_REPO || '/home/mrchevyceleb/ASSISTANT-HUB',
-  /** Engine defaults: Grok 4.5 at max effort via Rivendell's xai engine.
+  /** Engine defaults: Grok 4.6 at max effort via Rivendell's xai engine.
    *  Model stays undefined so the runner's engine config (engines.json /
    *  RIVENDELL_XAI_MODEL) supplies the baked-in Grok id. */
   defaultCli: process.env.JARVIS_DEFAULT_CLI || 'xai',

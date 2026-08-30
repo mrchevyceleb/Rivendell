@@ -96,7 +96,7 @@ const companionTitle: Record<CompanionId, string> = {
   'banana-local': 'local model on the Spark',
   'banana-fireworks': 'Fireworks emissary',
   zai: 'GLM via Z.ai coding plan',
-  xai: 'Grok 4.5 via xAI coding plan',
+  xai: 'Grok 4.6 via xAI coding plan',
 };
 
 const companionSub: Record<CompanionId, string> = {
@@ -106,8 +106,8 @@ const companionSub: Record<CompanionId, string> = {
   banana: 'OpenRouter via Banana Code',
   'banana-local': 'local LM Studio model, direct',
   'banana-fireworks': 'Fireworks models, direct',
-  zai: 'GLM 5.2 1M / 5.1 via Z.ai',
-  xai: 'Grok 4.5 via xAI, direct',
+  zai: 'GLM 5.3 1M / 5.2 / 5.1 via Z.ai',
+  xai: 'Grok 4.6 via xAI, direct',
 };
 
 // Banana is an engine multiplexer: the picked engine selects the wire cli
@@ -1273,6 +1273,7 @@ function UserImageStrip({ images, imageCount }: { images?: ChatImagePreview[]; i
 }
 
 function ChatBlockView({ block, companion }: { block: ChatBlock; companion: CompanionId }) {
+  if (block.kind === 'compact') return null;
   if (block.kind === 'user') {
     return (
       <article className="chat-message user-message">

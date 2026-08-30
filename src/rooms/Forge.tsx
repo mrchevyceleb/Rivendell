@@ -114,8 +114,8 @@ const schedulePresets = [
 //   assistant        → KG Claude (kim account, claude CLI)
 //   codex            → KG Codex (kim account, codex CLI)
 //   banana-local     → LM Studio local model (HTTP completion, on-box)
-//   zai              → GLM 5.2 via Z.ai (claude CLI redirected to z.ai)
-//   xai              → Grok 4.5 via xAI (claude CLI redirected to xAI + proxy)
+//   zai              → GLM 5.3 via Z.ai (claude CLI redirected to z.ai)
+//   xai              → Grok 4.6 via xAI (claude CLI redirected to xAI + proxy)
 //   banana-fireworks → Fireworks models (HTTP completion, FIREWORKS_API_KEY)
 // Personal Claude (engine 'claude') was removed; legacy jobs with that engine
 // are migrated to KG Claude (assistant) on display and edit.
@@ -123,8 +123,8 @@ const CRON_ENGINES: { id: string; label: string; hint: string }[] = [
   { id: 'assistant', label: 'KG Claude', hint: 'Kim account · agentic CLI with tools' },
   { id: 'codex', label: 'KG Codex', hint: 'Kim account · codex CLI with tools' },
   { id: 'banana-local', label: 'LM Studio · Local', hint: 'On-box local model · plain completion' },
-  { id: 'zai', label: 'GLM 5.2', hint: 'Z.ai GLM · agentic CLI with tools' },
-  { id: 'xai', label: 'Grok 4.5', hint: 'xAI Grok · agentic CLI with tools' },
+  { id: 'zai', label: 'GLM 5.3', hint: 'Z.ai GLM · agentic CLI with tools' },
+  { id: 'xai', label: 'Grok 4.6', hint: 'xAI Grok · agentic CLI with tools' },
   { id: 'banana-fireworks', label: 'Fireworks', hint: 'Fireworks models · HTTP completion' },
 ];
 const KNOWN_ENGINES = new Set(CRON_ENGINES.map((e) => e.id));

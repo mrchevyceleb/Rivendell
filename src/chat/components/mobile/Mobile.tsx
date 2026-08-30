@@ -1,9 +1,13 @@
 // Reimagined MOBILE chat shell — §5 (the flagship). Header + chronicle ribbon
-// + Hall/Council/Forge/Files segmented room tabs + feed + composer dock, with
-// Chronicle + Counsel bottom sheets, an attach menu, a toast, and tap-toggle
-// timestamps/actions. The phone preview frame from the prototype is presentation
-// only and is NOT ported — this goes full-bleed on real mobile. Rendered by
-// Threshold under the mobile breakpoint.
+// + feed + composer dock, with Chronicle + Counsel bottom sheets, an attach
+// menu, a toast, and tap-toggle timestamps/actions. The phone preview frame
+// from the prototype is presentation only and is NOT ported — this goes
+// full-bleed on real mobile. Rendered by Threshold under the mobile
+// breakpoint. (No Hall/Council/Forge segmented tabs — they duplicated the
+// Studio top bar's tabs + ⋯ menu and ate vertical space; the ⋯ menu's Council
+// / Forge entries open the real Studio tabs. No Files room — the Studio
+// sidebar owns file browsing; no theme button — the Studio top bar owns the
+// toggle.)
 
 import { useEffect, useRef, useState } from 'react';
 import type { ShellViewProps } from '../reimagine/useChatShell';
@@ -11,13 +15,10 @@ import { ChatThread } from '../reimagine/blocks';
 import { Composer, AttachButton } from '../reimagine/Composer';
 import { CounselSheet, ModelChip } from '../reimagine/CounselPicker';
 import {
-  CouncilBoard,
   ChronicleRows,
-  ForgeJobs,
-  HubTree,
   RibbonTicker,
 } from '../reimagine/RoomViews';
-import { Book, Moon, StarSigil, Sun, Camera, Edit, Folder } from '../reimagine/icons';
+import { Book, StarSigil, Camera, Edit, Folder, SquarePen } from '../reimagine/icons';
 
 type Sheet = 'none' | 'chronicle' | 'counsel';
 
@@ -27,7 +28,6 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const openFileInput = useRef<() => void>(() => {});
-  const inHall = s.room === 'hall';
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -91,10 +91,6 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
               <span className="pulse" style={{ width: 6, height: 6 }} /> Elrond attends · {repo?.branch ?? 'master'}
             </div>
           </div>
-          <button type="button" className="iconbtn themebtn" aria-label="Day or night" onClick={s.toggle}>
-            <Sun className="ic-sun" />
-            <Moon className="ic-moon" />
-          </button>
           <button type="button" className="iconbtn" aria-label="Open the Chronicle" onClick={() => setSheet('chronicle')}>
             <Book />
           </button>
@@ -102,25 +98,8 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
 
         <RibbonTicker events={s.chronicle} />
 
-        {/* room tabs */}
-        <nav className="rooms">
-          {(['hall', 'council', 'forge', 'files'] as const).map((r) => (
-            <button
-              key={r}
-              type="button"
-              className={`mtab${s.room === r ? ' on' : ''}`}
-              onClick={() => {
-                s.setRoom(r);
-                closeAll();
-              }}
-            >
-              {r === 'hall' ? 'Hall' : r === 'council' ? 'Council' : r === 'forge' ? 'Forge' : 'Files'}
-            </button>
-          ))}
-        </nav>
-
         {/* feed */}
-        <main className="feed" ref={s.sticky.scrollRef} onScroll={s.sticky.onScroll} style={{ display: inHall ? undefined : 'none' }}>
+        <main className="feed" ref={s.sticky.scrollRef} onScroll={s.sticky.onScroll}>
           <ChatThread
             blocks={s.blocks}
             status={s.status}
@@ -135,34 +114,18 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
           ) : null}
         </main>
 
-        <section className={`view${s.room === 'council' ? ' on' : ''}`}>
-          <p className="view-note">The task board of the house · tap a card to move it along its road</p>
-          <CouncilBoard stacked />
-        </section>
-        <section className={`view${s.room === 'forge' ? ' on' : ''}`}>
-          <p className="view-note">Errands that run while you sleep · outward steps wait for your blessing</p>
-          <ForgeJobs />
-        </section>
-        <section className={`view${s.room === 'files' ? ' on' : ''}`}>
-          <p className="view-note">The Hub · ASSISTANT-HUB · tap a file to bring it into the Hall</p>
-          <HubTree onPick={(p) => { s.pickFile(p); showToast('brought into the Hall'); }} />
-        </section>
-
         {/* jump pill */}
-        {inHall ? (
-          <button
-            type="button"
-            className={`jump${s.sticky.unread > 0 || (!s.sticky.pinned && s.busy) ? ' show' : ''}`}
-            onClick={s.sticky.jumpToBottom}
-          >
-            To the latest word
-            {s.sticky.unread > 0 ? <span className="cnt">{s.sticky.unread}</span> : null}
-          </button>
-        ) : null}
+        <button
+          type="button"
+          className={`jump${s.sticky.unread > 0 || (!s.sticky.pinned && s.busy) ? ' show' : ''}`}
+          onClick={s.sticky.jumpToBottom}
+        >
+          To the latest word
+          {s.sticky.unread > 0 ? <span className="cnt">{s.sticky.unread}</span> : null}
+        </button>
 
-        {/* composer dock (hall only) */}
-        {inHall ? (
-          <div className="dock">
+        {/* composer dock */}
+        <div className="dock">
             <Composer
               mobile
               value={s.value}
@@ -203,6 +166,18 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
                       onClick={() => {
                         setAttachOpen(false);
                         s.setRoom('hall');
+                        s.fresh();
+                        showToast('a fresh thread');
+                      }}
+                    >
+                      <SquarePen /> A fresh thread
+                    </button>
+                    <button
+                      type="button"
+                      className="arow"
+                      onClick={() => {
+                        setAttachOpen(false);
+                        s.setRoom('hall');
                         s.setValue('/weave ');
                       }}
                     >
@@ -215,7 +190,6 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
               onMellon={(rect) => s.sparks.burst(rect.left + rect.width / 2, rect.top + rect.height / 2)}
             />
           </div>
-        ) : null}
 
         {/* toast */}
         {toast ? <div className="toast show">{toast}</div> : null}

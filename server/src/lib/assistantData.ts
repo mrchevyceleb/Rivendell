@@ -56,7 +56,7 @@ export type RivendellCronJob = {
   aiModel?: CronAiModel;
   /** Full companion engine id (assistant/claude/codex/banana/banana-fireworks/banana-local/zai/xai). */
   engine?: string;
-  /** Specific model id for the engine (glm-5.2, claude-opus-4-8, gpt-5.5, an OpenRouter/LM Studio id). */
+  /** Specific model id for the engine (glm-5.3, claude-opus-4-8, gpt-5.5, an OpenRouter/LM Studio id). */
   modelId?: string;
   /** Model-specific Codex effort stored in action_config.reasoning_effort. */
   reasoningEffort?: string;

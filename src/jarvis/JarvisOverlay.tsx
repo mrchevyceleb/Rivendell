@@ -86,14 +86,14 @@ export function JarvisOverlay() {
           <button
             className={`jarvis-chip ${jarvis.preset === 'snappy' ? 'active' : ''}`}
             onClick={() => jarvis.setPreset('snappy')}
-            title="Grok 4.5, high effort - faster spoken turns"
+            title="Grok 4.6, high effort - faster spoken turns"
           >
             <Zap size={13} /> Swift
           </button>
           <button
             className={`jarvis-chip ${jarvis.preset === 'deep' ? 'active' : ''}`}
             onClick={() => jarvis.setPreset('deep')}
-            title="Grok 4.5, max effort - the default"
+            title="Grok 4.6, max effort - the default"
           >
             <BrainCircuit size={13} /> Max
           </button>

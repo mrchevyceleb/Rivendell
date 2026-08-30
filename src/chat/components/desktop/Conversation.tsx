@@ -1,8 +1,10 @@
-// Reimagined DESKTOP chat shell — §4. A 296px IDE sidebar (Files-first tabs,
-// new-errand, Chronicle pane, companion footer) + a main column with Hall /
-// Council / Forge room tabs, a chronicle ribbon ticker, a 760px feed, and the
-// composer dock. Rendered by ChatTab (the live mount) and switched to Mobile
-// under the mobile breakpoint by Threshold.
+// Reimagined DESKTOP chat shell — §4. A single main column with a chronicle
+// ribbon ticker, a 760px feed, and the composer dock. (The old 296px sidebar
+// — new-errand, Chronicle pane, hubs, companion footer — was removed: the
+// Studio top bar owns new-chat + theme, the Studio sidebar owns browsing, and
+// the composer's model chip owns companion switching.) Rendered by ChatTab
+// (the live mount) and switched to Mobile under the mobile breakpoint by
+// Threshold.
 
 import { useState } from 'react';
 import type { ShellViewProps } from '../reimagine/useChatShell';
@@ -10,19 +12,13 @@ import { ChatThread } from '../reimagine/blocks';
 import { Composer } from '../reimagine/Composer';
 import {
   CounselPopover,
-  CompanionFooter,
   ModelChip,
 } from '../reimagine/CounselPicker';
 import {
-  ChronicleRows,
-  HubTree,
-  HubsStrip,
   RibbonTicker,
 } from '../reimagine/RoomViews';
-import { Moon, StarSigil, Sun } from '../reimagine/icons';
 
 export function Conversation({ s, picker, repo }: ShellViewProps) {
-  const [pane, setPane] = useState<'files' | 'chron'>('files');
   const [counselOpen, setCounselOpen] = useState(false);
 
   return (
@@ -31,70 +27,6 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
         <Stars n={54} motes={7} />
       </div>
       <div className="shell">
-        {/* ── sidebar ── */}
-        <aside className="side">
-          <div className="side-head">
-            <button
-              type="button"
-              className="sigil"
-              aria-label="Rivendell sigil"
-              onClick={(e) => s.sparks.burst(e.clientX, e.clientY)}
-            >
-              <StarSigil style={{ width: 16, height: 16 }} />
-            </button>
-            <div>
-              <h1>Rivendell</h1>
-              <div className="sub">the last homely house</div>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className="new-errand"
-            onClick={() => {
-              s.setRoom('hall');
-              s.setValue('/errand ');
-            }}
-          >
-            <PlusSmall /> Begin a new errand
-          </button>
-
-          <div className="side-tabs">
-            <button type="button" className={`stab${pane === 'files' ? ' on' : ''}`} onClick={() => setPane('files')}>
-              Files
-            </button>
-            <button type="button" className={`stab${pane === 'chron' ? ' on' : ''}`} onClick={() => setPane('chron')}>
-              Chronicle
-            </button>
-          </div>
-
-          <div className="side-scroll">
-            <div className={`pane${pane === 'files' ? ' on' : ''}`}>
-              <div className="side-sec">
-                <span>The Hub · ASSISTANT-HUB</span>
-              </div>
-              <HubTree onPick={s.pickFile} />
-            </div>
-            <div className={`pane${pane === 'chron' ? ' on' : ''}`}>
-              <div className="side-sec">
-                <span>The Chronicle</span>
-              </div>
-              <ChronicleRows events={s.chronicle} onPick={s.pickChronicle} />
-              <div className="side-sec" style={{ marginTop: 8 }}>
-                <span>Hubs</span>
-              </div>
-              <HubsStrip />
-            </div>
-          </div>
-
-          <div className="side-foot">
-            <div className="side-sec" style={{ padding: '4px 10px 6px' }}>
-              <span>Companion</span>
-            </div>
-            <CompanionFooter picker={picker} onClick={() => setCounselOpen(true)} />
-          </div>
-        </aside>
-
         {/* ── main column ── */}
         <div className="main">
           <header className="top">
@@ -105,15 +37,6 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
             <div className="presence">
               <span className="pulse" style={{ width: 7, height: 7 }} /> Elrond attends
             </div>
-            <button
-              type="button"
-              className="themebtn"
-              aria-label="Day or night"
-              onClick={s.toggle}
-            >
-              <Sun className="ic-sun" style={{ width: 15, height: 15 }} />
-              <Moon className="ic-moon" style={{ width: 15, height: 15 }} />
-            </button>
           </header>
 
           <RibbonTicker events={s.chronicle} />
@@ -152,6 +75,7 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
                 onSend={s.send}
                 onStop={s.stop}
                 onSteer={s.steer}
+                onFresh={s.fresh}
                 busy={s.busy}
                 commands={s.commands}
                 modelChip={<ModelChip picker={picker} onClick={() => setCounselOpen((o) => !o)} />}
@@ -166,13 +90,6 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
   );
 }
 
-function PlusSmall() {
-  return (
-    <svg width={13} height={13} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  );
-}
 
 // Ambient starfield + gold motes (deterministic-enough random offsets).
 function Stars({ n, motes }: { n: number; motes: number }) {

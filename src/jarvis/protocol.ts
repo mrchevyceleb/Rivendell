@@ -36,7 +36,7 @@ export function decodeAgentMessage(payload: Uint8Array): JarvisAgentMessage | nu
 
 export type JarvisEngineSettings = { cli: string; model?: string; effort?: string };
 
-// Grok 4.5 via Rivendell's xai engine (model id comes from the server's engine
+// Grok 4.6 via Rivendell's xai engine (model id comes from the server's engine
 // config). "deep" (max effort) is the default per Matt; "snappy" trades some
 // reasoning depth for faster spoken turns.
 export const JARVIS_PRESETS: Record<'snappy' | 'deep', JarvisEngineSettings> = {
