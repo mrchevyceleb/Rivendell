@@ -14,7 +14,7 @@ export type Companion = {
 export const COMPANIONS: Companion[] = [
   { id: 'claude', name: 'Claude Code', sub: 'full-bodied · tools · 200k window' },
   { id: 'codex', name: 'Codex', sub: 'quick of foot · OpenAI' },
-  { id: 'xai', name: 'Grok 4.5', sub: 'xAI coding plan · direct' },
+  { id: 'xai', name: 'Grok 4.6', sub: 'xAI coding plan · direct' },
 ];
 
 // Used as a placeholder before /api/repos resolves, and for the mobile SETUP fallback.

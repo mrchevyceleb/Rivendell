@@ -1,0 +1,319 @@
+// GrokApp — the Grok Bot shell. Three panes, desktop-app anatomy:
+//
+//   ┌─ rail ────────┬─ center chat ──────────────┬─ info pane ─────┐
+//   │ mark     [+]  │  ○ Agent          ⚙  >>   │  Agent's desk   │
+//   │ Search         │                            │  Routines    [+]│
+//   │ agents …       │  bubbles + Thoughts pods   │  Session + meter│
+//   │ Plugins  Matt  │  [+ Message Agent … (◉)]  │                 │
+//   └────────────────┴────────────────────────────┴─────────────────┘
+//
+// The team is USER-CURATED (created/edited via the agent editor; seeded with
+// one Chief of Staff). Every agent = one persistent forever-thread with
+// auto-compaction. Rooms open in the center pane from Plugins; the classic
+// Studio IDE stays at /studio.
+
+import { useCallback, useEffect, useMemo, useState, type ComponentType } from 'react';
+import { Menu } from 'lucide-react';
+import { apiJson } from '../data/api';
+import { useJarvis } from '../jarvis/JarvisProvider';
+import { useIsMobile } from '../chat/hooks/useMediaQuery';
+import { useRepos } from '../chat/hooks/useRepos';
+import { useProxyViewer } from '../hooks/useProxyViewer';
+import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
+import type { CompanionId } from '../chat/data/types';
+import { BotRail } from './GrokSidebar';
+import { GrokChat } from './GrokChat';
+import { BotPanel, type ChatMeta } from './BotPanel';
+import { AgentEditor } from './AgentEditor';
+import { CallOverlay } from '../voice/CallOverlay';
+import { useAgents, reorderAgentIds, sameChatId, type Agent } from './agents';
+import { useChatHistory, type HistoryItem } from './history';
+
+import { Council } from '../rooms/Council';
+import { Dashboard } from '../rooms/Dashboard';
+import { Tidings } from '../rooms/Tidings';
+import { Calendar } from '../rooms/Calendar';
+import { Hearth } from '../rooms/Hearth';
+import { Library } from '../rooms/Library';
+import { Pins } from '../rooms/Pins';
+import { Reckoning } from '../rooms/Reckoning';
+import { Forge } from '../rooms/Forge';
+import { Weavings } from '../rooms/Weavings';
+import { Annals } from '../rooms/Annals';
+import { Scribe } from '../rooms/Scribe';
+
+const ROOMS: Record<string, ComponentType> = {
+  council: Council,
+  dashboard: Dashboard,
+  tidings: Tidings,
+  calendar: Calendar,
+  hearth: Hearth,
+  library: Library,
+  pins: Pins,
+  reckoning: Reckoning,
+  forge: Forge,
+  weavings: Weavings,
+  annals: Annals,
+  scribe: Scribe,
+};
+
+type View =
+  | { kind: 'chat'; chatId: string; cli?: CompanionId; lane?: string; repoPath?: string }
+  | { kind: 'room'; key: string };
+
+const VIEW_KEY = 'rivendell:bot-view';
+const PANE_KEY = 'rivendell:bot-pane';
+
+function readView(): View {
+  try {
+    const raw = localStorage.getItem(VIEW_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.kind === 'chat' && typeof parsed.chatId === 'string') return parsed;
+      if (parsed?.kind === 'room' && typeof parsed.key === 'string' && ROOMS[parsed.key]) return parsed;
+    }
+  } catch { /* fall through */ }
+  return { kind: 'chat', chatId: '' }; // resolved against the agent list below
+}
+
+export function GrokApp({ initialRoom }: { initialRoom?: string }) {
+  const jarvis = useJarvis();
+  const viewer = useProxyViewer();
+  const isMobile = useIsMobile();
+  const { repos } = useRepos();
+  const history = useChatHistory();
+  const { agents, reload: reloadAgents } = useAgents();
+
+  const [view, setView] = useState<View>(() => {
+    if (initialRoom && ROOMS[initialRoom]) return { kind: 'room', key: initialRoom };
+    return readView();
+  });
+  const [paneOpen, setPaneOpen] = useState(() => localStorage.getItem(PANE_KEY) !== 'false');
+  const [railCollapsed, setRailCollapsed] = useState(() => localStorage.getItem('rivendell:rail-collapsed') === 'true');
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [meta, setMeta] = useState<ChatMeta | null>(null);
+  const [theme, setTheme] = useState<'dark' | 'light'>(() =>
+    localStorage.getItem('rivendell:theme') === 'light' ? 'light' : 'dark',
+  );
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
+  const [callAgent, setCallAgent] = useState<Agent | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('rivendell:theme', theme);
+  }, [theme]);
+  useEffect(() => { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); }, [view]);
+  useEffect(() => { localStorage.setItem(PANE_KEY, String(paneOpen)); }, [paneOpen]);
+  useEffect(() => { localStorage.setItem('rivendell:rail-collapsed', String(railCollapsed)); }, [railCollapsed]);
+  // Esc also collapses the desktop rail (quick focus-the-chat shortcut).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !editorOpen && !callAgent) {
+        const tag = (document.activeElement?.tagName ?? '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || (document.activeElement as HTMLElement | null)?.isContentEditable) return;
+        setRailCollapsed(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editorOpen, callAgent]);
+  useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
+
+  // Land on the first agent (Chief of Staff) once the list loads, if the
+  // persisted view points at a thread that no longer exists.
+  useEffect(() => {
+    if (view.kind !== 'chat' || view.chatId || !agents.length) return;
+    setView({ kind: 'chat', chatId: agents[0].home, lane: agents[0].engine });
+  }, [view, agents]);
+
+  // Esc closes the mobile drawer; focus moves in on open and back on close.
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrawerOpen(false); };
+    window.addEventListener('keydown', onKey);
+    const prev = document.activeElement as HTMLElement | null;
+    document.querySelector<HTMLElement>('.bt-rail .bt-search-box input')?.focus();
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      prev?.focus?.();
+    };
+  }, [drawerOpen]);
+
+  const hubRepo = repos.find((r) => r.isAssistantHub) ?? repos[0];
+
+  const openAgent = useCallback((a: Agent) => {
+    setView({ kind: 'chat', chatId: a.home, lane: a.engine });
+    setDrawerOpen(false);
+  }, []);
+
+  const openChat = useCallback((item: HistoryItem) => {
+    // Reopen on the exact lane that wrote the log. The account rides in the
+    // chatId (`...__acct__kim`); useChat re-appends it from the picker's
+    // account, so strip it here. kim is the only remaining account.
+    const acct = /__acct__([a-z]+)$/i.exec(item.chatId)?.[1] ?? 'kim';
+    const baseChatId = item.chatId.replace(/__acct__[a-z]+$/i, '');
+    const cli = item.cli as CompanionId;
+    const lane = cli === 'claude' || cli === 'codex' ? `${cli}-${acct}` : item.cli;
+    setView({ kind: 'chat', chatId: baseChatId, cli, lane, repoPath: item.repo });
+    setDrawerOpen(false);
+  }, []);
+
+  const openRoom = useCallback((key: string) => {
+    setView({ kind: 'room', key });
+    setDrawerOpen(false);
+  }, []);
+
+  const goHome = useCallback(() => {
+    if (agents.length) setView({ kind: 'chat', chatId: agents[0].home, lane: agents[0].engine });
+    setDrawerOpen(false);
+  }, [agents]);
+
+  const openStudio = useCallback(() => { window.location.assign('/studio'); }, []);
+  const onMeta = useCallback((m: ChatMeta) => setMeta(m), []);
+
+  // Ctrl/Cmd+Shift+O opens the agent list's first thread (quick home).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'O' || e.key === 'o')) {
+        e.preventDefault();
+        goHome();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [goHome]);
+
+  const fileActions = useMemo<StudioFileActions>(() => ({
+    openFile: (path, name) => viewer.open({ source: 'doc', path, title: name }),
+    revealFolder: () => window.location.assign('/studio'),
+  }), [viewer]);
+
+  const activeChat = view.kind === 'chat' ? view : undefined;
+  const activeRoom = view.kind === 'room' ? view.key : undefined;
+  const RoomView = view.kind === 'room' ? ROOMS[view.key] : undefined;
+  const agent = activeChat ? agents.find((a) => sameChatId(activeChat.chatId, a.home)) : undefined;
+
+  const chatRepo = activeChat?.repoPath
+    ? (repos.find((r) => r.path === activeChat.repoPath) ?? hubRepo)
+    : hubRepo;
+
+  return (
+    <StudioFilesContext.Provider value={fileActions}>
+      <div className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}`} data-theme={theme}>
+        <BotRail
+          collapsed={railCollapsed}
+          onToggleCollapse={() => setRailCollapsed((c) => !c)}
+          drawerOpen={drawerOpen}
+          onCloseDrawer={() => setDrawerOpen(false)}
+          agents={agents}
+          items={history.items}
+          hubRepo={hubRepo?.path}
+          activeChat={activeChat ? { chatId: activeChat.chatId, cli: activeChat.cli, repo: activeChat.repoPath } : undefined}
+          onOpenChat={openChat}
+          onOpenAgent={openAgent}
+          onEditAgent={(a) => { setEditTarget(a); setEditorOpen(true); }}
+          onReorder={(ids) => { void reorderAgentIds(ids).then(() => reloadAgents()); }}
+          onNewAgent={() => { setEditTarget(undefined); setEditorOpen(true); }}
+          activeRoom={activeRoom}
+          onOpenRoom={openRoom}
+          theme={theme}
+          onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+          onOpenStudio={openStudio}
+          onHome={goHome}
+        />
+
+        <div className={`bt-scrim${drawerOpen ? ' show' : ''}`} onClick={() => setDrawerOpen(false)} />
+
+        <main className="bt-main">
+          {(isMobile || railCollapsed) && !drawerOpen ? (
+            <button
+              className="bt-menubtn"
+              style={{ position: 'absolute', top: 10, left: 10, zIndex: 26 }}
+              onClick={() => (railCollapsed ? setRailCollapsed(false) : setDrawerOpen(true))}
+              aria-label="Open sidebar"
+              title="Open sidebar"
+            >
+              <Menu size={17} />
+            </button>
+          ) : null}
+
+          {view.kind === 'chat' ? (
+            <GrokChat
+              key={`${view.lane ?? view.cli ?? 'auto'}:${view.chatId}`}
+              chatId={view.chatId}
+              cli={view.cli}
+              lane={view.lane}
+              agent={agent}
+              repo={chatRepo}
+              paneOpen={paneOpen}
+              onTogglePane={() => setPaneOpen((o) => !o)}
+              onOpenAgentEditor={() => { setEditTarget(agent); setEditorOpen(true); }}
+              onVoice={() => (agent ? setCallAgent(agent) : jarvis.summon())}
+              voiceActive={jarvis.wakeActive}
+              theme={theme}
+              onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+              onOpenStudio={openStudio}
+              onMeta={onMeta}
+            />
+          ) : RoomView ? (
+            <div className="bt-room r-scroll">
+              <div className="bt-room-wrap bt-fade">
+                <RoomView />
+              </div>
+            </div>
+          ) : null}
+        </main>
+
+        {view.kind === 'chat' ? (
+          <BotPanel
+            className={`bt-pane-mount${paneOpen ? ' open' : ''}`}
+            agent={agent ?? null}
+            meta={meta}
+            onOpenForge={() => openRoom('forge')}
+            onClose={() => setPaneOpen(false)}
+          />
+        ) : null}
+
+        {callAgent ? (
+          <CallOverlay
+            agent={callAgent}
+            initialVoice={callAgent.voice ?? 'ara'}
+            onClose={() => setCallAgent(null)}
+          />
+        ) : null}
+
+        <AgentEditor
+          open={editorOpen}
+          agent={editTarget}
+          onClose={() => setEditorOpen(false)}
+          onSaved={(saved) => {
+            reloadAgents();
+            // New agent (or engine change) → open its home thread.
+            if (!editTarget || editTarget.engine !== saved.engine) {
+              setView({ kind: 'chat', chatId: saved.home, lane: saved.engine });
+            }
+          }}
+          onDeleted={async (deleted) => {
+            reloadAgents();
+            // Never stay inside — and land on an agent we KNOW still exists
+            // (the stale pre-reload list must not resurrect the deleted one).
+            if (view.kind === 'chat' && sameChatId(view.chatId, deleted.home)) {
+              try {
+                const r = await apiJson<{ agents: Agent[] }>('/api/agents');
+                const first = (r.agents ?? []).find((a) => a.id !== deleted.id);
+                setView(first
+                  ? { kind: 'chat', chatId: first.home, lane: first.engine }
+                  : { kind: 'chat', chatId: '' });
+              } catch {
+                setView({ kind: 'chat', chatId: '' });
+              }
+            }
+          }}
+        />
+      </div>
+    </StudioFilesContext.Provider>
+  );
+}
+
+export default GrokApp;

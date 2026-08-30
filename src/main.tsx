@@ -4,6 +4,7 @@ import './tokens.css';
 import './index.css';
 import './chat/chat-theme.css';
 import './chat/chat-reimagine.css';
+import './grok/grok.css';
 import App from './App';
 
 createRoot(document.getElementById('root')!).render(

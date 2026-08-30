@@ -237,7 +237,7 @@ export type CronJob = {
   aiModel?: CronAiModel;
   /** Full companion engine id (assistant/claude/codex/banana/banana-local/banana-fireworks/zai/xai). */
   engine?: string;
-  /** Specific model id for the engine (glm-5.2, claude-opus-4-8, gpt-5.5, OpenRouter/LM Studio id). */
+  /** Specific model id for the engine (glm-5.3, claude-opus-4-8, gpt-5.5, OpenRouter/LM Studio id). */
   modelId?: string;
   /** Model-specific Codex reasoning effort persisted with Forge schedules. */
   reasoningEffort?: string;

@@ -15,6 +15,10 @@ export default defineConfig({
         target: 'ws://localhost:8091',
         ws: true,
       },
+      '/ws/voice': {
+        target: 'ws://localhost:8091',
+        ws: true,
+      },
     },
   },
 });
