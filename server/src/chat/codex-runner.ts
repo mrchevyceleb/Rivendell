@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, takeRotation } from './compaction.ts';
+import { personaPromptFor } from './personaPrompts.ts';
+import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
@@ -220,6 +223,43 @@ export class CodexSession {
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   private threadId: string | null = null;
+  /** Compaction primer pending for the next turn's prompt (context rotation). */
+  private compactPrimer: string | null = null;
+
+  /** Pops the pending compaction primer — it primes exactly one turn.
+   *  Clearing the banked debt happens only after the turn is accepted. */
+  private consumeCompactPrimer(): string | null {
+    const p = this.compactPrimer;
+    this.compactPrimer = null;
+    if (p) void takeRotation(this.key); // turn accepted — the debt is paid
+    return p;
+  }
+
+  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
+  private async maybeCompact(): Promise<void> {
+    try {
+      await maybeAutoCompact({
+        key: this.key,
+        cli: this.cli,
+        chatId: this.chatId,
+        events: this.eventLog,
+        isBusy: () => this.busy,
+        emit: (ev) => this.emit(ev as any),
+        rotate: async (primer) => {
+          // Codex spawns per turn — rotation = drop the stored thread so the
+          // next turn starts a fresh one, primed with the compact. The primer
+          // is ALSO banked in compaction state so a server restart between
+          // rotation and the next message can't lose it.
+          this.compactPrimer = primer;
+          this.threadId = null;
+          await setSessionId(this.cli, this.cwd, '', this.chatId);
+          bankRotation(this.key, primer);
+        },
+      });
+    } catch (err) {
+      console.warn(`[chat ${this.cli}] compaction check failed for ${this.key}:`, (err as Error).message);
+    }
+  }
   private busy = false;
   private dead = false;
   private currentChild: ChildProcess | null = null;
@@ -259,6 +299,14 @@ export class CodexSession {
     } catch (err) {
       console.warn(`[chat codex] event-log restore failed for ${this.key}:`, (err as Error).message);
     }
+    // Restore any owed compaction primer (rotation banked before a restart).
+    void takeRotation(this.key).then((primer) => {
+      if (primer) {
+        this.compactPrimer = primer;
+        console.warn(`[chat codex] restored owed compaction primer for ${this.key}`);
+        bankRotation(this.key, primer); // stays banked until a turn consumes it
+      }
+    });
     if (!this.threadId) {
       const restoredThreadId = latestThreadIdFromEvents(this.eventLog);
       if (restoredThreadId) {
@@ -462,7 +510,7 @@ export class CodexSession {
     ].join('\n');
   }
 
-  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown; peerFrom?: string; peerFromRole?: string } = {}): Promise<void> {
     if (this.busy) {
       this.emit({
         type: 'error',
@@ -479,10 +527,20 @@ export class CodexSession {
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
     const preTurnRecap = recoverContextThisTurn ? this.buildTranscriptRecap() : '';
     // Echo for reconnect replay (codex's events don't re-emit the user prompt).
-    this.emit({
-      type: 'event',
-      event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
-    });
+    // peerFrom marks a team-bus delivery: sender-tagged bubble, no compaction tick.
+    if (opts.peerFrom) {
+      this.emit({
+        type: 'event',
+        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text, ts: Date.now() },
+      });
+    } else {
+      this.emit({
+        type: 'event',
+        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
+      });
+      noteUserTurn(this.key); // compaction cadence (monotonic)
+      noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
+    }
 
     try {
       assertMemoryAvailableForSpawn('codex');
@@ -534,7 +592,9 @@ export class CodexSession {
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
-    const prompt = `${CODEX_TURN_PREAMBLE}\n\n${effectiveText}`;
+    const primer = this.consumeCompactPrimer();
+    const personaScope = personaPromptFor(this.chatId);
+    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${primer ? `${primer}\n\n---\n\n` : ''}${effectiveText}`;
     // Selection was validated before the session became busy. effort is
     // interpolated into this config fragment, so only allow-listed strings
     // can reach the CLI.
@@ -548,6 +608,11 @@ export class CodexSession {
     const browserMcpArgs = [
       '-c', 'mcp_servers.rivendell-browser.command="node"',
       '-c', `mcp_servers.rivendell-browser.args=["${browserMcpEntry}"]`,
+      // rivendell-team: agent-to-agent messaging (this thread's agent identity
+      // rides in via env so sends are attributed correctly).
+      '-c', `mcp_servers.rivendell-team.command="node"`,
+      '-c', `mcp_servers.rivendell-team.args=["${process.env.RIVENDELL_TEAM_MCP || join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs')}"]`,
+      '-c', `mcp_servers.rivendell-team.env.RIVENDELL_AGENT_NAME="${(agentForChatId(this.chatId)?.name ?? 'Teammate').replace(/"/g, '')}"`,
     ];
     const args: string[] = this.threadId
       ? [
@@ -747,6 +812,9 @@ export class CodexSession {
         await this.persistThreadId(this.threadId);
       }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+      // Forever-thread housekeeping: compact after successful turns only —
+      // error/interrupt paths retry on the next clean turn end.
+      void this.maybeCompact();
     });
 
     child.on('error', (err) => {

@@ -4,6 +4,12 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { registerChat } from './chat/register.ts';
+import { ensureAgents } from './chat/agents.ts';
+import { agentsRouter } from './routes/agents.ts';
+import { teamRouter } from './routes/team.ts';
+import { routinesRouter } from './routes/routines.ts';
+import { registerVoiceCalls } from './voice/grokCall.ts';
+import { startRoutineScheduler } from './chat/routines.ts';
 import { ensureXaiProxy, shutdownXaiProxy } from './chat/xai-proxy.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
 import { startWorkerQueue, stopWorkerQueue } from './worker/queue.ts';
@@ -56,6 +62,9 @@ app.use('/api/scribe', scribeRouter);
 app.use('/api/artifacts', artifactsRouter);
 app.use('/api/mcp', mcpRouter);
 app.use('/api/files', filesRouter);
+app.use('/api/agents', agentsRouter);
+app.use('/api/team', teamRouter);
+app.use('/api/routines', routinesRouter);
 app.use('/api/jarvis', jarvisRouter);
 // Localhost-only headless runner (cron agentic loop). Gated by MCP_AUTH_TOKEN.
 app.use('/internal', internalRouter);
@@ -76,15 +85,26 @@ try {
 // Prime the SuperGrok OAuth token (refresh now if near expiry, then background
 // refresh every 30m) so xAI chat turns use the subscription, not API credits.
 await primeXaiOauthToken();
+ensureAgents(); // seed the agent store (one Chief of Staff)
 const stopChat = await registerChat(app, server);
+registerVoiceCalls(server);
+startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 registerScribeSocket(server);
 startWorkerQueue();
 startWorkspaceWatcher();
 
 if (existsSync(STATIC_DIR)) {
-  app.use(express.static(STATIC_DIR));
+  // index.html must always revalidate — a heuratively-cached shell pins the
+  // browser to old hashed bundles until a hard refresh. Hashed assets stay
+  // indefinitely cacheable.
+  app.use(express.static(STATIC_DIR, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
+    },
+  }));
   app.get('/{*path}', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/ws')) return next();
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(resolve(STATIC_DIR, 'index.html'));
   });
 }

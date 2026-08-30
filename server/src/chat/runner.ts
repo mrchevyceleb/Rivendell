@@ -8,6 +8,9 @@ import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { maybeAutoCompact, noteUserTurn } from './compaction.ts';
+import { personaPromptFor } from './personaPrompts.ts';
+import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
@@ -64,7 +67,7 @@ function collectDescendantPids(pid: number): number[] {
 //   banana-fireworks = Banana → Fireworks (direct, FIREWORKS_API_KEY)
 //   banana-local   = Banana → Local LLM (vLLM on the Spark, direct)
 //   zai            = Z.ai coding plan (claude CLI → GLM over Anthropic endpoint)
-//   xai            = xAI coding plan (claude CLI → Grok 4.5 over Anthropic endpoint)
+//   xai            = xAI coding plan (claude CLI → Grok 4.6 over Anthropic endpoint)
 // Claude Code and Codex account selection comes from the per-directory
 // account map, matching terminals, AutoSam, and samwise-2.
 export type CliKind =
@@ -86,6 +89,7 @@ export type SessionEvent =
   | { type: 'event'; event: any }       // raw stream-json event from claude
   | { type: 'turnStart' }
   | { type: 'turnEnd'; sessionId?: string }
+  | { type: 'compacted'; chatId: string; words: number; turns: number; count: number; savedToRag?: boolean; at: number }
   | { type: 'closed'; code: number | null; signal: NodeJS.Signals | null }
   | { type: 'error'; message: string; code?: string; retryable?: boolean; fatal?: boolean };
 
@@ -124,17 +128,17 @@ const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', '
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token
 // redirected and a dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the GLM token
-// authenticates (never Matt's Anthropic subscription). GLM 5.2's API model id
-// is bare `glm-5.2`; the 1M behavior comes from the model plus Claude Code's
-// auto-compact window set to 1M.
+// authenticates (never Matt's Anthropic subscription). GLM 5.3 / 5.2 1M context
+// REQUIRES the `[1m]` model-id suffix on Z.ai. Bare `glm-5.3` / `glm-5.2` serve
+// the standard 200K variant, which made Claude Code auto-compact far too early
+// (observed ~109K) even with CLAUDE_CODE_AUTO_COMPACT_WINDOW=1M. Per Z.ai's
+// Claude Code docs the id itself must carry `[1m]`.
 const ZAI_BASE_URL = process.env.RIVENDELL_ZAI_BASE_URL?.trim() || 'https://api.z.ai/api/anthropic';
-// GLM 5.2's 1M context REQUIRES the `[1m]` model-id suffix on Z.ai. Bare
-// `glm-5.2` serves the standard 200K variant, which made Claude Code auto-compact
-// far too early (observed ~109K) even with CLAUDE_CODE_AUTO_COMPACT_WINDOW=1M.
-// Per Z.ai's Claude Code docs the id itself must carry `[1m]`.
+const ZAI_GLM53_MODEL = 'glm-5.3[1m]';
+const ZAI_GLM53_FLASH_MODEL = 'glm-5.3-flash[1m]';
 const ZAI_GLM52_MODEL = 'glm-5.2[1m]';
 const ZAI_GLM51_MODEL = 'glm-5.1';
-const ZAI_GLM52_COMPACT_WINDOW = '1000000';
+const ZAI_GLM_1M_COMPACT_WINDOW = '1000000';
 const ZAI_GLM51_COMPACT_WINDOW = '200000';
 const ZAI_CONFIG_DIR = join(homedir(), '.claude-zai');
 
@@ -143,25 +147,28 @@ const ZAI_CONFIG_DIR = join(homedir(), '.claude-zai');
 // comparison in getOrCreateSession (must resolve identically, or an invalid
 // value would loop: spawn falls back but the compare never matches).
 const VALID_CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-// GLM-5.2 exposes two real thinking-effort levels — High and Max. Z.ai's
+// GLM exposes two real thinking-effort levels — High and Max. Z.ai's
 // Anthropic endpoint maps Claude Code's effort onto them: low/medium/high -> GLM
 // "high", xhigh/max -> GLM "max". The old {low,medium,high} set stripped `max`,
 // so every GLM turn collapsed to High and Max was unreachable. Accept the full
 // claude range (Z.ai collapses it); the UI offers just High and Max.
 const VALID_ZAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-const VALID_ZAI_MODELS = new Set([ZAI_GLM52_MODEL, ZAI_GLM51_MODEL]);
+const VALID_ZAI_MODELS = new Set([ZAI_GLM53_MODEL, ZAI_GLM52_MODEL, ZAI_GLM51_MODEL]);
 const VALID_MODEL_ID = /^[A-Za-z0-9._-]+$/;
 function normalizeZaiModelId(model?: string): string | undefined {
   const trimmed = model?.trim();
   if (!trimmed) return undefined;
-  // Canonicalize GLM 5.2 to its 1M id; migrate the legacy bare `glm-5.2`.
-  return trimmed === 'glm-5.2' || trimmed === 'glm-5.2[1m]' ? ZAI_GLM52_MODEL : trimmed;
+  // Canonicalize 1M ids; leave 5.2 selectable after the 5.3 default bump.
+  if (trimmed === 'glm-5.3' || trimmed === 'glm-5.3[1m]') return ZAI_GLM53_MODEL;
+  if (trimmed === 'glm-5.3-flash' || trimmed === 'glm-5.3-flash[1m]') return ZAI_GLM53_FLASH_MODEL;
+  if (trimmed === 'glm-5.2' || trimmed === 'glm-5.2[1m]') return ZAI_GLM52_MODEL;
+  return trimmed;
 }
-const resolveZaiModel = (m?: string, fallback = ZAI_GLM52_MODEL): string => {
+const resolveZaiModel = (m?: string, fallback = ZAI_GLM53_MODEL): string => {
   const model = normalizeZaiModelId(m);
   if (model && VALID_ZAI_MODELS.has(model)) return model;
   const fallbackModel = normalizeZaiModelId(fallback);
-  return fallbackModel && VALID_ZAI_MODELS.has(fallbackModel) ? fallbackModel : ZAI_GLM52_MODEL;
+  return fallbackModel && VALID_ZAI_MODELS.has(fallbackModel) ? fallbackModel : ZAI_GLM53_MODEL;
 };
 const resolveZaiEffort = (e?: string, fallback = 'high'): string => {
   const effort = e?.trim();
@@ -170,7 +177,7 @@ const resolveZaiEffort = (e?: string, fallback = 'high'): string => {
 const ZAI_MODEL = resolveZaiModel(process.env.RIVENDELL_ZAI_MODEL);
 const ZAI_EFFORT = resolveZaiEffort(process.env.RIVENDELL_ZAI_EFFORT);
 const zaiCompactWindowForModel = (model: string): string =>
-  resolveZaiModel(model, ZAI_MODEL) === ZAI_GLM51_MODEL ? ZAI_GLM51_COMPACT_WINDOW : ZAI_GLM52_COMPACT_WINDOW;
+  resolveZaiModel(model, ZAI_MODEL) === ZAI_GLM51_MODEL ? ZAI_GLM51_COMPACT_WINDOW : ZAI_GLM_1M_COMPACT_WINDOW;
 
 function zaiEnv(model: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
@@ -184,12 +191,12 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
   return env;
 }
 
-// xAI coding plan — Grok 4.5 served over xAI's Anthropic-compatible endpoint
+// xAI coding plan — Grok 4.6 served over xAI's Anthropic-compatible endpoint
 // (https://api.x.ai/v1/messages). Same trick as Z.ai: run the stock `claude`
 // binary with ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN redirected and a
 // dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the Grok token authenticates
 // (never Matt's Anthropic subscription). Auth uses GROK_PERSONAL_API_KEY from
-// the assistant Doppler project (Bearer, which xAI accepts). Grok 4.5 has a
+// the assistant Doppler project (Bearer, which xAI accepts). Grok 4.6 has a
 // 500K context window.
 //
 // Claude Code (v2.1.x) resolves the effective auto-compact window as
@@ -198,14 +205,15 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
 // is set. Without the max-context env, AUTO_COMPACT_WINDOW=500000 is silently
 // capped to 200K and compact fires around ~170K (observed 2026-07-15).
 const XAI_BASE_URL = process.env.RIVENDELL_XAI_BASE_URL?.trim() || '';
-const XAI_GROK45_MODEL = 'grok-4.5';
+const XAI_GROK46_MODEL = 'grok-4.6';
+const XAI_GROK45_MODEL = 'grok-4.5'; // legacy pin still accepted
 const XAI_COMPACT_WINDOW = '500000';
 const XAI_CONFIG_DIR = join(homedir(), '.claude-xai');
-const VALID_XAI_MODELS = new Set([XAI_GROK45_MODEL]);
+const VALID_XAI_MODELS = new Set([XAI_GROK46_MODEL, XAI_GROK45_MODEL]);
 // xAI's Anthropic endpoint accepts Claude Code's full effort range and maps it
 // onto Grok's thinking budget; the UI offers a focused subset.
 const VALID_XAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-function resolveXaiModel(m?: string, fallback = XAI_GROK45_MODEL): string {
+function resolveXaiModel(m?: string, fallback = XAI_GROK46_MODEL): string {
   const trimmed = m?.trim();
   if (trimmed && VALID_XAI_MODELS.has(trimmed)) return trimmed;
   return fallback;
@@ -318,43 +326,35 @@ const ASSISTANT_MCP_CONFIG = JSON.stringify({
   },
 });
 
-// Grok (xAI) can't use Claude Code's built-in web tools. WebSearch is an
-// Anthropic SERVER tool (web_search_20250305) whose wire shape carries no
-// `description`, and xAI's Anthropic-compatible /v1/messages runs a STRICT tool
-// deserializer that 422s any tool missing one ("tools[0]: missing field
-// `description`"), so every Grok WebSearch call fails; WebFetch's post-fetch
-// summarization call against xAI returns "No response from model". Both are
-// disabled for xai in the spawn args below. xAI's endpoint has no server-side
-// search of its own either (it silently ignores `search_parameters`), so Grok's
-// only route to working web search is a CLIENT-side MCP tool. It gets a SCOPED,
-// read-only one: a fork of the assistant-mcp proxy that exposes ONLY
-// web_search/deep_research/quick_search. Deliberately NOT the full 65-tool
-// assistant-mcp — that would hand Grok gmail_send / calendar / task-delete under
-// --dangerously-skip-permissions. --strict-mcp-config (below) makes this the
-// EXACT MCP surface, ignoring the stale full-assistant-mcp entry that
-// ~/.claude-xai/.claude.json still carries (its proxy path no longer exists).
-const GROK_SEARCH_MCP_SCRIPT =
-  process.env.GROK_SEARCH_MCP_SCRIPT ||
-  '/home/mrchevyceleb/samwise/Personal-Apps/Rivendell/server/scripts/grok-search-mcp.mjs';
-const GROK_SEARCH_MCP_CONFIG = JSON.stringify({
-  mcpServers: {
-    search: {
+const TEAM_MCP_SCRIPT =
+  process.env.RIVENDELL_TEAM_MCP ||
+  join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs');
+
+/** Add the rivendell-team MCP (agent-to-agent messaging) to any mcp-config
+ *  JSON, stamping the calling agent's name so the tool can attribute sends. */
+function withTeamMcp(configJson: string, chatId: string): string {
+  try {
+    const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
+    const name = agentForChatId(chatId)?.name;
+    cfg.mcpServers['rivendell-team'] = {
       type: 'stdio',
       command: 'node',
-      args: [GROK_SEARCH_MCP_SCRIPT],
-      env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
-    },
-    // Matt's real Chrome. Added INSIDE the strict config on purpose: the point
-    // of --strict-mcp-config is to keep Grok away from the full assistant-mcp
-    // surface, not to keep it away from the browser Matt is driving it from.
-    // Scope stays search + browser, nothing wider.
-    'rivendell-browser': {
-      type: 'stdio',
-      command: 'node',
-      args: [BROWSER_MCP_ENTRY],
-    },
-  },
-});
+      args: [TEAM_MCP_SCRIPT],
+      env: { RIVENDELL_TEAM_URL: `http://127.0.0.1:${process.env.PORT || '8091'}`, ...(name ? { RIVENDELL_AGENT_NAME: name } : {}) },
+    };
+    return JSON.stringify(cfg);
+  } catch {
+    return configJson;
+  }
+}
+
+// Grok (xAI): Matt opted the xai lane into the FULL assistant-mcp (same
+// toolbox as every other lane - "give grok my mcp"). Built-in WebSearch/
+// WebFetch stay disallowed below (xAI's Anthropic endpoint 422s the server
+// tool shape; the MCP's web_search/quick_search/deep_research tools cover it
+// instead). The spawn below still passes --strict-mcp-config with the fresh
+// ASSISTANT_MCP_CONFIG so the STALE assistant-mcp entry in
+// ~/.claude-xai/.claude.json (dead proxy path) cannot shadow this one.
 
 const ASSISTANT_AGENT_PROMPT =
   "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
@@ -395,6 +395,8 @@ class ClaudeSession {
   /** session_id reported by the most recent init event. Persisted on every change. */
   private currentSessionId: string | null = null;
   private readonly startedResumeId: string | null = null;
+  /** Compaction primer applied to this process's system prompt (if rotated). */
+  private readonly primer: string | null = null;
   /** Model + effort this process was spawned with (per-session, defaults from config). */
   readonly spawnModel: string;
   readonly spawnEffort: string;
@@ -416,7 +418,7 @@ class ClaudeSession {
   readonly ready: Promise<boolean>;
   private resolveReady!: (ok: boolean) => void;
 
-  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string) {
+  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, primer?: string) {
     this.cli = cli;
     this.cwd = cwd;
     this.chatId = chatId;
@@ -425,6 +427,10 @@ class ClaudeSession {
     this.startedResumeId = resumeId;
     this.spawnModel = resolveClaudeModel(cli, model);
     this.spawnEffort = resolveClaudeEffort(cli, effort);
+    // Auto-compaction: a rotated session respawns with the durable memory
+    // document appended to its system prompt (context-level only — the
+    // durable event log the user sees is never touched by compaction).
+    this.primer = primer ?? null;
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
 
     // Restore any prior emitted events from disk so a server restart (manual
@@ -460,7 +466,13 @@ class ClaudeSession {
     // Anthropic endpoint (WebSearch is a server tool xAI 422s for a missing
     // `description`; WebFetch's summarization call returns "No response from
     // model"), and Grok gets a working client-side search via --mcp-config below.
-    const disallowedTools = cli === 'xai' ? 'AskUserQuestion WebSearch WebFetch' : 'AskUserQuestion';
+    // SendMessage/ListAgents are the CLI's OWN peer-session messaging — they
+    // only see other live claude processes, never Rivendell agents, so a model
+    // that reaches for them "successfully" messages nobody. Block them so the
+    // rivendell-team MCP (team_message) is the only messaging surface.
+    const disallowedTools = cli === 'xai'
+      ? 'AskUserQuestion WebSearch WebFetch SendMessage ListAgents ReadAgentMemory WriteAgentMemory'
+      : 'AskUserQuestion SendMessage ListAgents ReadAgentMemory WriteAgentMemory';
     const args: string[] = [
       '-p',
       '--input-format', 'stream-json',
@@ -483,29 +495,36 @@ class ClaudeSession {
     // jarvis-agent worker) so it survives respawns/recycles with no protocol
     // changes — see voicePrompt.ts.
     const voice = isVoiceChatId(chatId);
+    const sysPrimer = this.primer;
+    // Persona scope: the teammate's who-I-am/what-I-do document follows the
+    // home thread's chatId — survives rebrains (any engine) and compaction
+    // rotations (fresh spawns re-read the file).
+    const personaScope = personaPromptFor(chatId);
     if (cli === 'assistant') {
       args.push(
         '--append-system-prompt',
-        voice ? `${ASSISTANT_AGENT_PROMPT}\n\n${VOICE_STYLE_ADDENDUM}` : ASSISTANT_AGENT_PROMPT,
+        [ASSISTANT_AGENT_PROMPT, voice ? VOICE_STYLE_ADDENDUM : null, personaScope, sysPrimer].filter(Boolean).join('\n\n'),
       );
       // Keep --mcp-config last: it's variadic and would greedily swallow any
       // plain (non-dash) arg that followed it.
-      args.push('--mcp-config', ASSISTANT_MCP_CONFIG);
+      args.push('--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
     } else if (cli === 'xai') {
-      if (voice) args.push('--append-system-prompt', VOICE_STYLE_ADDENDUM);
-      // Grok's scoped web-search backend. --strict-mcp-config forces this to be
-      // the ONLY MCP surface (ignoring the stale assistant-mcp entry in
-      // ~/.claude-xai/.claude.json). Keep --mcp-config last (variadic).
-      args.push('--strict-mcp-config', '--mcp-config', GROK_SEARCH_MCP_CONFIG);
-    } else if (voice) {
-      args.push('--append-system-prompt', VOICE_STYLE_ADDENDUM);
+      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope, sysPrimer].filter(Boolean).join('\n\n');
+      if (sys) args.push('--append-system-prompt', sys);
+      // Grok's full toolbox: assistant-mcp + Matt's real Chrome.
+      // --strict-mcp-config overrides the stale entry in the xai account
+      // config with this fresh one. Keep --mcp-config last (variadic).
+      args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
+    } else {
+      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope, sysPrimer].filter(Boolean).join('\n\n');
+      if (sys) args.push('--append-system-prompt', sys);
     }
 
     // Matt's real Chrome for the other sidebar lanes. Merging (no
     // --strict-mcp-config) so nothing the account config already has is lost.
     // Keep --mcp-config last: it is variadic and swallows any plain arg after it.
     if (cli === 'claude' || cli === 'zai') {
-      args.push('--mcp-config', BROWSER_ONLY_MCP_CONFIG);
+      args.push('--mcp-config', withTeamMcp(BROWSER_ONLY_MCP_CONFIG, chatId));
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
@@ -592,8 +611,10 @@ class ClaudeSession {
   /** Most recent turn start (ms) — used for telegram-ping duration. */
   private turnStartedAt: number | null = null;
 
-  /** Send a user message into the running CLI as one turn. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>): Promise<void> {
+  /** Send a user message into the running CLI as one turn. `peerFrom` marks
+   *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
+   *  peer_message instead of _user_echo and don't tick compaction. */
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string } = {}): Promise<void> {
     if (this.child.exitCode !== null) {
       this.emit({ type: 'error', message: 'session has exited' });
       return;
@@ -604,15 +625,24 @@ class ClaudeSession {
     // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
     // so the UI still shows Matt's message and thumbnails even when the vision
     // adapter rewrites the prompt below.
-    this.emit({
-      type: 'event',
-      event: {
-        type: '_user_echo',
-        text,
-        imageCount: images?.length ?? 0,
-        ts: Date.now(),
-      },
-    });
+    if (opts.peerFrom) {
+      this.emit({
+        type: 'event',
+        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text, ts: Date.now() },
+      });
+    } else {
+      this.emit({
+        type: 'event',
+        event: {
+          type: '_user_echo',
+          text,
+          imageCount: images?.length ?? 0,
+          ts: Date.now(),
+        },
+      });
+      noteUserTurn(this.key); // forever-thread compaction cadence (monotonic)
+      noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
+    }
     // Z.ai GLM models are text-only over the Anthropic-compatible endpoint, so a
     // native image payload is dropped (or errors). Route pasted images through
     // the local LM Studio vision model and inject a text description instead.
@@ -783,6 +813,38 @@ class ClaudeSession {
     for (const fn of this.listeners) fn(se);
   }
 
+  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
+  private async maybeCompact(): Promise<void> {
+    try {
+      await maybeAutoCompact({
+        key: this.key,
+        cli: this.cli,
+        chatId: this.chatId,
+        events: this.eventLog,
+        isBusy: () => this.turnStartedAt !== null,
+        emit: (ev) => this.emit(ev as SessionEvent),
+        rotate: (primer) => this.rotateContextWithPrimer(primer),
+      });
+    } catch (err) {
+      console.warn(`[chat ${this.cli}] compaction check failed for ${this.key}:`, (err as Error).message);
+    }
+  }
+
+  /** Rotate the MODEL context: fresh CLI process (no --resume) carrying the
+   *  compact as its system prompt. The durable event log is untouched — the
+   *  thread the user sees stays lossless; clients rebind transparently via the
+   *  normal sessionClosed → reconnect dance. */
+  async rotateContextWithPrimer(primer: string): Promise<void> {
+    const { cli, cwd, chatId, key } = this;
+    const model = this.spawnModel;
+    const effort = this.spawnEffort;
+    this.shutdown('compaction-rotate');
+    sessions.delete(key);
+    await setSessionId(cli, cwd, '', chatId); // fresh CLI session — the primer replaces old context
+    await spawnSession(cli, cwd, chatId, null, key, 0, model, effort, primer);
+    console.warn(`[chat ${cli}] context rotated with compaction primer for ${key}`);
+  }
+
   private resolveStartupWaiters(state: 'initialized' | 'closed'): void {
     const waiters = Array.from(this.startupWaiters);
     this.startupWaiters.clear();
@@ -898,6 +960,9 @@ class ClaudeSession {
     if (ev?.type === 'result') {
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       this.turnStartedAt = null;
+      // Forever-thread housekeeping: every 100 user turns, compact the model's
+      // context (juicy durable summary → RAG vault → rotate with primer).
+      void this.maybeCompact();
     }
   }
 }
@@ -1027,9 +1092,10 @@ async function spawnSession(
   attempt = 0,
   model?: string,
   effort?: string,
+  primer?: string,
 ): Promise<ClaudeSession> {
   assertMemoryAvailableForSpawn(cli);
-  const session = new ClaudeSession(cli, cwd, chatId, resumeId, model, effort);
+  const session = new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, primer);
   sessions.set(key, session);
 
   session.subscribe((se) => {

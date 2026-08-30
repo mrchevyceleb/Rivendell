@@ -34,6 +34,7 @@ import {
   shutdownAllBananaSessions,
 } from './banana-runner.ts';
 import { emitScribe } from '../worker/scribe.ts';
+import { listChatHistory } from './history.ts';
 
 type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; model?: string; effort?: string };
 // `model` is the Banana model id (e.g. `monkey/silverback`). It rides on every
@@ -254,6 +255,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
     }
   });
 
+  app.get('/api/chat/history', async (_req, res) => {
+    try {
+      res.json({ items: await listChatHistory() });
+    } catch (error) {
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   app.get('/api/commands', async (_req, res) => {
     try {
       res.json(await readCommands());
@@ -326,6 +335,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
       } else if (sev.type === 'turnEnd') {
         busy = false;
         safeSend({ type: 'turnEnd', sessionId: sev.sessionId, seq: se.seq });
+      } else if (sev.type === 'compacted') {
+        // Auto-compaction marker — the model's context rotated with a juicy
+        // durable summary (saved to the RAG vault); the visible thread lives on.
+        safeSend({ type: 'compacted', chatId: sev.chatId, words: sev.words, turns: sev.turns, count: sev.count, savedToRag: sev.savedToRag, at: sev.at, seq: se.seq });
       } else if (sev.type === 'error') {
         // Only surface stderr/spawn errors during an active turn. Banana turn
         // failures are tagged so a reconnect can replay them even after the

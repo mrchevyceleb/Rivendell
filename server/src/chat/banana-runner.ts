@@ -11,6 +11,9 @@ import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { adaptImagesForTextModel, getVisionMode } from './vision-adapter.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, takeRotation } from './compaction.ts';
+import { personaPromptFor } from './personaPrompts.ts';
+import { noteAgentLane } from './agents.ts';
 import {
   ASSISTANT_HUB_PATH,
   BANANA_COMMANDS_DIR,
@@ -48,6 +51,9 @@ type BananaSendOptions = {
   /** Reasoning effort (e.g. low|medium|high) for OpenRouter/openai-compatible models. */
   effort?: string;
   hidden?: boolean;
+  /** Team-bus delivery: sender-tagged peer_message echo, no compaction tick. */
+  peerFrom?: string;
+  peerFromRole?: string;
   autoContinueDepth?: number;
   blockedSideEffectContinueDepth?: number;
   /** Deprecated alias kept so an in-flight hidden continuation from older code
@@ -1056,6 +1062,7 @@ const DEFAULT_MCP_MIRROR_SERVERS = new Set([
   'supabase-elite',
   'supabase-personal',
   'game-assets-mcp',
+  'rivendell-team',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1288,6 +1295,17 @@ function readClaudeMcpServers(
     }
   }
 
+  // Agent-to-agent team bus — injected directly (banana mirrors only Claude
+  // account/project configs, not ~/.codex/config.toml where the team server
+  // is also declared for codex).
+  if (!merged['rivendell-team']) {
+    merged['rivendell-team'] = {
+      type: 'local',
+      command: ['node', join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs')],
+      environment: { RIVENDELL_TEAM_URL: `http://127.0.0.1:${process.env.PORT || '8091'}` },
+    };
+  }
+
   const names = Object.keys(merged);
   if (names.length) {
     console.log(`[banana-runner] mirrored ${names.length} MCP server(s) into Banana: ${names.join(', ')}`);
@@ -1363,7 +1381,7 @@ const LOCAL_VLLM_BASE_URL =
 
 type LocalVllmModel = { id: string; maxLen: number };
 
-// LM Studio mislabels text models as type:'vlm' (e.g. qwen3.6-35b-a3b), so the
+// LM Studio mislabels text models as type:'vlm' (e.g. qwen3.8-27b), so the
 // `type` field can't be trusted to tell text from vision. Filter vision + embed
 // by id instead — same heuristic the assistant-mcp dev-pr-tracker bridge uses.
 // Keeps vision-only models (qwen3-vl-*) out of the Forge cron picker + Hall
@@ -2334,6 +2352,41 @@ export class BananaSession {
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
+  /** Compaction primer pending for the next turn's prompt (context rotation). */
+  private compactPrimer: string | null = null;
+
+  /** Pops the pending compaction primer — it primes exactly one turn.
+   *  Clearing the banked debt happens only after the turn is accepted. */
+  private consumeCompactPrimer(): string | null {
+    const p = this.compactPrimer;
+    this.compactPrimer = null;
+    if (p) void takeRotation(this.key); // turn accepted — the debt is paid
+    return p;
+  }
+
+  /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
+  private async maybeCompact(): Promise<void> {
+    try {
+      await maybeAutoCompact({
+        key: this.key,
+        cli: this.cli,
+        chatId: this.chatId,
+        events: this.eventLog,
+        isBusy: () => this.busy,
+        emit: (ev) => this.emit(ev as SessionEvent),
+        rotate: async (primer) => {
+          // Banana: rotation = drop the opencode session id (next send creates
+          // a fresh serve-side session, exactly like the wipe-recovery path)
+          // and prime the next turn's prompt. Banked for restart durability.
+          this.compactPrimer = primer;
+          this.threadId = null;
+          bankRotation(this.key, primer);
+        },
+      });
+    } catch (err) {
+      console.warn(`[chat banana] compaction check failed for ${this.key}:`, (err as Error).message);
+    }
+  }
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   /** banana sessionID, captured on create, persisted for resume. */
@@ -2393,6 +2446,14 @@ export class BananaSession {
       console.warn(`[chat banana] event-log restore failed for ${this.key}:`, (err as Error).message);
     }
     void compactEventLog(this.key);
+    // Restore any owed compaction primer (rotation banked before a restart).
+    void takeRotation(this.key).then((primer) => {
+      if (primer) {
+        this.compactPrimer = primer;
+        console.warn(`[chat banana] restored owed compaction primer for ${this.key}`);
+        bankRotation(this.key, primer); // stays banked until a turn consumes it
+      }
+    });
 
     // If we already know our banana sessionID, register the route up front so
     // a turn started elsewhere (or events that arrive before send) still land.
@@ -2671,11 +2732,18 @@ export class BananaSession {
     // Echo for reconnect replay (banana's events don't re-emit the user prompt).
     // Internal auto-continues are intentionally hidden; they are just Rivendell
     // nudging Banana past an opencode compaction summary.
-    if (!opts.hidden) {
+    if (opts.peerFrom) {
+      this.emit({
+        type: 'event',
+        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text, ts: Date.now() },
+      });
+    } else if (!opts.hidden) {
       this.emit({
         type: 'event',
         event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
       });
+      noteUserTurn(this.key); // compaction cadence (monotonic)
+      noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
     }
 
     // Vision adapter: a text-only OpenRouter model (or any local LM Studio chat
@@ -2889,7 +2957,12 @@ export class BananaSession {
     // image.)
     const commandExpandedText = visionPromptText ?? (slashCommand ? expandBananaSlashCommand(slashCommand) : text);
     const recap = needsContextRecovery && preTurnRecap ? preTurnRecap : '';
-    const effectiveText = recap ? `${recap}\n\n${commandExpandedText}` : commandExpandedText;
+    const compactPrimer = this.consumeCompactPrimer();
+    const personaScope = personaPromptFor(this.chatId);
+    const personaPrefix = personaScope ? `${personaScope}\n\n---\n\n` : '';
+    const effectiveText = compactPrimer
+      ? `${personaPrefix}${compactPrimer}\n\n---\n\n${recap ? `${recap}\n\n` : ''}${commandExpandedText}`
+      : recap ? `${personaPrefix}${recap}\n\n${commandExpandedText}` : `${personaPrefix}${commandExpandedText}`;
     if (recap) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
@@ -3558,6 +3631,9 @@ export class BananaSession {
     this.busy = false;
     this.turn = null;
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+    // Forever-thread housekeeping (success path only — error paths retry on
+    // the next clean turn end).
+    void this.maybeCompact();
   }
 
   private continueAfterHiddenCompaction(state: BananaTurnState): void {
