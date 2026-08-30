@@ -39,9 +39,12 @@ Health: `curl http://localhost:8091/api/health`.
 
 ```
 src/
-  App.tsx                  path-based router over RoomKey
-  rooms/                   one component per room
-  shell/Layout.tsx         app chrome
+  App.tsx                  shell switch: GrokApp (default) or Studio (/studio)
+  grok/                    Grok-style shell (GrokApp, GrokSidebar, GrokChat,
+                           GrokConversation, GrokLogo, history.ts, grok.css)
+  rooms/                   one component per room (hosted in the Grok sidebar)
+  shell/Studio.tsx         classic IDE shell: tabs + file tree (legacy, intact)
+  shell/studio/            FileTree, FileTab, ChatTab, types, studio.css
   chat/                    chat client (components, hooks, data, utils)
   data/                    api.ts, mock.ts, types.ts (RoomKey)
   hooks/, theme/, components/, utils/
@@ -51,7 +54,9 @@ server/src/
   routes/                  /api/* routers (tasks, calendar, email, family,
                            docs, pl, pins, cron, messages, weavings,
                            scribe, summary)
-  chat/                    register, runner, sessions, codex-runner, chronicle
+  chat/                    register, runner, sessions, codex-runner, chronicle,
+                           history (GET /api/chat/history = sidebar index over
+                           the durable event logs)
   worker/                  queue, runner, dispatchers, scribe, store
   lib/                     supabase, doppler, mcp, jsonStore, room/task/pin
                            stores, assistantAdmin/Data, workspace
@@ -59,7 +64,7 @@ supabase/migrations/       queue/events SQL
 scripts/                   start.sh + tailscale-serve + legacy launchd plist/install
 ```
 
-Rooms: `/` Hall, `/council`, `/dashboard`, `/tidings`, `/hearth`, `/library`, `/pins`, `/reckoning` (P&L), `/forge`, `/weavings`, `/annals`, `/scribe`.
+Shells: `/` is the Grok Bot-style teammates app (left rail: personas = real companion lanes with home threads + conversation history from `/api/chat/history` (titles + previews over the event logs), Plugins → rooms; center: bubble chat with Thoughts pods + docked composer with Jarvis mic; right pane: artifact desk + Routines (cron) + Session context meter). Persona scopes: each teammate carries `~/.rivendell/personas/<name>.md` (who they are / what they do — editable, hot-reloaded via mtime cache, seeded from `server/src/chat/personaPrompts.ts` defaults). The scope injects into every engine (claude-family `--append-system-prompt`, codex/banana per-turn preamble), follows the FACE across rebrains, and survives compaction rotations. Forever-threads: every 100 user turns, `server/src/chat/compaction.ts` auto-compacts the model context (juicy 3000–5000-word durable summary via Grok, saved to the savemem RAG vault via assistant-mcp `memory.save_memory`, session rotated with the summary as primer) — the visible event log is never wiped; the client renders a `Memory compacted` divider. `src/grok/grok.css` carries the extracted sand tokens and remaps --r-* so rooms + the `.rc` kit inherit. `/studio` is the classic Rivendell IDE, fully intact.
 
 ## Environment
 
@@ -79,7 +84,7 @@ Secrets live in Doppler. Never put the literal word `supabase` in a Doppler secr
 - TypeScript + ESM (`"type": "module"`).
 - Server imports use explicit `.ts` extensions (`./routes/tasks.ts`). Match this when adding routes.
 - API surface: `/api/<noun>`. WebSocket surface: `/ws/...`. SPA fallback in `server/src/index.ts` skips both.
-- **New room** → add `src/rooms/<Name>.tsx`, register in `App.tsx` `RoomSwitch`, extend `RoomKey` in `src/data/types.ts` and `rooms` in `src/data/mock.ts`.
+- **New room** → add `src/rooms/<Name>.tsx`, register it in `src/grok/GrokApp.tsx` `ROOMS` + `src/grok/GrokSidebar.tsx` `ROOM_ENTRIES`.
 - **New API surface** → add `server/src/routes/<name>.ts` exporting a `Router`, mount in `server/src/index.ts`, mirror the call in `src/data/api.ts`.
 - **New worker job** → add a dispatcher in `server/src/worker/dispatchers.ts`; the queue persists through Supabase (`supabase/migrations/202605010001_rivendell_jobs.sql`).
 - Workers stay **draft/review-first** for any external side effect. Hard design constraint.

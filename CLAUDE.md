@@ -34,9 +34,12 @@ The unit (`~/.config/systemd/user/rivendell.service`) runs `~/bin/start-rivendel
 
 ```
 src/                    React app
-  App.tsx               path-based router over RoomKey ('/', '/council', ...)
-  rooms/                one component per room (Hall, Council, Dashboard, ...)
-  shell/Layout.tsx      app chrome
+  App.tsx               shell switch: GrokApp (default) or Studio (/studio)
+  grok/                 Grok-style shell (GrokApp, GrokSidebar, GrokChat,
+                        GrokConversation, GrokLogo, history.ts, grok.css)
+  rooms/                one component per room (hosted in the Grok sidebar)
+  shell/Studio.tsx      classic IDE shell: tabs + file tree (legacy, intact)
+  shell/studio/         FileTree, FileTab, ChatTab, types, studio.css
   chat/                 chat client pieces (components, hooks, data, utils)
   data/                 api.ts, mock.ts, types.ts (RoomKey lives here)
   hooks/                useRoomData, useScribeSocket
@@ -46,7 +49,8 @@ server/src/
   config.ts             env resolution (PORT, STATE_DIR, SUPABASE_*, WORKER_*, MCP_*)
   routes/               one router per /api/* surface (tasks, calendar, email, family,
                         docs, pl, pins, cron, messages, weavings, scribe, summary)
-  chat/                 chat server: register, runner, sessions, codex-runner, chronicle
+  chat/                 chat server: register, runner, sessions, codex-runner, chronicle,
+                        history (GET /api/chat/history = sidebar index over event logs)
   worker/               durable job queue (queue, runner, dispatchers, scribe, store)
   lib/                  supabase, doppler, MCP bridge, JSON stores, room/task/pin stores,
                         assistantAdmin/Data, workspace
@@ -54,7 +58,7 @@ supabase/migrations/    SQL migrations (queue/events tables)
 scripts/                start.sh + tailscale-serve + legacy launchd plist/install (macOS)
 ```
 
-Rooms map: `/` Hall, `/council` Council, `/dashboard` Dashboard, `/tidings` Tidings, `/hearth` Hearth, `/library` Library (file tree of `ELROND_WORKSPACE_PATH`), `/pins` Pins, `/reckoning` Reckoning (P&L), `/forge` Forge, `/weavings` Weavings, `/annals` Annals, `/scribe` Scribe (live worker activity log).
+Shells: `/` is the Grok Bot-style teammates app (left rail: personas = real companion lanes with home threads + history from `/api/chat/history` (titles + previews), Plugins → rooms; center: bubble chat with Thoughts pods + Jarvis mic composer; right pane: artifact desk + Routines + Session meter). Persona scopes: each teammate carries `~/.rivendell/personas/<name>.md` (who they are / what they do — editable, hot-reloaded via mtime cache, seeded from `server/src/chat/personaPrompts.ts` defaults). The scope injects into every engine (claude-family `--append-system-prompt`, codex/banana per-turn preamble), follows the FACE across rebrains, and survives compaction rotations. Forever-threads: every 100 user turns, `server/src/chat/compaction.ts` auto-compacts the model context (juicy 3000–5000-word durable summary via Grok, saved to the savemem RAG vault via assistant-mcp `memory.save_memory`, session rotated with the summary as primer) — the visible event log is never wiped; the client renders a `Memory compacted` divider. `src/grok/grok.css` carries the extracted sand tokens and remaps --r-*. `/studio` is the classic Rivendell IDE, fully intact.
 
 ## Environment
 
@@ -73,7 +77,7 @@ Secrets live in Doppler (per global rules). Never use the literal word `supabase
 
 - TypeScript everywhere. ESM (`"type": "module"`). Server imports use explicit `.ts` extensions (e.g. `./routes/tasks.ts`) — keep that style when adding routes.
 - API surface is `/api/<noun>`; WebSocket surface is `/ws/...`. The SPA fallback in `server/src/index.ts` skips both prefixes.
-- New room → add `src/rooms/<Name>.tsx`, register in `App.tsx` `RoomSwitch`, and add the `RoomKey` to `src/data/types.ts` + `src/data/mock.ts` `rooms`.
+- New room → add `src/rooms/<Name>.tsx`, register it in `src/grok/GrokApp.tsx` `ROOMS` + `src/grok/GrokSidebar.tsx` `ROOM_ENTRIES`.
 - New API surface → add `server/src/routes/<name>.ts` exporting a `Router`, mount it in `server/src/index.ts`. Mirror the call from `src/data/api.ts`.
 - New worker job type → add a dispatcher in `server/src/worker/dispatchers.ts`; queue persists through Supabase (`supabase/migrations/202605010001_rivendell_jobs.sql`).
 - Workers must stay draft/review-first for any external side effect — that's an explicit design constraint of this app.
