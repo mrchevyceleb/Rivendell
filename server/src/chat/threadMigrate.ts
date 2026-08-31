@@ -5,17 +5,18 @@
 // `thread|cwd|bot-max`. This migrates the leftover forks so the visible thread
 // is continuous and a model switch has something to seed from.
 //
-// Idempotent: a marker file records the version. Sources are moved (not
-// deleted) into ~/.rivendell/archive/thread-migrate-<stamp>/.
+// Almost none of the CLI events carry a timestamp, so we MUST NOT invent one
+// with Date.now() (v1 did; long files interleaved). Order is: oldest source
+// file first, original seq within each file. Idempotent via a versioned marker.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { EVENT_LOG_DIR, isPlumbingEvent, sanitizeKey } from './event-log-store.ts';
 import { listAgents } from './agents.ts';
 import { threadLogKey } from './threadKey.ts';
 
-const MARKER = join(STATE_DIR, 'thread-migrate-v1.json');
+const MARKER = join(STATE_DIR, 'thread-migrate-v2.json');
 const ELROND_WORKSPACE = process.env.ELROND_WORKSPACE_PATH || '/home/mrchevyceleb/ASSISTANT-HUB';
 
 const ENGINE_PREFIX = /^(claude|codex|assistant|banana(?:-local|-fireworks)?|zai|xai|thread)_/;
@@ -25,17 +26,8 @@ type Line = {
   ev: unknown;
   eng?: string;
   mdl?: string;
-  ts: number;
   src: string;
-  order: number;
 };
-
-function inferTs(ev: unknown, fallback: number): number {
-  const e = ev as { ts?: unknown; event?: { ts?: unknown } };
-  if (typeof e?.ts === 'number' && Number.isFinite(e.ts)) return e.ts;
-  if (typeof e?.event?.ts === 'number' && Number.isFinite(e.event.ts)) return e.event.ts;
-  return fallback;
-}
 
 function inferEngine(filename: string): string | undefined {
   const m = ENGINE_PREFIX.exec(filename);
@@ -55,25 +47,16 @@ function readLines(path: string, filename: string): Line[] {
   } catch {
     return [];
   }
-  const fallbackTs = Date.now();
   const engFromName = inferEngine(filename);
   const out: Line[] = [];
-  let order = 0;
   for (const line of raw.split('\n')) {
     if (!line) continue;
     try {
       const parsed = JSON.parse(line) as { seq?: unknown; ev?: unknown; eng?: unknown; mdl?: unknown };
       if (typeof parsed.seq !== 'number' || !parsed.ev) continue;
       if (isPlumbingEvent(parsed.ev)) continue;
-      const ev = parsed.ev;
       const eng = typeof parsed.eng === 'string' && parsed.eng ? parsed.eng : engFromName;
-      const row: Line = {
-        seq: parsed.seq,
-        ev,
-        ts: inferTs(ev, fallbackTs + order),
-        src: filename,
-        order: order++,
-      };
+      const row: Line = { seq: parsed.seq, ev: parsed.ev, src: filename };
       if (eng) row.eng = eng;
       if (typeof parsed.mdl === 'string' && parsed.mdl) row.mdl = parsed.mdl;
       out.push(row);
@@ -131,11 +114,18 @@ export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean }
   for (const [home, srcFiles] of byHome) {
     const threadKey = threadLogKey(ELROND_WORKSPACE, home);
     const threadName = `${sanitizeKey(threadKey)}.jsonl`;
+    const ranked = srcFiles
+      .map((file) => {
+        let mtime = 0;
+        try { mtime = statSync(join(EVENT_LOG_DIR, file)).mtimeMs; } catch { /* keep 0 */ }
+        return { file, mtime };
+      })
+      .sort((a, b) => a.mtime - b.mtime || a.file.localeCompare(b.file));
+
     const merged: Line[] = [];
-    for (const file of srcFiles) {
+    for (const { file } of ranked) {
       merged.push(...readLines(join(EVENT_LOG_DIR, file), file));
     }
-    merged.sort((a, b) => a.ts - b.ts || a.order - b.order || a.seq - b.seq);
 
     const deduped: Line[] = [];
     const seen = new Set<string>();
@@ -169,7 +159,7 @@ export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean }
         console.warn(`[thread-migrate] could not archive ${file}:`, (err as Error).message);
       }
     }
-    report.push({ home, sources: srcFiles, events: lines.length });
+    report.push({ home, sources: ranked.map((r) => r.file), events: lines.length });
     console.log(`[thread-migrate] ${home}: ${srcFiles.length} source(s) → ${lines.length} event(s)`);
   }
 
