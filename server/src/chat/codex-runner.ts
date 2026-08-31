@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { TEAM_MCP_SCRIPT } from '../config.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
 import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -728,6 +728,7 @@ export class CodexSession {
   // ── private ────────────────────────────────────────────────
 
   private emit(msg: SessionEvent): void {
+    if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
     this.eventLog.push(se);

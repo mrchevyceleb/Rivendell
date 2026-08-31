@@ -130,6 +130,50 @@ function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number): boole
   return true;
 }
 
+/** Copy the newest rolling compact + cadence from leftover per-engine keys
+ *  onto the engine-free thread key. Never overwrite a dest blob/state that
+ *  is already newer. Sync so boot migrate can run before chat starts. */
+export function adoptCompaction(fromKeys: string[], toKey: string): { blob: boolean; state: boolean } {
+  const unique = [...new Set(fromKeys.filter((k) => k && k !== toKey))];
+  if (unique.length === 0) return { blob: false, state: false };
+
+  let destBlob = loadCompactBlob(toKey);
+  const state = loadState();
+  let destRec = state[toKey];
+  let tookBlob = false;
+  let tookState = false;
+
+  for (const from of unique) {
+    const blob = loadCompactBlob(from);
+    if (blob && (!destBlob || blob.lastAt > destBlob.lastAt)) {
+      destBlob = blob;
+      tookBlob = true;
+    }
+    const rec = state[from];
+    if (!rec) continue;
+    if (!destRec) {
+      destRec = { ...rec };
+      tookState = true;
+    } else if ((destRec.lastAt ?? 0) === 0 && (rec.lastAt ?? 0) > 0) {
+      destRec = { ...rec };
+      tookState = true;
+    }
+  }
+
+  if (tookBlob && destBlob) {
+    if (!writeCompactBlob(toKey, destBlob)) tookBlob = false;
+  }
+  if (tookState && destRec) {
+    state[toKey] = destRec;
+    mkdirSync(STATE_DIR, { recursive: true });
+    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  }
+  if (tookBlob || tookState) {
+    console.log(`[compaction] adopted ${unique.length} legacy key(s) → ${toKey}`);
+  }
+  return { blob: tookBlob, state: tookState };
+}
+
 /** Wipe rolling memory + cadence when the user fresh-starts a thread. */
 export async function clearThreadMemory(key: string): Promise<void> {
   bumpCompactEpoch(key);

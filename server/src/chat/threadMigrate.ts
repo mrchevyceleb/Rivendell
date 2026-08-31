@@ -2,24 +2,29 @@
 //
 // Before threadKey.ts, each brain wrote `claude|cwd|bot-max`, `xai|cwd|bot-max`,
 // etc. Switching models forked the conversation. Runners now append to
-// `thread|cwd|bot-max`. This migrates the leftover forks so the visible thread
-// is continuous and a model switch has something to seed from.
+// `thread|cwd|bot-max`. This migrates leftover forks AND their rolling compact
+// so a model switch keeps both the transcript and the forever-thread memory.
 //
-// Almost none of the CLI events carry a timestamp, so we MUST NOT invent one
-// with Date.now() (v1 did; long files interleaved). Order is: oldest source
-// file first, original seq within each file. Idempotent via a versioned marker.
+// Almost none of the CLI events carry a wall clock (uuids here are v4). We
+// MUST NOT invent Date.now() (v1 interleaved long files) and we MUST NOT
+// concatenate untimed multi-engine files by mtime (that turns A→B→A into
+// all-A then all-B). Untimed multi-source groups stay unmigrated. A single
+// source, or a group where every event has a real timestamp, can merge.
+// Within a file every distinct record is kept; dest overlay matches uuid or
+// the exact persisted event, never seq alone.
+// Idempotent via a versioned marker; a failed group leaves the marker unwritten.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { STATE_DIR } from './config.ts';
+import { ASSISTANT_HUB_PATH, STATE_DIR } from './config.ts';
 import { EVENT_LOG_DIR, isPlumbingEvent, sanitizeKey } from './event-log-store.ts';
 import { listAgents } from './agents.ts';
-import { threadLogKey } from './threadKey.ts';
+import { isAgentThread, threadLogKey } from './threadKey.ts';
+import { adoptCompaction } from './compaction.ts';
 
-const MARKER = join(STATE_DIR, 'thread-migrate-v2.json');
-const ELROND_WORKSPACE = process.env.ELROND_WORKSPACE_PATH || '/home/mrchevyceleb/ASSISTANT-HUB';
-
+const MARKER = join(STATE_DIR, 'thread-migrate-v4.json');
 const ENGINE_PREFIX = /^(claude|codex|assistant|banana(?:-local|-fireworks)?|zai|xai|thread)_/;
+const SOURCE_KEY = /^(claude|codex|assistant|banana(?:-local|-fireworks)?|zai|xai|thread)\|(.+)\|(bot-[^|]+)$/;
 
 type Line = {
   seq: number;
@@ -40,12 +45,86 @@ function bareHomeFromStem(stem: string): string | null {
   return m ? m[1] : null;
 }
 
-function readLines(path: string, filename: string): Line[] {
+function chatIdFromStem(stem: string): string | null {
+  const m = /_(bot-[a-z0-9][a-z0-9-]*(?:__acct__[a-z0-9-]+)?)$/i.exec(stem);
+  return m ? m[1] : null;
+}
+
+function escapeRe(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Parse the lossy filename back into engine, sanitized cwd, and ids. */
+function parseAgentLogName(file: string): { cli: string; cwdSanitized: string; home: string; chatId: string } | null {
+  if (!file.endsWith('.jsonl') || file.endsWith('.archive.jsonl')) return null;
+  const stem = file.slice(0, -'.jsonl'.length);
+  const eng = ENGINE_PREFIX.exec(stem);
+  if (!eng) return null;
+  const home = bareHomeFromStem(stem);
+  const chatId = chatIdFromStem(stem);
+  if (!home || !chatId) return null;
+  const rest = stem.slice(eng[0].length);
+  const suffix = new RegExp(`_${escapeRe(home)}(?:__acct__[a-z0-9-]+)?$`, 'i');
+  const cwdSanitized = rest.replace(suffix, '');
+  if (!cwdSanitized || cwdSanitized === rest) return null;
+  return { cli: eng[1], cwdSanitized, home, chatId };
+}
+
+function resolveCwd(cwdSanitized: string): string | null {
+  if (sanitizeKey(ASSISTANT_HUB_PATH) === cwdSanitized) return ASSISTANT_HUB_PATH;
+  return null;
+}
+
+function destFileName(cwdSanitized: string, home: string): string {
+  const cwd = resolveCwd(cwdSanitized);
+  if (cwd) return `${sanitizeKey(threadLogKey(cwd, home))}.jsonl`;
+  return `thread${cwdSanitized}_${home}.jsonl`;
+}
+
+function sourceLogKey(file: string): string | null {
+  const parsed = parseAgentLogName(file);
+  if (!parsed) return null;
+  const cwd = resolveCwd(parsed.cwdSanitized);
+  if (!cwd) return null;
+  if (parsed.cli === 'thread') return threadLogKey(cwd, parsed.home);
+  return `${parsed.cli}|${cwd}|${parsed.chatId}`;
+}
+
+function unwrapEvent(ev: unknown): Record<string, unknown> | null {
+  if (!ev || typeof ev !== 'object') return null;
+  const rec = ev as { type?: unknown; event?: unknown };
+  if (rec.type === 'event' && rec.event && typeof rec.event === 'object') {
+    return rec.event as Record<string, unknown>;
+  }
+  return rec as Record<string, unknown>;
+}
+
+function eventTime(ev: unknown): number | null {
+  const inner = unwrapEvent(ev);
+  if (!inner) return null;
+  const raw = inner.ts ?? inner.timestamp;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function eventUuid(ev: unknown): string | null {
+  const inner = unwrapEvent(ev);
+  const uuid = inner?.uuid;
+  return typeof uuid === 'string' && uuid ? uuid : null;
+}
+
+type ReadResult = { ok: true; lines: Line[] } | { ok: false; error: string };
+
+function readLines(path: string, filename: string): ReadResult {
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
-  } catch {
-    return [];
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
   }
   const engFromName = inferEngine(filename);
   const out: Line[] = [];
@@ -64,15 +143,38 @@ function readLines(path: string, filename: string): Line[] {
       // skip malformed
     }
   }
-  return out;
+  return { ok: true, lines: out };
 }
 
-function fingerprint(ev: unknown): string {
+function collectCompactionSources(files: string[]): Map<string, string[]> {
+  const byDest = new Map<string, Set<string>>();
+  const add = (from: string, dest: string) => {
+    if (!from || from === dest) return;
+    const set = byDest.get(dest) ?? new Set<string>();
+    set.add(from);
+    byDest.set(dest, set);
+  };
+
   try {
-    return JSON.stringify(ev);
+    const state = JSON.parse(readFileSync(join(STATE_DIR, 'compaction-state.json'), 'utf8')) as Record<string, unknown>;
+    for (const key of Object.keys(state)) {
+      const m = SOURCE_KEY.exec(key);
+      if (!m || !isAgentThread(m[3])) continue;
+      add(key, threadLogKey(m[2], m[3]));
+    }
   } catch {
-    return '';
+    // no state file yet
   }
+
+  for (const file of files) {
+    const key = sourceLogKey(file);
+    if (!key) continue;
+    const m = SOURCE_KEY.exec(key);
+    if (!m || !isAgentThread(m[3])) continue;
+    add(key, threadLogKey(m[2], m[3]));
+  }
+
+  return new Map([...byDest].map(([dest, set]) => [dest, [...set]]));
 }
 
 export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean } {
@@ -89,32 +191,51 @@ export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean }
   let files: string[] = [];
   try {
     files = readdirSync(EVENT_LOG_DIR);
-  } catch {
-    writeFileSync(MARKER, JSON.stringify({ at: Date.now(), migrated: 0, note: 'no event-logs dir' }));
-    return { migrated: 0, skipped: false };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      writeFileSync(MARKER, JSON.stringify({ at: Date.now(), migrated: 0, note: 'no event-logs dir' }));
+      return { migrated: 0, skipped: false };
+    }
+    throw err;
   }
 
-  const byHome = new Map<string, string[]>();
+  const compactReport: Array<{ dest: string; from: string[]; blob: boolean; state: boolean }> = [];
+  for (const [dest, fromKeys] of collectCompactionSources(files)) {
+    const home = dest.split('|').pop() ?? '';
+    if (home && !homes.has(home)) continue;
+    const adopted = adoptCompaction(fromKeys, dest);
+    if (adopted.blob || adopted.state) compactReport.push({ dest, from: fromKeys, ...adopted });
+  }
+
+  type Group = { cwdSanitized: string; home: string; srcFiles: string[] };
+  const byGroup = new Map<string, Group>();
   for (const file of files) {
-    if (!file.endsWith('.jsonl') || file.endsWith('.archive.jsonl')) continue;
-    const stem = file.slice(0, -'.jsonl'.length);
-    const home = bareHomeFromStem(stem);
-    if (!home || !homes.has(home)) continue;
-    const list = byHome.get(home) ?? [];
-    list.push(file);
-    byHome.set(home, list);
+    const parsed = parseAgentLogName(file);
+    if (!parsed || !homes.has(parsed.home)) continue;
+    const key = `${parsed.cwdSanitized}\0${parsed.home}`;
+    const group = byGroup.get(key) ?? { cwdSanitized: parsed.cwdSanitized, home: parsed.home, srcFiles: [] };
+    group.srcFiles.push(file);
+    byGroup.set(key, group);
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
   const archiveDir = join(STATE_DIR, 'archive', `thread-migrate-${stamp}`);
   mkdirSync(archiveDir, { recursive: true });
 
-  const report: Array<{ home: string; sources: string[]; events: number }> = [];
+  const report: Array<{ home: string; cwd: string; sources: string[]; events: number; archived: boolean; skipped?: string }> = [];
+  let failed = false;
 
-  for (const [home, srcFiles] of byHome) {
-    const threadKey = threadLogKey(ELROND_WORKSPACE, home);
-    const threadName = `${sanitizeKey(threadKey)}.jsonl`;
-    const ranked = srcFiles
+  for (const group of byGroup.values()) {
+    const { cwdSanitized, home, srcFiles } = group;
+    const threadName = destFileName(cwdSanitized, home);
+    const destPath = join(EVENT_LOG_DIR, threadName);
+    const perEngine = srcFiles.filter((file) => file !== threadName);
+    if (perEngine.length === 0) continue;
+    // v2 already wrote a thread file. Do not rewrite live history.
+    if (existsSync(destPath)) continue;
+
+    const ranked = perEngine
       .map((file) => {
         let mtime = 0;
         try { mtime = statSync(join(EVENT_LOG_DIR, file)).mtimeMs; } catch { /* keep 0 */ }
@@ -123,20 +244,53 @@ export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean }
       .sort((a, b) => a.mtime - b.mtime || a.file.localeCompare(b.file));
 
     const merged: Line[] = [];
+    let groupFailed = false;
     for (const { file } of ranked) {
-      merged.push(...readLines(join(EVENT_LOG_DIR, file), file));
+      const read = readLines(join(EVENT_LOG_DIR, file), file);
+      if (!read.ok) {
+        console.warn(`[thread-migrate] ${home}: aborting group, could not read ${file}: ${read.error}`);
+        groupFailed = true;
+        break;
+      }
+      merged.push(...read.lines);
+    }
+    if (groupFailed) {
+      failed = true;
+      continue;
     }
 
-    const deduped: Line[] = [];
-    const seen = new Set<string>();
-    for (const row of merged) {
-      const fp = fingerprint(row.ev);
-      if (fp && seen.has(fp)) continue;
-      if (fp) seen.add(fp);
-      deduped.push(row);
+    const timed = merged.map((row) => eventTime(row.ev));
+    const allTimed = timed.length > 0 && timed.every((t) => t != null);
+    if (perEngine.length > 1 && !allTimed) {
+      console.warn(`[thread-migrate] ${home} (${cwdSanitized}): leaving ${perEngine.length} source(s) unmigrated; no wall-clock to order A→B→A`);
+      report.push({
+        home,
+        cwd: resolveCwd(cwdSanitized) ?? cwdSanitized,
+        sources: ranked.map((r) => r.file),
+        events: 0,
+        archived: false,
+        skipped: 'ambiguous-chronology',
+      });
+      continue;
     }
 
-    const lines = deduped.map((row, i) => {
+    const ordered = allTimed
+      ? merged
+        .map((row, i) => ({ row, t: timed[i] as number }))
+        .sort((a, b) => a.t - b.t || a.row.src.localeCompare(b.row.src) || a.row.seq - b.row.seq)
+        .map((x) => x.row)
+      : merged;
+
+    const seenUuid = new Set<string>();
+    const unique: Line[] = [];
+    for (const row of ordered) {
+      const uuid = eventUuid(row.ev);
+      if (uuid && seenUuid.has(uuid)) continue;
+      if (uuid) seenUuid.add(uuid);
+      unique.push(row);
+    }
+
+    const lines = unique.map((row, i) => {
       const rec: { seq: number; ev: unknown; eng?: string; mdl?: string } = {
         seq: i + 1,
         ev: row.ev,
@@ -146,23 +300,36 @@ export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean }
       return JSON.stringify(rec);
     });
 
-    const dest = join(EVENT_LOG_DIR, threadName);
-    const tmp = `${dest}.migrate-${process.pid}`;
+    const tmp = `${destPath}.migrate-${process.pid}`;
     writeFileSync(tmp, lines.length ? lines.join('\n') + '\n' : '', 'utf8');
-    renameSync(tmp, dest);
+    renameSync(tmp, destPath);
 
-    for (const file of srcFiles) {
-      if (file === threadName) continue;
-      try {
-        renameSync(join(EVENT_LOG_DIR, file), join(archiveDir, file));
-      } catch (err) {
-        console.warn(`[thread-migrate] could not archive ${file}:`, (err as Error).message);
+    const archived = allTimed || perEngine.length === 1;
+    if (archived) {
+      for (const file of perEngine) {
+        try {
+          renameSync(join(EVENT_LOG_DIR, file), join(archiveDir, file));
+        } catch (err) {
+          console.warn(`[thread-migrate] could not archive ${file}:`, (err as Error).message);
+        }
       }
     }
-    report.push({ home, sources: ranked.map((r) => r.file), events: lines.length });
-    console.log(`[thread-migrate] ${home}: ${srcFiles.length} source(s) → ${lines.length} event(s)`);
+
+    report.push({
+      home,
+      cwd: resolveCwd(cwdSanitized) ?? cwdSanitized,
+      sources: ranked.map((r) => r.file),
+      events: lines.length,
+      archived,
+    });
+    console.log(`[thread-migrate] ${home}: ${perEngine.length} source(s) → ${lines.length} event(s)`);
   }
 
-  writeFileSync(MARKER, JSON.stringify({ at: Date.now(), archive: archiveDir, report }, null, 2));
+  if (failed) {
+    console.warn('[thread-migrate] one or more groups failed; marker not written, will retry on next boot');
+    return { migrated: report.length, skipped: false };
+  }
+
+  writeFileSync(MARKER, JSON.stringify({ at: Date.now(), archive: archiveDir, report, compact: compactReport }, null, 2));
   return { migrated: report.length, skipped: false };
 }

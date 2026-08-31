@@ -4,7 +4,7 @@
 // a ChatMeta snapshot up to the right pane (Session card: model, status,
 // context meter, compaction).
 
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useChat } from '../chat/hooks/useChat';
 import { useCompanionPicker } from '../chat/hooks/useCompanionPicker';
 import { useChatShell } from '../chat/components/reimagine/useChatShell';
@@ -74,16 +74,43 @@ export function GrokChat(props: GrokChatProps) {
     return () => window.removeEventListener('keydown', onKey);
   }, [chat.status, chat.stop]);
 
-  const s = useChatShell({ chat, picker });
+  const agentId = props.agent?.id;
+  const persistGen = useRef(0);
+  const persistChain = useRef(Promise.resolve());
+  const desiredEngine = useRef<string | null>(null);
+  const persistEngine = useCallback((next: string) => {
+    if (!agentId) return;
+    desiredEngine.current = next;
+    const gen = ++persistGen.current;
+    persistChain.current = persistChain.current.catch(() => {}).then(async () => {
+      if (gen !== persistGen.current) return;
+      const want = desiredEngine.current;
+      if (!want) return;
+      try {
+        await updateAgentReq(agentId, { engine: want });
+      } catch {
+        if (gen !== persistGen.current) return;
+        const retry = desiredEngine.current;
+        if (!retry) return;
+        try {
+          await updateAgentReq(agentId, { engine: retry });
+        } catch {
+          /* picker already shows the user's choice; the next pick retries */
+        }
+      }
+    });
+  }, [agentId]);
 
-  // A mid-thread model change has to stick on the agent, not just localStorage.
-  // Otherwise the sidebar / team bus reopen the old engine and it looks like
-  // the switch never happened.
-  useEffect(() => {
-    if (!props.agent) return;
-    if (picker.companion === props.agent.engine) return;
-    void updateAgentReq(props.agent.id, { engine: picker.companion }).catch(() => { /* next poll retries */ });
-  }, [picker.companion, props.agent?.id, props.agent?.engine]);
+  const setCompanion = picker.setCompanion;
+  const pickerForUi = {
+    ...picker,
+    setCompanion: (next: string) => {
+      setCompanion(next);
+      persistEngine(next);
+    },
+  };
+
+  const s = useChatShell({ chat, picker: pickerForUi });
 
   // Report the Session-card snapshot upward. compactingRef is a ref, so poll
   // it lightly while the session is live.
@@ -131,7 +158,7 @@ export function GrokChat(props: GrokChatProps) {
   return (
     <GrokConversation
       s={s}
-      picker={picker}
+      picker={pickerForUi}
       repo={repo}
       agent={agentLabel}
       agentRecord={props.agent}

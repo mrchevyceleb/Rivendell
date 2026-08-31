@@ -10,7 +10,7 @@ import type { Event, PermissionRequest, PermissionRuleset } from '@opencode-ai/s
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { adaptImagesForTextModel, getVisionMode } from './vision-adapter.ts';
-import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
 import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -3794,6 +3794,7 @@ export class BananaSession {
   // ── emit helpers ───────────────────────────────────────────
 
   private emit(msg: SessionEvent): void {
+    if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
     this.eventLog.push(se);

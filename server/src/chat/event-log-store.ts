@@ -135,11 +135,16 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   // EXACT retained tail. Pro-rating the whole file by event count under-counts
   // badly on a long lane, where the biggest events cluster at the end.
   const eventChars: number[] = [];
+  // High-water comes from every valid persisted record, including plumbing we
+  // drop from the replay window. Filtering first would let nextSeq collide
+  // with an on-disk seq when the file ends on commands_changed / hook_*.
+  let highWater = 0;
   for (const line of raw.split('\n')) {
     if (!line) continue;
     try {
       const parsed = JSON.parse(line);
       if (typeof parsed?.seq === 'number' && parsed?.ev) {
+        if (parsed.seq > highWater) highWater = parsed.seq;
         if (isPlumbingEvent(parsed.ev)) continue;
         const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
         if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
@@ -151,9 +156,6 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
       // skip malformed lines (interrupted append, etc.)
     }
   }
-  const highWater = events.length > 0
-    ? events.reduce((m, e) => (e.seq > m ? e.seq : m), 0)
-    : 0;
   // Trim to the most recent window so a long-lived session that crashed
   // mid-turn doesn't keep replaying ancient events forever.
   const trimmed = events.length > MAX_EVENTS_PER_LOG

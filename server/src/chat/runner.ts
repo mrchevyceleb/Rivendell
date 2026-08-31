@@ -8,7 +8,7 @@ import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
-import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
 import { maybeAutoCompact, noteUserTurn, peekEnginePrimer, clearThreadMemory, clearRotation, isRotationOwed } from './compaction.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
@@ -845,6 +845,7 @@ class ClaudeSession {
   // ── private ────────────────────────────────────────────────
 
   private emit(msg: SessionEvent): void {
+    if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
     this.eventLog.push(se);

@@ -189,15 +189,19 @@ async function scanChatHistory(): Promise<ChatHistoryItem[]> {
     if (!mainKeys.has(base)) mainKeys.set(base, { cli: p.cli, cwd: p.cwd });
   }
 
-  const threadHomes = new Set(
-    files
-      .filter((f) => f.startsWith('thread_') && f.endsWith('.jsonl') && !f.endsWith('.archive.jsonl'))
-      .map((f) => {
-        const m = /_(bot-[a-z0-9][a-z0-9-]*)(?:__acct__[a-z0-9-]+)?\.jsonl$/i.exec(f);
-        return m ? m[1] : null;
-      })
-      .filter((h): h is string => Boolean(h)),
-  );
+  // Hide a leftover per-engine bot log only when THIS workspace already has
+  // the matching thread_ file. A thread in the hub must not hide a bot-max
+  // conversation that still lives under a different cwd.
+  const threadKeys = new Set<string>();
+  for (const file of files) {
+    if (!file.startsWith('thread_') || !file.endsWith('.jsonl') || file.endsWith('.archive.jsonl')) continue;
+    const stem = file.slice(0, -'.jsonl'.length);
+    const hit = prefixes.find((p) => p.cli === 'thread' && stem.startsWith(p.prefix));
+    if (!hit) continue;
+    const chatId = stem.slice(hit.prefix.length);
+    const bareHome = chatId.replace(/__acct__[a-z0-9-]+$/i, '');
+    if (/^bot-[a-z0-9][a-z0-9-]*$/i.test(bareHome)) threadKeys.add(`${hit.cwd}\0${bareHome}`);
+  }
 
   // Stat first, cap the candidate set, THEN pay for content reads — and keep
   // every read async so a big log dir never stalls the chat/WebSocket loop.
@@ -224,7 +228,7 @@ async function scanChatHistory(): Promise<ChatHistoryItem[]> {
     // Per-engine leftovers of an already-migrated agent thread. The live row
     // is the thread_ file; showing both forks the sidebar the way the logs did.
     const bareHome = chatId.replace(/__acct__[a-z0-9-]+$/i, '');
-    if (hit.cli !== 'thread' && threadHomes.has(bareHome) && /^bot-/.test(bareHome)) return;
+    if (hit.cli !== 'thread' && /^bot-/.test(bareHome) && threadKeys.has(`${hit.cwd}\0${bareHome}`)) return;
     try {
       const st = await stat(join(EVENT_LOG_DIR, file));
       candidates.push({ file, chatId, cli: hit.cli, cwd: hit.cwd, path: join(EVENT_LOG_DIR, file), mtimeMs: st.mtimeMs, size: st.size });
