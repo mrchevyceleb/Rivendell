@@ -11,6 +11,7 @@ import { teamRouter } from './routes/team.ts';
 import { routinesRouter } from './routes/routines.ts';
 import { messagePinsRouter } from './routes/messagePins.ts';
 import { registerVoiceCalls } from './voice/grokCall.ts';
+import { voicePreviewRouter } from './voice/preview.ts';
 import { startRoutineScheduler } from './chat/routines.ts';
 import { ensureXaiProxy, shutdownXaiProxy } from './chat/xai-proxy.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
@@ -71,6 +72,7 @@ app.use('/api/team', teamRouter);
 app.use('/api/routines', routinesRouter);
 app.use('/api/message-pins', messagePinsRouter);
 app.use('/api/jarvis', jarvisRouter);
+app.use('/api/voice-preview', voicePreviewRouter);
 // Localhost-only headless runner (cron agentic loop). Gated by MCP_AUTH_TOKEN.
 app.use('/internal', internalRouter);
 

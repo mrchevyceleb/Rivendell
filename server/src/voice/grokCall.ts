@@ -25,7 +25,7 @@ import { STATE_DIR } from '../config.ts';
 import { listAgents } from '../chat/agents.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 
-const GROK_REALTIME_URL = 'wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0';
+export const GROK_REALTIME_URL = 'wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0';
 export const GROK_VOICE_IDS = ['ara', 'eve', 'leo', 'rex', 'sal', 'atlas', 'aurora', 'luna', 'orion', 'carina'] as const;
 
 const CALL_RULES =
@@ -34,7 +34,7 @@ const CALL_RULES =
   'Keep spoken replies short and conversational — one or two sentences unless Matt asks for depth. ' +
   'If a request needs files, tools, or teammates, say you will handle it in the thread after the call and keep talking.';
 
-function grokApiKey(): string {
+export function grokApiKey(): string {
   const env = process.env.GROK_API_KEY || process.env.XAI_API_KEY;
   if (env) return env;
   try {

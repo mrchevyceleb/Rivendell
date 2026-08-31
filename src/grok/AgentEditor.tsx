@@ -1,7 +1,7 @@
 // Agent editor — create/edit a teammate: name, role, engine, scope doc.
 
 import { useEffect, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { ChevronDown, Loader2, Play, Square, X } from 'lucide-react';
 import { WORKSPACE_COMPANIONS } from '../chat/hooks/useCompanionPicker';
 import { createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, agentColor, type Agent } from './agents';
 import { GROK_VOICES } from '../voice/useGrokCall';
@@ -20,6 +20,11 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   const [role, setRole] = useState('');
   const [engine, setEngine] = useState('xai');
   const [voice, setVoice] = useState('ara');
+  const [voiceListOpen, setVoiceListOpen] = useState(false);
+  const [preview, setPreview] = useState<{ id: string; status: 'loading' | 'playing' } | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const voiceWrapRef = useRef<HTMLDivElement | null>(null);
+  const voiceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [pinned, setPinned] = useState(false);
   const [scope, setScope] = useState('');
   const [busy, setBusy] = useState(false);
@@ -59,6 +64,102 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
     if (reopened) nameRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, agentId]);
+
+  const stopVoicePreview = () => {
+    previewAudioRef.current?.pause();
+    previewAudioRef.current = null;
+    setPreview(null);
+  };
+
+  // Stop any voice preview when the editor closes (and on unmount).
+  useEffect(() => {
+    if (open) return;
+    stopVoicePreview();
+    setVoiceListOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  useEffect(() => () => {
+    previewAudioRef.current?.pause();
+    previewAudioRef.current = null;
+  }, []);
+
+  // Focus the selected row when the list opens (roving-focus listbox).
+  useEffect(() => {
+    if (!voiceListOpen) return;
+    voiceWrapRef.current
+      ?.querySelector<HTMLButtonElement>('.bt-voice-row.sel .bt-voice-name')
+      ?.focus();
+  }, [voiceListOpen]);
+
+  // Close the voice list on outside pointerdown (same pattern as the
+  // conversation settings menu).
+  useEffect(() => {
+    if (!voiceListOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (voiceWrapRef.current && !voiceWrapRef.current.contains(e.target as Node)) setVoiceListOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    return () => document.removeEventListener('pointerdown', onDown);
+  }, [voiceListOpen]);
+
+  const toggleVoicePreview = (id: string) => {
+    if (preview?.id === id) {
+      stopVoicePreview();
+      return;
+    }
+    stopVoicePreview();
+    setPreview({ id, status: 'loading' });
+    const audio = new Audio(`/api/voice-preview?voice=${encodeURIComponent(id)}`);
+    previewAudioRef.current = audio;
+    // Guard callbacks by the CURRENT audio element, not the voice id — in an
+    // A→B→A click sequence the first A's late events must not touch the new A.
+    const isCurrent = () => previewAudioRef.current === audio;
+    const fail = () => {
+      if (!isCurrent()) return;
+      previewAudioRef.current = null;
+      setPreview(null);
+      setErr('Voice preview failed — check the xAI key and try again.');
+    };
+    audio.onplaying = () => { if (isCurrent()) setPreview({ id, status: 'playing' }); };
+    audio.onended = () => { if (isCurrent()) { previewAudioRef.current = null; setPreview(null); } };
+    audio.onerror = fail;
+    void audio.play().catch(fail);
+  };
+
+  const onVoiceListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const names = Array.from(
+      (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('.bt-voice-name'),
+    );
+    if (!names.length) return;
+    const idx = names.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const next = idx < 0
+        ? (e.key === 'ArrowDown' ? 0 : names.length - 1)
+        : (idx + (e.key === 'ArrowDown' ? 1 : -1) + names.length) % names.length;
+      names[next]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      names[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      names[names.length - 1]?.focus();
+    } else if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'p') {
+      // Preview the focused option's voice (play buttons stay out of tab order).
+      if (idx >= 0) {
+        e.preventDefault();
+        const target = GROK_VOICES[idx];
+        if (target) toggleVoicePreview(target.id);
+      }
+    } else if (e.key === 'Escape') {
+      // Close just the list and return focus to the trigger (the dialog has
+      // its own Esc handler — stopPropagation keeps it from closing too).
+      e.preventDefault();
+      e.stopPropagation();
+      setVoiceListOpen(false);
+      voiceTriggerRef.current?.focus();
+    }
+  };
 
   // Keyed on `open` ONLY — inline `onClose` from the parent changes identity
   // every agents poll, which re-ran this effect and yanked focus back to a
@@ -200,14 +301,69 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
           </label>
         ) : null}
 
-        <label className="bt-agent-field">
+        <div className="bt-agent-field">
           <span>Voice — how this agent sounds on calls</span>
-          <select value={voice} onChange={(e) => setVoice(e.target.value)}>
-            {GROK_VOICES.map((v) => (
-              <option key={v.id} value={v.id}>{v.label}</option>
-            ))}
-          </select>
-        </label>
+          <div className="bt-voice-wrap" ref={voiceWrapRef}>
+            <button
+              type="button"
+              ref={voiceTriggerRef}
+              className="bt-voice-current"
+              onClick={() => setVoiceListOpen((o) => !o)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') { e.preventDefault(); setVoiceListOpen(true); }
+              }}
+              aria-haspopup="listbox"
+              aria-expanded={voiceListOpen}
+            >
+              <span>{GROK_VOICES.find((v) => v.id === voice)?.label ?? voice}</span>
+              <ChevronDown size={14} />
+            </button>
+            <button
+              type="button"
+              className="bt-voice-play"
+              onClick={() => toggleVoicePreview(voice)}
+              aria-label={`Preview ${GROK_VOICES.find((v) => v.id === voice)?.label ?? voice}`}
+              title="Hear this voice"
+            >
+              {preview?.id === voice && preview.status === 'loading'
+                ? <Loader2 size={14} className="bt-spin" />
+                : preview?.id === voice
+                  ? <Square size={13} />
+                  : <Play size={14} />}
+            </button>
+            {voiceListOpen ? (
+              <div className="bt-voice-list" role="listbox" aria-label="Voices" onKeyDown={onVoiceListKeyDown}>
+                {GROK_VOICES.map((v) => (
+                  <div key={v.id} className={`bt-voice-row${v.id === voice ? ' sel' : ''}`}>
+                    <button
+                      type="button"
+                      className="bt-voice-name"
+                      role="option"
+                      aria-selected={v.id === voice}
+                      onClick={() => { setVoice(v.id); setVoiceListOpen(false); stopVoicePreview(); }}
+                    >
+                      {v.label}
+                    </button>
+                    <button
+                      type="button"
+                      className="bt-voice-play"
+                      tabIndex={-1}
+                      onClick={() => toggleVoicePreview(v.id)}
+                      aria-label={`Preview ${v.label}`}
+                      title={`Hear ${v.label}`}
+                    >
+                      {preview?.id === v.id && preview.status === 'loading'
+                        ? <Loader2 size={14} className="bt-spin" />
+                        : preview?.id === v.id
+                          ? <Square size={13} />
+                          : <Play size={14} />}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
 
         <label className="bt-agent-field">
           <span>Scope — who they are and what they do (markdown, editable here or in ~/.rivendell/personas/&lt;id&gt;.md)</span>
