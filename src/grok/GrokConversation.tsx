@@ -17,6 +17,7 @@ import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselP
 import { Plus } from '../chat/components/reimagine/icons';
 import { BotMark } from './GrokLogo';
 import { agentMark, agentColor, agentAvatarUrl, type Agent } from './agents';
+import { useAgentMessagePins } from './messagePins';
 
 const THINKING_PHRASES = ['Thinking', 'Working', 'On it'];
 
@@ -42,6 +43,7 @@ export function GrokConversation(props: BotConversationProps) {
 
   const agent = props.agentRecord;
   const agentName = agent?.name ?? props.agent ?? 'Elrond';
+  const messagePins = useAgentMessagePins(agent?.id);
 
   const empty = s.blocks.length === 0 && !s.busy;
 
@@ -194,6 +196,10 @@ export function GrokConversation(props: BotConversationProps) {
               bottomRef={s.sticky.bottomRef}
               phrases={THINKING_PHRASES}
               collapseSteps
+              pin={agent ? {
+                pinnedBlockIds: messagePins.pins.map((p) => p.blockId),
+                onToggle: messagePins.toggle,
+              } : undefined}
             />
             {s.error ? (
               <div className="chip" style={{ color: 'var(--r-rose)', borderColor: 'var(--r-line)', background: 'var(--r-bg-card)' }}>

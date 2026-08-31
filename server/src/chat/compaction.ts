@@ -1,65 +1,78 @@
-// Auto-compaction for long-running teammate threads.
+// Forever-thread compaction: one overwriteable rolling memory per agent
+// home thread. Compact is the summary of everything OLDER THAN the last 50
+// visible turns — never the last 50 itself. The file is replaced in place.
 //
-// Grok Bot's model: an agent has ONE persistent conversation, forever. The
-// context behind it compacts on a cadence so the thread never dies:
+// Every model turn:
+//   1. persona / FACE / brief rules (injected by the runner)
+//   2. compact(history − last50) — one blob, always overwrites itself
+//   3. last 50 visible user+assistant turns
 //
-//   every 100 user turns →
-//     1. generate a JUICY durable compact (3000–5000 words, Grok 4.6 via the
-//        local xAI proxy) of the full transcript,
-//     2. fire it into the savemem RAG vault (assistant-mcp `memory`
-//        save_memory) so every tool in the house can recall it semantically,
-//     3. rotate the session's MODEL context: respawn the engine with the
-//        compact as the primer (claude family: --append-system-prompt on the
-//        fresh process; codex/banana: primed next turn on a fresh thread),
-//     4. stamp a `compacted` marker into the durable event log.
+// Overflow compact fires when visible turns go past 50: fold the oldest
+// extras into the compact blob (replace file), keep last 50 as the tail.
+// Engine rotation (fresh process, no jsonl --resume) happens on that overflow
+// compact — never because tool dumps bloated jsonl past 350KB, and never
+// every message.
 //
-// The durable event log — what the user actually sees — is NEVER wiped by
-// this. Display history is lossless; compaction replaces only what the model
-// carries in its head.
-//
-// Counting: every runner echoes accepted prompts as `_user_echo` events (the
-// universal replay shape), but the event log is a capped rolling window
-// (MAX_EVENTS_PER_LOG), so the cadence also keeps a MONOTONIC per-thread
-// user-turn counter in ~/.rivendell/compaction-state.json — the window can
-// never make a busy thread miss its compaction.
+// The durable event log the user sees is NEVER wiped.
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
-import { flushEventLog } from './event-log-store.ts';
+import { flushEventLog, loadEventLogSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
+import {
+  WINDOW_TURNS,
+  assembleForeverTurn,
+  extractVisibleTurns,
+  formatAgedTurns,
+  overflowChars,
+  shouldCompactOverflow,
+  splitWindow,
+  type VisibleTurn,
+} from './threadWindow.ts';
 
-/** User turns between compactions (Matt's number). */
-export const COMPACT_EVERY_USER_TURNS = 100;
-/** We ask for 3000–5000 words and refuse to bank anything thin. */
-const MIN_ACCEPT_WORDS = 1500;
+const MIN_ACCEPT_WORDS = 400;
 const COMPACT_MAX_TOKENS = 8000;
-/** Transcript feed cap: head + tail around an elision marker. */
 const TRANSCRIPT_HEAD = 24 * 1024;
 const TRANSCRIPT_TAIL = 220 * 1024;
+/** Compact leftover overflow before the 2000-event log trim drops it. */
+const LOG_CAP_SLACK = 80;
+/** Near the log cap, keep folding batches so trim cannot outrun compact. */
+const LOG_CAP_MAX_BATCHES = 8;
 
 const STATE_FILE = join(STATE_DIR, 'compaction-state.json');
+const COMPACTS_DIR = join(STATE_DIR, 'thread-compacts');
+
+export type CompactBlob = {
+  compact: string;
+  words: number;
+  count: number;
+  lastAt: number;
+  lastCompactedSeq: number;
+  chatId?: string;
+};
 
 type CompactionRecord = {
-  /** Monotonic user-turn counter (survives the rolling log window). */
   userTurnsTotal: number;
-  /** user-turn count at the last successful compact. */
   lastCompactUserTurns: number;
-  /** how many compactions this thread has had. */
   count: number;
   lastAt: number;
   lastWords: number;
-  /** A compact banked while a turn was streaming (or while the server died
-   *  before the primer fired); its rotation is owed and pays on the next
-   *  idle turn end. Also restores codex/banana primers across restarts. */
+  /** Owed engine rotation (deferred while a turn streamed, or restart). */
+  rotationOwed?: boolean;
+  /** Legacy primer string — treat as owed and reconstruct. */
   pendingRotation?: string | null;
+  lastFatRotateAt?: number;
 };
 type CompactionState = Record<string, CompactionRecord>;
 
-// All state mutations funnel through one queue; each mutation reloads and
-// merges so concurrent keys can never clobber each other's records.
 let stateQueue: Promise<void> = Promise.resolve();
+
+function defaultRec(): CompactionRecord {
+  return { userTurnsTotal: 0, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
+}
 
 function loadState(): CompactionState {
   try {
@@ -72,7 +85,7 @@ function loadState(): CompactionState {
 function mutateState(fn: (state: CompactionState) => void): Promise<void> {
   stateQueue = stateQueue.then(() => {
     try {
-      const state = loadState(); // fresh snapshot — merge, never blind overwrite
+      const state = loadState();
       fn(state);
       mkdirSync(STATE_DIR, { recursive: true });
       writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
@@ -83,8 +96,56 @@ function mutateState(fn: (state: CompactionState) => void): Promise<void> {
   return stateQueue;
 }
 
-/** User turns currently visible in the log window (echo shape: universal
- *  across claude/codex/banana runners). Used to seed the monotonic counter. */
+function compactFileId(key: string): string {
+  const hash = createHash('sha1').update(key).digest('hex').slice(0, 12);
+  const readable = key.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+  return `${readable}_${hash}`;
+}
+
+function compactPath(key: string): string {
+  return join(COMPACTS_DIR, `${compactFileId(key)}.json`);
+}
+
+/** The single overwriteable rolling memory for this thread. */
+export function loadCompactBlob(key: string): CompactBlob | null {
+  try {
+    const raw = JSON.parse(readFileSync(compactPath(key), 'utf8')) as CompactBlob;
+    if (raw && typeof raw.compact === 'string' && raw.compact.trim()) return raw;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number): boolean {
+  mkdirSync(COMPACTS_DIR, { recursive: true });
+  const path = compactPath(key);
+  const tmp = epoch != null ? `${path}.${epoch}.${process.pid}.tmp` : `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(blob, null, 2));
+  if (epoch != null && epochOf(key) !== epoch) {
+    try { unlinkSync(tmp); } catch { /* stale tmp only */ }
+    return false;
+  }
+  renameSync(tmp, path);
+  return true;
+}
+
+/** Wipe rolling memory + cadence when the user fresh-starts a thread. */
+export async function clearThreadMemory(key: string): Promise<void> {
+  bumpCompactEpoch(key);
+  try {
+    unlinkSync(compactPath(key));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      console.warn(`[compaction] ${key}: compact blob unlink failed:`, (err as Error).message);
+    }
+  }
+  await mutateState((state) => {
+    delete state[key];
+  });
+}
+
 export function countUserEchoes(events: Array<{ ev: any }>): number {
   let n = 0;
   for (const { ev } of events) {
@@ -95,13 +156,10 @@ export function countUserEchoes(events: Array<{ ev: any }>): number {
   return n;
 }
 
-/** Called by every runner's send() after the user echo: keeps the monotonic
- *  turn counter honest regardless of the rolling log window. */
 export function noteUserTurn(key: string): void {
   void mutateState((state) => {
     const rec = state[key];
     if (!rec) {
-      // First sight of this thread: seed from the visible window (floor).
       state[key] = { userTurnsTotal: 1, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
     } else {
       rec.userTurnsTotal += 1;
@@ -109,170 +167,312 @@ export function noteUserTurn(key: string): void {
   });
 }
 
-/** Bank an owed rotation (deferred or restart-surviving primer debt). */
-export function bankRotation(key: string, primer: string): void {
+function recIsOwed(rec: CompactionRecord | undefined): boolean {
+  if (!rec) return false;
+  // Fat-rotate used to bank a session kill after bloated jsonl. That debt
+  // must never drop --resume. Only overflow-compact (lastAt after the fat
+  // stamp) still owes an engine window seed.
+  if ((rec.lastFatRotateAt ?? 0) > 0 && (rec.lastFatRotateAt ?? 0) >= (rec.lastAt ?? 0)) {
+    return false;
+  }
+  if (rec.rotationOwed) return true;
+  return typeof rec.pendingRotation === 'string' && rec.pendingRotation.trim().length > 0;
+}
+
+export function bankRotation(key: string, _primer?: string): void {
   void mutateState((state) => {
-    const rec = state[key] ?? { userTurnsTotal: 0, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
-    rec.pendingRotation = primer;
+    const rec = state[key] ?? defaultRec();
+    rec.rotationOwed = true;
+    rec.pendingRotation = null;
     state[key] = rec;
   });
 }
 
-/** Take (and clear) an owed rotation, if any. */
+export function isRotationOwed(key: string): boolean {
+  return recIsOwed(loadState()[key]);
+}
+
+export function clearRotation(key: string): Promise<void> {
+  return mutateState((state) => {
+    if (state[key]) {
+      state[key].rotationOwed = false;
+      state[key].pendingRotation = null;
+    }
+  });
+}
+
+/** Lift a pre-forever-thread `pendingRotation` primer into the overwriteable blob
+ *  so upgrade does not throw away the only durable summary. */
+function migrateLegacyPrimer(key: string): void {
+  const rec = loadState()[key];
+  const pending = rec?.pendingRotation;
+  if (typeof pending !== 'string' || !pending.trim()) return;
+  if (!loadCompactBlob(key)) {
+    const compact = pending.trim();
+    writeCompactBlob(key, {
+      compact,
+      words: compact.split(/\s+/).length,
+      count: Math.max(1, rec.count || 1),
+      lastAt: rec.lastAt || Date.now(),
+      lastCompactedSeq: 0,
+    });
+  }
+  void mutateState((state) => {
+    if (state[key]) {
+      state[key].pendingRotation = null;
+      state[key].rotationOwed = true;
+    }
+  });
+}
+
+export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev: any }>): string {
+  migrateLegacyPrimer(key);
+  const evs = events ?? loadEventLogSync(key).events;
+  const blob = loadCompactBlob(key);
+  return assembleForeverTurn({
+    events: evs,
+    compact: blob?.compact ?? '',
+    lastCompactedSeq: blob?.lastCompactedSeq,
+  }).primer;
+}
+
 export async function takeRotation(key: string): Promise<string | null> {
-  const primer = loadState()[key]?.pendingRotation ?? null;
-  if (primer) await mutateState((state) => { if (state[key]) state[key].pendingRotation = null; });
-  return primer;
+  if (!recIsOwed(loadState()[key])) return null;
+  await mutateState((state) => {
+    if (state[key]) {
+      state[key].rotationOwed = false;
+      state[key].pendingRotation = null;
+    }
+  });
+  const primer = peekEnginePrimer(key);
+  return primer || null;
 }
 
-/** Flatten the log into a readable transcript for the compactor. User side
- *  comes from the `_user_echo` replay events; assistant side from the
- *  claude-shaped `assistant` message events all runners synthesize. */
-function buildTranscript(events: Array<{ ev: any }>): string {
-  const parts: string[] = [];
-  for (const { ev } of events) {
-    if (ev?.type !== 'event') continue;
-    const e = ev.event;
-    if (e?.type === '_user_echo' && typeof e.text === 'string' && e.text.trim()) {
-      parts.push(`MATT: ${e.text}`);
-      continue;
-    }
-    if (e?.type === 'assistant') {
-      const content = e.message?.content;
-      const texts: string[] = [];
-      if (typeof content === 'string') texts.push(content);
-      else if (Array.isArray(content)) {
-        for (const c of content) if (c?.type === 'text' && typeof c.text === 'string' && c.text.trim()) texts.push(c.text);
-      }
-      if (texts.length) parts.push(`AGENT: ${texts.join('\n')}`);
-    }
-  }
-  let transcript = parts.join('\n\n');
-  if (transcript.length > TRANSCRIPT_HEAD + TRANSCRIPT_TAIL) {
-    transcript = `${transcript.slice(0, TRANSCRIPT_HEAD)}\n\n[…middle elided for size — the full log persists…]\n\n${transcript.slice(-TRANSCRIPT_TAIL)}`;
-  }
-  return transcript;
+function formatTurnsForCompact(turns: VisibleTurn[]): string {
+  return formatAgedTurns(turns);
 }
 
-const COMPACT_SYSTEM = `You are the memory keeper for a long-running AI-teammate conversation. You write the durable memory document that lets the thread continue FOREVER without losing anything that matters.
+/** Oldest-first batch that fits the compact prompt budget so lastCompactedSeq
+ *  never advances past turns the model actually saw. */
+function takeOverflowBatch(overflow: VisibleTurn[]): VisibleTurn[] {
+  const budget = TRANSCRIPT_HEAD + TRANSCRIPT_TAIL;
+  const batch: VisibleTurn[] = [];
+  let used = 0;
+  for (const t of overflow) {
+    const cost = t.text.length + 16;
+    if (batch.length > 0 && used + cost > budget) break;
+    batch.push(t);
+    used += cost;
+  }
+  return batch;
+}
+
+const COMPACT_SYSTEM = `You are the memory keeper for a long-running AI-teammate conversation. You write the ONE rolling memory document that lets the thread continue FOREVER. Each time you run, you REPLACE the previous document entirely (never append a new primer).
 
 Rules for the document you produce:
-- LENGTH: 3000–5000 words. Dense, concrete, specific. This is the whole point — a thin summary loses history.
+- LENGTH: keep the previous document's substance and fold in the new aged-out turns. Do not pad. Do not invent. Target 3000–5000 words only when the combined history actually supports that density; a short overflow should produce a modest update.
 - Capture: every decision made (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
-- Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the transcript.`;
+- Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
+- The last ~50 visible turns stay in the live working window and are NOT your job — only merge what just aged out of that window.`;
 
-const PRIMER_HEADER = `You are continuing a single long-running conversation that has been compacted to preserve its context window. The durable memory document below was generated from the full transcript (which is preserved verbatim elsewhere — nothing was lost). Treat it as ground truth for everything before this point: decisions, open work, people, facts, preferences, and the current state of play. Continue seamlessly from it. When something from before this point matters and is not in the document, say so rather than guessing.
-
-`;
-
-/** One compaction per key at a time. */
 const inFlight = new Set<string>();
+const compactEpoch = new Map<string, number>();
+
+function epochOf(key: string): number {
+  return compactEpoch.get(key) ?? 0;
+}
+
+function bumpCompactEpoch(key: string): number {
+  const n = epochOf(key) + 1;
+  compactEpoch.set(key, n);
+  return n;
+}
 
 export type AutoCompactArgs = {
   key: string;
   cli: string;
   chatId: string;
-  /** The session's in-memory event log (PersistedEvent-shaped). */
-  events: Array<{ ev: any }>;
-  /** True if a turn is currently streaming — rotation waits for idle. */
+  events: Array<{ seq?: number; ev: any }>;
   isBusy: () => boolean;
-  /** Persist+broadcast marker events through the session's emit. */
   emit: (ev: any) => void;
-  /** Runner-specific context rotation: restart the model with the primer. */
-  rotate: (primer: string) => Promise<void> | void;
+  /** Return `false` when the engine will seed on the *next* send (banana/codex).
+   *  Owed rotation stays banked until that send is acknowledged. */
+  rotate: (primer: string) => Promise<boolean | void> | boolean | void;
 };
+
+async function generateCompact(previous: string, overflow: VisibleTurn[]): Promise<{ compact: string; words: number }> {
+  const overflowText = formatTurnsForCompact(overflow);
+  const userContent = previous.trim()
+    ? `Previous rolling memory document (REPLACE this entirely with an updated version — do not stack primers):\n\n${previous}\n\n---\n\nAged-out turns that just left the last-${WINDOW_TURNS} working window. Merge them in:\n\n${overflowText}`
+    : `Turns older than the last-${WINDOW_TURNS} working window. Write the first rolling memory document:\n\n${overflowText}`;
+
+  await ensureXaiProxy();
+  const res = await fetch(`${xaiProxyBaseUrl().replace(/\/$/, '')}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${xaiProxySecret()}`,
+    },
+    body: JSON.stringify({
+      model: 'grok-4.6',
+      max_tokens: COMPACT_MAX_TOKENS,
+      system: COMPACT_SYSTEM,
+      messages: [{ role: 'user', content: userContent }],
+    }),
+  });
+  if (!res.ok) throw new Error(`compact generation failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+  const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+  const compact = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
+  const words = compact ? compact.split(/\s+/).length : 0;
+  const prevWords = previous.trim() ? previous.trim().split(/\s+/).length : 0;
+  const overflowWordEst = Math.max(1, Math.floor(overflowChars(overflow) / 5));
+  const minWords = prevWords
+    ? Math.max(80, Math.floor(prevWords * 0.85))
+    : Math.max(80, Math.min(MIN_ACCEPT_WORDS, overflowWordEst));
+  if (words < minWords) throw new Error(`compact came back thin (${words} words < ${minWords}) — will retry`);
+  return { compact, words };
+}
 
 export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> {
   const { key, cli, chatId } = args;
   if (inFlight.has(key)) return false;
+  const epoch = epochOf(key);
 
   const state = loadState();
   const rec = state[key];
 
-  // First, pay any owed rotation from a previous compact (turn was in flight
-  // when it banked, or the server restarted with the primer in debt).
-  const owed = rec?.pendingRotation;
-  if (owed && !args.isBusy()) {
+  migrateLegacyPrimer(key);
+
+  if (recIsOwed(loadState()[key]) && !args.isBusy()) {
     try {
+      if (epochOf(key) !== epoch) return false;
       await flushEventLog(key);
-      await args.rotate(owed);
-      await mutateState((s) => { if (s[key]) s[key].pendingRotation = null; });
-      console.warn(`[compaction] ${key}: owed rotation applied`);
+      if (!recIsOwed(loadState()[key])) return false;
+      const primer = peekEnginePrimer(key, args.events);
+      const applied = await args.rotate(primer);
+      if (epochOf(key) !== epoch) return false;
+      if (applied !== false) {
+        await mutateState((s) => {
+          if (s[key]) {
+            s[key].rotationOwed = false;
+            s[key].pendingRotation = null;
+          }
+        });
+      }
+      console.warn(`[compaction] ${key}: owed rotation applied (primer ${primer.length} chars)`);
+      return true;
     } catch (err) {
       console.warn(`[compaction] ${key}: owed rotation failed, will retry:`, (err as Error).message);
-      return false; // keep the debt; retry next turn end
+      return false;
     }
   }
 
-  // Cadence: monotonic counter (seeded from the visible window on first sight).
-  const total = rec?.userTurnsTotal ?? countUserEchoes(args.events);
-  const sinceLast = total - (rec?.lastCompactUserTurns ?? 0);
-  if (sinceLast < COMPACT_EVERY_USER_TURNS) return false;
+  const visible = extractVisibleTurns(args.events);
+  const { overflow } = splitWindow(visible);
+  const blob = loadCompactBlob(key);
+  const lastSeq = blob?.lastCompactedSeq ?? 0;
+  let overflowNew = overflow.filter((t) => t.seq > lastSeq);
+  const nearLogCap = args.events.length >= MAX_EVENTS_PER_LOG - LOG_CAP_SLACK;
+  const overflowReady = shouldCompactOverflow(overflowNew);
+  const compactNow = overflowReady || (nearLogCap && overflowNew.length > 0);
+
+  if (!compactNow) return false;
 
   inFlight.add(key);
-  console.warn(`[compaction] ${key}: ${sinceLast} user turns since last compact — compacting (${total} total)`);
+  const why = overflowReady ? 'overflow' : 'log-cap';
   try {
-    const transcript = buildTranscript(args.events);
-    if (transcript.length < 4000) {
-      // Not enough real content in the visible window — the monotonic counter
-      // still advances so we don't spin on every turn end.
+    let previous = blob?.compact ?? '';
+    let count = blob?.count ?? rec?.count ?? 0;
+    let lastCompactedSeq = lastSeq;
+    let generatedWords = 0;
+    let compactText = previous;
+    const total = rec?.userTurnsTotal ?? countUserEchoes(args.events);
+    const batchLimit = nearLogCap ? LOG_CAP_MAX_BATCHES : 1;
+
+    for (let batch = 0; batch < batchLimit; batch++) {
+      overflowNew = overflow.filter((t) => t.seq > lastCompactedSeq);
+      if (overflowNew.length === 0) break;
+      if (batch > 0 && !(nearLogCap && overflowNew.length > 0)) break;
+      const overflowBatch = takeOverflowBatch(overflowNew);
+      if (overflowBatch.length === 0) break;
+      console.warn(
+        `[compaction] ${key}: ${overflowBatch.length} visible turns past the ${WINDOW_TURNS}-window (${overflowChars(overflowBatch)} chars, ${why}${batch ? ` batch ${batch + 1}` : ''}) — overwriting rolling compact`,
+      );
+      const generated = await generateCompact(previous, overflowBatch);
+      if (epochOf(key) !== epoch) {
+        console.warn(`[compaction] ${key}: discarded compact — thread was fresh-started`);
+        return false;
+      }
+      count += 1;
+      lastCompactedSeq = overflowBatch.reduce((m, t) => Math.max(m, t.seq), lastCompactedSeq);
+      previous = generated.compact;
+      compactText = generated.compact;
+      generatedWords = generated.words;
+      const wrote = writeCompactBlob(key, {
+        compact: generated.compact,
+        words: generated.words,
+        count,
+        lastAt: Date.now(),
+        lastCompactedSeq,
+        chatId,
+      }, epoch);
+      if (!wrote || epochOf(key) !== epoch) {
+        console.warn(`[compaction] ${key}: discarded compact blob — thread was fresh-started`);
+        return false;
+      }
       await mutateState((s) => {
-        const r = s[key] ?? { userTurnsTotal: total, lastCompactUserTurns: 0, count: 0, lastAt: 0, lastWords: 0 };
-        r.lastCompactUserTurns = total; // skip this window; retry at the next threshold
-        s[key] = r;
+        if (epochOf(key) !== epoch) return;
+        s[key] = {
+          userTurnsTotal: total,
+          lastCompactUserTurns: total,
+          count,
+          lastAt: Date.now(),
+          lastWords: generated.words,
+          rotationOwed: true,
+          pendingRotation: null,
+        };
       });
-      return false;
     }
 
-    // 1 — generate the juicy compact via Grok through the local xAI proxy
-    //     (bearer = the proxy secret, exactly like the CLI's env).
-    await ensureXaiProxy();
-    const res = await fetch(`${xaiProxyBaseUrl().replace(/\/$/, '')}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${xaiProxySecret()}`,
-      },
-      body: JSON.stringify({
-        model: 'grok-4.6',
-        max_tokens: COMPACT_MAX_TOKENS,
-        system: COMPACT_SYSTEM,
-        messages: [{ role: 'user', content: `Transcript of the conversation so far:\n\n${transcript}` }],
-      }),
+    await mutateState((s) => {
+      if (epochOf(key) !== epoch) return;
+      s[key] = {
+        userTurnsTotal: total,
+        lastCompactUserTurns: total,
+        count,
+        lastAt: Date.now(),
+        lastWords: generatedWords,
+        rotationOwed: true,
+        pendingRotation: null,
+      };
     });
-    if (!res.ok) throw new Error(`compact generation failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
-    const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
-    const compact = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
-    const words = compact ? compact.split(/\s+/).length : 0;
-    if (words < MIN_ACCEPT_WORDS) throw new Error(`compact came back thin (${words} words < ${MIN_ACCEPT_WORDS}) — will retry next threshold`);
+    if (epochOf(key) === epoch && !loadState()[key]?.rotationOwed) {
+      bankRotation(key);
+    }
 
-    // 2 — savemem RAG hook (never blocks the compaction; failure is logged)
-    const count = (rec?.count ?? 0) + 1;
     let savedToRag = false;
     try {
       await callMcp('memory', {
         action: 'save_memory',
         params: {
-          title: `Chat compact — ${chatId} (#${count}, ${total} turns)`,
-          content: compact,
+          title: `Chat compact — ${chatId}`,
+          content: compactText,
           project: 'rivendell',
           category: 'conversation-compact',
-          tags: [cli, chatId, 'auto-compaction'],
+          tags: [cli, chatId, 'rolling-compact'],
         },
       });
       savedToRag = true;
     } catch (err) {
       console.warn(`[compaction] ${key}: savemem hook failed (compact still applies locally):`, (err as Error).message);
     }
+    if (epochOf(key) !== epoch) return false;
 
-    // 3 — stamp the marker FIRST (persisted in the durable log + broadcast),
-    //     flush its append, THEN rotate: rotation shuts this session down and
-    //     a shut-down session no longer persists or forwards emits.
     args.emit({
       type: 'compacted',
       chatId,
-      words,
+      words: generatedWords,
       turns: total,
       count,
       savedToRag,
@@ -280,27 +480,32 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     });
     await flushEventLog(key);
 
-    // 4 — rotate the model context with the compact as primer
+    const assembled = assembleForeverTurn({
+      events: args.events,
+      compact: compactText,
+      lastCompactedSeq,
+    });
+    const primer = assembled.primer;
     if (args.isBusy()) {
-      // A new turn started while we were generating. The compact is banked to
-      // RAG + stamped already; rotate on the next idle boundary instead of
-      // killing the in-flight stream. The owed rotation is stored in state.
-      await mutateState((s) => {
-        s[key] = { userTurnsTotal: total, lastCompactUserTurns: total, count, lastAt: Date.now(), lastWords: words, pendingRotation: PRIMER_HEADER + compact };
-      });
       console.warn(`[compaction] ${key}: turn in flight — rotation deferred to next turn end`);
       return true;
     }
-    await args.rotate(PRIMER_HEADER + compact);
-
-    await mutateState((s) => {
-      s[key] = { userTurnsTotal: total, lastCompactUserTurns: total, count, lastAt: Date.now(), lastWords: words };
-    });
-    console.warn(`[compaction] ${key}: compacted at ${total} user turns, ${words} words, rag=${savedToRag} (compact #${count})`);
+    if (epochOf(key) !== epoch) return false;
+    const applied = await args.rotate(primer);
+    if (epochOf(key) !== epoch) return false;
+    if (applied !== false) {
+      await mutateState((s) => {
+        if (s[key]) {
+          s[key].rotationOwed = false;
+          s[key].pendingRotation = null;
+        }
+      });
+    }
+    console.warn(
+      `[compaction] ${key}: overwrote compact #${count} (covers ${assembled.compactCovers} older, window=${assembled.windowTurns}, ${generatedWords} words, rag=${savedToRag})`,
+    );
     return true;
   } catch (err) {
-    // Retry on a later turn end — the threshold stays tripped because
-    // lastCompactUserTurns is only advanced on success.
     console.warn(`[compaction] ${key}: compact failed, will retry:`, (err as Error).message);
     return false;
   } finally {

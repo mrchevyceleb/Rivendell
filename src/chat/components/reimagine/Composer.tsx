@@ -249,8 +249,7 @@ export function Composer(props: ComposerProps) {
         </div>
       ) : null}
       {props.attachMenu}
-      <div className="composer">
-        {mobile ? props.attachButton : props.leadingSlot ?? null}
+      <div className={`composer${images.length > 0 ? ' has-attach' : ''}`}>
         {images.length > 0 ? (
           <div className="attach-tray">
             {images.map((img) => (
@@ -263,6 +262,7 @@ export function Composer(props: ComposerProps) {
             ))}
           </div>
         ) : null}
+        {mobile ? props.attachButton : props.leadingSlot ?? null}
         <textarea
           ref={taRef}
           rows={1}

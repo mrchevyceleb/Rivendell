@@ -3,10 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { TEAM_MCP_SCRIPT } from '../config.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, bankRotation, takeRotation } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory } from './compaction.ts';
+import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
+import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/fileProvider.ts';
@@ -189,75 +192,49 @@ function isIgnorableCodexStderr(line: string): boolean {
   return CODEX_TRACING_LINE.test(line);
 }
 
-function recapSnippet(text: string, max = 700): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  if (flat.length <= max) return flat;
-  return `${flat.slice(0, max - 32)} ... [truncated ${flat.length - max + 32} chars]`;
-}
-
-function stringifyToolResultContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((item: any) => {
-        if (item?.type === 'text' && typeof item.text === 'string') return item.text;
-        if (typeof item === 'string') return item;
-        return '';
-      })
-      .filter(Boolean)
-      .join('\n');
-  }
-  if (content == null) return '';
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
-
 export class CodexSession {
   readonly key: string;
+  /** Durable-history key — engine-free for agent home threads (threadKey.ts). */
+  readonly logKey: string;
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
   private listeners = new Set<Listener>();
   private subscriberCount = 0;
   private threadId: string | null = null;
-  /** Compaction primer pending for the next turn's prompt (context rotation). */
-  private compactPrimer: string | null = null;
+  /** Next turn seeds persona + rolling compact + last 50 on a fresh thread. */
+  private seedWindowOnNextTurn = false;
 
-  /** Pops the pending compaction primer — it primes exactly one turn.
-   *  Clearing the banked debt happens only after the turn is accepted. */
-  private consumeCompactPrimer(): string | null {
-    const p = this.compactPrimer;
-    this.compactPrimer = null;
-    if (p) void takeRotation(this.key); // turn accepted — the debt is paid
-    return p;
+  private consumeWindowSeed(): boolean {
+    return this.seedWindowOnNextTurn;
+  }
+
+  private ackWindowSeed(): Promise<void> {
+    if (!this.seedWindowOnNextTurn) return Promise.resolve();
+    this.seedWindowOnNextTurn = false;
+    return clearRotation(this.logKey);
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
   private async maybeCompact(): Promise<void> {
     try {
       await maybeAutoCompact({
-        key: this.key,
+        key: this.logKey,
         cli: this.cli,
         chatId: this.chatId,
         events: this.eventLog,
         isBusy: () => this.busy,
         emit: (ev) => this.emit(ev as any),
-        rotate: async (primer) => {
-          // Codex spawns per turn — rotation = drop the stored thread so the
-          // next turn starts a fresh one, primed with the compact. The primer
-          // is ALSO banked in compaction state so a server restart between
-          // rotation and the next message can't lose it.
-          this.compactPrimer = primer;
+        rotate: async () => {
+          this.seedWindowOnNextTurn = true;
           this.threadId = null;
           await setSessionId(this.cli, this.cwd, '', this.chatId);
-          bankRotation(this.key, primer);
+          bankRotation(this.logKey);
+          return false;
         },
       });
     } catch (err) {
-      console.warn(`[chat ${this.cli}] compaction check failed for ${this.key}:`, (err as Error).message);
+      console.warn(`[chat ${this.cli}] compaction check failed for ${this.logKey}:`, (err as Error).message);
     }
   }
   private busy = false;
@@ -273,6 +250,9 @@ export class CodexSession {
   private recoverContextOnNextTurn = false;
   private threadIdWrite: Promise<void> = Promise.resolve();
   private cancellationEmitted = false;
+  /** Model of the most recent turn — stamped onto persisted events so a merged
+   *  thread log can say which brain produced which turn. */
+  private turnModel: string | null = null;
   /** Codex doesn't need a warmup turn — ready immediately. */
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
@@ -281,6 +261,7 @@ export class CodexSession {
     this.chatId = chatId;
     this.cli = opts.cli ?? 'codex';
     this.key = keyOf(this.cli, cwd, chatId);
+    this.logKey = logKeyFor(this.cli, cwd, chatId);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
 
@@ -288,36 +269,49 @@ export class CodexSession {
     // restart between turns doesn't strand a reconnecting client whose
     // sinceSeq is past the new in-memory latestSeq.
     try {
-      const restored = loadEventLogSync(this.key);
+      const restored = loadEventLogSync(this.logKey);
       if (restored.events.length > 0) {
         this.eventLog = restored.events;
         this.nextSeq = restored.nextSeq;
         console.log(
-          `[chat codex] restored ${restored.events.length} event(s) from disk for ${this.key} (nextSeq=${this.nextSeq})`,
+          `[chat codex] restored ${restored.events.length} event(s) from disk for ${this.logKey} (nextSeq=${this.nextSeq})`,
         );
       }
     } catch (err) {
-      console.warn(`[chat codex] event-log restore failed for ${this.key}:`, (err as Error).message);
+      console.warn(`[chat codex] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
-    // Restore any owed compaction primer (rotation banked before a restart).
-    void takeRotation(this.key).then((primer) => {
-      if (primer) {
-        this.compactPrimer = primer;
-        console.warn(`[chat codex] restored owed compaction primer for ${this.key}`);
-        bankRotation(this.key, primer); // stays banked until a turn consumes it
-      }
-    });
-    if (!this.threadId) {
-      const restoredThreadId = latestThreadIdFromEvents(this.eventLog);
-      if (restoredThreadId) {
-        void this.persistThreadId(restoredThreadId);
-        console.warn(`[chat codex] restored missing thread id ${restoredThreadId} from event log for ${this.key}`);
-      } else if (this.eventLog.length > 0) {
-        this.recoverContextOnNextTurn = true;
-        console.warn(`[chat codex] no saved thread id for ${this.key}; will recover context from event log on next turn`);
-      }
+    // A different brain spoke last on this thread: its rollout is not ours to
+    // resume, so seed compact+50 from the shared log and mark the handover.
+    const priorEngine = lastEngineOf(this.eventLog);
+    const switchedFrom = priorEngine && priorEngine !== this.cli ? priorEngine : null;
+    if (switchedFrom) {
+      this.seedWindowOnNextTurn = true;
+      this.threadId = null;
+      this.recoverContextOnNextTurn = true;
+      void this.clearPersistedThreadId();
+      console.warn(
+        `[chat codex] model switch on ${this.logKey}: ${switchedFrom} → ${this.cli} — seeding compact+50 from the thread log`,
+      );
+      this.emit({
+        type: 'event',
+        event: { type: '_engine_switch', from: switchedFrom, to: this.cli, ts: Date.now() },
+      } as SessionEvent);
     }
-    void compactEventLog(this.key);
+    // Never exec-resume a rollout jsonl (tool novels). Seed compact(history − last50) + last 50.
+    const visible = extractVisibleTurns(this.eventLog);
+    if (!switchedFrom && (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS)) {
+      this.seedWindowOnNextTurn = true;
+      this.threadId = null;
+      this.recoverContextOnNextTurn = true;
+      void this.clearPersistedThreadId();
+      console.warn(
+        `[chat codex] seeding compact+50 for ${this.logKey} (visible=${visible.length}, owed=${isRotationOwed(this.logKey)}) — will not exec-resume a rollout dump`,
+      );
+    } else if (!switchedFrom && !this.threadId && this.eventLog.length > 0) {
+      this.recoverContextOnNextTurn = true;
+      console.warn(`[chat codex] no saved thread id for ${this.logKey}; will recover context from event log on next turn`);
+    }
+    void compactEventLog(this.logKey);
   }
 
   subscribe(fn: Listener, sinceSeq = -1, countSubscriber = true): () => void {
@@ -393,6 +387,15 @@ export class CodexSession {
     return this.threadIdWrite;
   }
 
+  private clearPersistedThreadId(): Promise<void> {
+    this.threadId = null;
+    this.threadIdWrite = this.threadIdWrite.then(
+      () => setSessionId(this.cli, this.cwd, '', this.chatId),
+      () => setSessionId(this.cli, this.cwd, '', this.chatId),
+    );
+    return this.threadIdWrite;
+  }
+
   private emitCancellationTurnEnd(): void {
     if (this.cancellationEmitted) return;
     this.cancellationEmitted = true;
@@ -402,115 +405,7 @@ export class CodexSession {
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
   }
 
-  private buildTranscriptRecap(): string {
-    type Turn = { role: 'user' | 'assistant'; text: string };
-    const turns: Turn[] = [];
-    const openText = new Map<number, string>();
-    const openTools = new Map<number, { name: string; input: string }>();
-    let pendingAssistant = '';
-
-    const flushAssistant = () => {
-      const finalChunks = Array.from(openText.values());
-      openText.clear();
-      const trailing = finalChunks.join('').trim();
-      const body = (pendingAssistant + (trailing ? `\n${trailing}` : '')).trim();
-      pendingAssistant = '';
-      if (body) turns.push({ role: 'assistant', text: body });
-    };
-
-    for (const se of this.eventLog) {
-      const wrapper = se.ev;
-      if (wrapper.type !== 'event') continue;
-      const ev = (wrapper as { type: 'event'; event: any }).event;
-      if (!ev || typeof ev !== 'object') continue;
-
-      if (ev.type === '_user_echo' && typeof ev.text === 'string') {
-        flushAssistant();
-        const trimmed = ev.text.trim();
-        if (trimmed) turns.push({ role: 'user', text: trimmed });
-        continue;
-      }
-
-      if (ev.type === 'stream_event' && ev.event && typeof ev.event === 'object') {
-        const inner = ev.event as { type?: unknown; index?: unknown; delta?: any; content_block?: any };
-        if (inner.type === 'message_start') {
-          flushAssistant();
-          continue;
-        }
-        if (inner.type === 'content_block_start' && typeof inner.index === 'number') {
-          if (inner.content_block?.type === 'text') {
-            openText.set(inner.index, '');
-          } else if (inner.content_block?.type === 'tool_use') {
-            const name = typeof inner.content_block.name === 'string' ? inner.content_block.name : 'tool';
-            openTools.set(inner.index, { name, input: '' });
-          }
-          continue;
-        }
-        if (inner.type === 'content_block_delta' && typeof inner.index === 'number') {
-          if (inner.delta?.type === 'text_delta' && typeof inner.delta.text === 'string') {
-            if (openText.has(inner.index)) {
-              openText.set(inner.index, (openText.get(inner.index) ?? '') + inner.delta.text);
-            }
-          } else if (
-            inner.delta?.type === 'input_json_delta' &&
-            typeof inner.delta.partial_json === 'string' &&
-            openTools.has(inner.index)
-          ) {
-            const tool = openTools.get(inner.index);
-            if (tool) tool.input += inner.delta.partial_json;
-          }
-          continue;
-        }
-        if (inner.type === 'content_block_stop' && typeof inner.index === 'number') {
-          const text = openText.get(inner.index);
-          if (text != null) {
-            pendingAssistant += text ? `${text}\n` : '';
-            openText.delete(inner.index);
-            continue;
-          }
-          const tool = openTools.get(inner.index);
-          if (tool) {
-            pendingAssistant += `[tool ${tool.name}${tool.input ? `: ${recapSnippet(tool.input, 300)}` : ''}]\n`;
-            openTools.delete(inner.index);
-          }
-        }
-        continue;
-      }
-
-      if (ev.type === 'user' && Array.isArray(ev.message?.content)) {
-        for (const item of ev.message.content as Array<any>) {
-          if (item?.type !== 'tool_result') continue;
-          const content = recapSnippet(stringifyToolResultContent(item.content), 700);
-          if (content) pendingAssistant += `[tool result: ${content}]\n`;
-        }
-      }
-    }
-    flushAssistant();
-
-    const kept: Turn[] = [];
-    let budget = 12_000;
-    const perTurnOverhead = 48;
-    for (let i = turns.length - 1; i >= 0; i -= 1) {
-      const turn = turns[i];
-      const cost = turn.text.length + perTurnOverhead;
-      if (cost > budget) {
-        const keepChars = Math.max(0, budget - perTurnOverhead);
-        if (keepChars > 0) kept.unshift({ role: turn.role, text: turn.text.slice(-keepChars) });
-        break;
-      }
-      budget -= cost;
-      kept.unshift(turn);
-    }
-
-    if (kept.length === 0) return '';
-    return [
-      'Rivendell had to continue a Codex chat without a saved Codex thread id.',
-      'The JSON array below contains visible prior turns plus summarized tool activity. Treat it as partial working memory, then answer the user message that follows.',
-      JSON.stringify(kept, null, 2),
-    ].join('\n');
-  }
-
-  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown; peerFrom?: string; peerFromRole?: string } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown; peerFrom?: string; peerFromRole?: string; peerText?: string } = {}): Promise<void> {
     if (this.busy) {
       this.emit({
         type: 'error',
@@ -522,23 +417,24 @@ export class CodexSession {
       opts.model,
       opts.effort,
     );
+    this.turnModel = codexModel;
     this.busy = true;
     this.cancellationEmitted = false;
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
-    const preTurnRecap = recoverContextThisTurn ? this.buildTranscriptRecap() : '';
+    const eventsForSeed = this.eventLog.slice();
     // Echo for reconnect replay (codex's events don't re-emit the user prompt).
     // peerFrom marks a team-bus delivery: sender-tagged bubble, no compaction tick.
     if (opts.peerFrom) {
       this.emit({
         type: 'event',
-        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text, ts: Date.now() },
+        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
       });
     } else {
       this.emit({
         type: 'event',
         event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
       });
-      noteUserTurn(this.key); // compaction cadence (monotonic)
+      noteUserTurn(this.logKey); // compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
     }
 
@@ -582,19 +478,19 @@ export class CodexSession {
       return;
     }
 
-    const effectiveText = preTurnRecap ? `${preTurnRecap}\n\n${text}` : text;
-    if (preTurnRecap) {
+    const seedWindow = this.consumeWindowSeed() || recoverContextThisTurn;
+    const seed = seedWindow ? peekEnginePrimer(this.logKey, eventsForSeed) : '';
+    if (seed) {
       this.recoverContextOnNextTurn = false;
       this.emit({
         type: 'event',
-        event: { type: '_context_recovered', chars: preTurnRecap.length, ts: Date.now() },
+        event: { type: '_context_recovered', chars: seed.length, ts: Date.now() },
       });
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
-    const primer = this.consumeCompactPrimer();
     const personaScope = personaPromptFor(this.chatId);
-    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${primer ? `${primer}\n\n---\n\n` : ''}${effectiveText}`;
+    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${text}`;
     // Selection was validated before the session became busy. effort is
     // interpolated into this config fragment, so only allow-listed strings
     // can reach the CLI.
@@ -611,7 +507,7 @@ export class CodexSession {
       // rivendell-team: agent-to-agent messaging (this thread's agent identity
       // rides in via env so sends are attributed correctly).
       '-c', `mcp_servers.rivendell-team.command="node"`,
-      '-c', `mcp_servers.rivendell-team.args=["${process.env.RIVENDELL_TEAM_MCP || join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs')}"]`,
+      '-c', `mcp_servers.rivendell-team.args=["${TEAM_MCP_SCRIPT}"]`,
       '-c', `mcp_servers.rivendell-team.env.RIVENDELL_AGENT_NAME="${(agentForChatId(this.chatId)?.name ?? 'Teammate').replace(/"/g, '')}"`,
     ];
     const args: string[] = this.threadId
@@ -803,12 +699,14 @@ export class CodexSession {
         const deadThread = this.threadId;
         this.threadId = null;
         await setSessionId(this.cli, this.cwd, '', this.chatId);
+        this.seedWindowOnNextTurn = true;
         if (deadThread) {
           console.warn(
             `[chat codex] cleared poisoned thread ${deadThread} after empty exit ${code}`,
           );
         }
       } else if (this.threadId) {
+        if (seed) await this.ackWindowSeed();
         await this.persistThreadId(this.threadId);
       }
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
@@ -836,7 +734,7 @@ export class CodexSession {
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
-    appendEventLog(this.key, se);
+    appendEventLog(this.logKey, { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) });
     for (const fn of this.listeners) fn(se);
   }
 
@@ -1135,7 +1033,9 @@ export async function freshStartCodex(opts: {
   await setSessionId(cli, cwd, '', chatId);
   // Wipe the durable log before the new session loads it, so a reset thread
   // can't be resurrected by a full (sinceSeq=0) replay from an empty client.
-  await clearEventLog(key);
+  const logKey = logKeyFor(cli, cwd, chatId);
+  await clearEventLog(logKey);
+  await clearThreadMemory(logKey);
   const session = new CodexSession(cwd, chatId, null, { cli });
   codexSessions.set(key, session);
   return session;

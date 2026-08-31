@@ -11,7 +11,9 @@ import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { adaptImagesForTextModel, getVisionMode } from './vision-adapter.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, bankRotation, takeRotation } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory } from './compaction.ts';
+import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
+import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { noteAgentLane } from './agents.ts';
 import {
@@ -21,6 +23,7 @@ import {
   BANANA_GLOBAL_INSTRUCTIONS_FILE,
   CLAUDE_COMMANDS_DIR,
 } from './config.ts';
+import { TEAM_MCP_SCRIPT } from '../config.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -54,6 +57,8 @@ type BananaSendOptions = {
   /** Team-bus delivery: sender-tagged peer_message echo, no compaction tick. */
   peerFrom?: string;
   peerFromRole?: string;
+  /** Visible peer_message body. Full `text` still goes to the model. */
+  peerText?: string;
   autoContinueDepth?: number;
   blockedSideEffectContinueDepth?: number;
   /** Deprecated alias kept so an in-flight hidden continuation from older code
@@ -1301,7 +1306,7 @@ function readClaudeMcpServers(
   if (!merged['rivendell-team']) {
     merged['rivendell-team'] = {
       type: 'local',
-      command: ['node', join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs')],
+      command: ['node', TEAM_MCP_SCRIPT],
       environment: { RIVENDELL_TEAM_URL: `http://127.0.0.1:${process.env.PORT || '8091'}` },
     };
   }
@@ -2349,42 +2354,54 @@ const bananaServer = new BananaServer();
 
 export class BananaSession {
   readonly key: string;
+  /** Durable-history key — engine-free for agent home threads (threadKey.ts). */
+  readonly logKey: string;
+  /** Model of the most recent turn — stamped onto persisted events. */
+  private turnModel: string | null = null;
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
-  /** Compaction primer pending for the next turn's prompt (context rotation). */
-  private compactPrimer: string | null = null;
+  /** Next turn seeds persona + rolling compact + last 50 (fresh opencode thread). */
+  private seedWindowOnNextTurn = false;
+  private sessionIdWrite: Promise<void> = Promise.resolve();
 
-  /** Pops the pending compaction primer — it primes exactly one turn.
-   *  Clearing the banked debt happens only after the turn is accepted. */
-  private consumeCompactPrimer(): string | null {
-    const p = this.compactPrimer;
-    this.compactPrimer = null;
-    if (p) void takeRotation(this.key); // turn accepted — the debt is paid
-    return p;
+  private queueSessionId(id: string): Promise<void> {
+    this.sessionIdWrite = this.sessionIdWrite.then(
+      () => setSessionId(this.cli, this.cwd, id, this.chatId),
+      () => setSessionId(this.cli, this.cwd, id, this.chatId),
+    );
+    return this.sessionIdWrite;
+  }
+
+  private consumeWindowSeed(): boolean {
+    return this.seedWindowOnNextTurn;
+  }
+
+  private ackWindowSeed(): Promise<void> {
+    if (!this.seedWindowOnNextTurn) return Promise.resolve();
+    this.seedWindowOnNextTurn = false;
+    return clearRotation(this.logKey);
   }
 
   /** Forever-thread compaction check — see server/src/chat/compaction.ts. */
   private async maybeCompact(): Promise<void> {
     try {
       await maybeAutoCompact({
-        key: this.key,
+        key: this.logKey,
         cli: this.cli,
         chatId: this.chatId,
         events: this.eventLog,
         isBusy: () => this.busy,
         emit: (ev) => this.emit(ev as SessionEvent),
-        rotate: async (primer) => {
-          // Banana: rotation = drop the opencode session id (next send creates
-          // a fresh serve-side session, exactly like the wipe-recovery path)
-          // and prime the next turn's prompt. Banked for restart durability.
-          this.compactPrimer = primer;
-          this.threadId = null;
-          bankRotation(this.key, primer);
+        rotate: async () => {
+          this.seedWindowOnNextTurn = true;
+          await this.clearSavedThreadId('forever-window rotate');
+          bankRotation(this.logKey);
+          return false;
         },
       });
     } catch (err) {
-      console.warn(`[chat banana] compaction check failed for ${this.key}:`, (err as Error).message);
+      console.warn(`[chat banana] compaction check failed for ${this.logKey}:`, (err as Error).message);
     }
   }
   private listeners = new Set<Listener>();
@@ -2428,32 +2445,50 @@ export class BananaSession {
     this.chatId = chatId;
     this.cli = opts.cli ?? 'banana';
     this.key = keyOf(this.cli, cwd, chatId);
+    this.logKey = logKeyFor(this.cli, cwd, chatId);
     this.threadId = threadId;
     this.recoverContextOnNextTurn = opts.recoverContextOnNextTurn === true;
 
     // Mirror the claude/codex path: rehydrate eventLog from disk so a server
     // restart between turns doesn't strand a reconnecting client.
     try {
-      const restored = loadEventLogSync(this.key);
+      const restored = loadEventLogSync(this.logKey);
       if (restored.events.length > 0) {
         this.eventLog = restored.events;
         this.nextSeq = restored.nextSeq;
         console.log(
-          `[chat banana] restored ${restored.events.length} event(s) from disk for ${this.key} (nextSeq=${this.nextSeq})`,
+          `[chat banana] restored ${restored.events.length} event(s) from disk for ${this.logKey} (nextSeq=${this.nextSeq})`,
         );
       }
     } catch (err) {
-      console.warn(`[chat banana] event-log restore failed for ${this.key}:`, (err as Error).message);
+      console.warn(`[chat banana] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
-    void compactEventLog(this.key);
-    // Restore any owed compaction primer (rotation banked before a restart).
-    void takeRotation(this.key).then((primer) => {
-      if (primer) {
-        this.compactPrimer = primer;
-        console.warn(`[chat banana] restored owed compaction primer for ${this.key}`);
-        bankRotation(this.key, primer); // stays banked until a turn consumes it
-      }
-    });
+    void compactEventLog(this.logKey);
+    // A different brain spoke last on this thread — mark the handover. The seed
+    // below already covers context; opencode threads are never resumed across
+    // engines anyway.
+    const priorEngine = lastEngineOf(this.eventLog);
+    if (priorEngine && priorEngine !== this.cli) {
+      console.warn(
+        `[chat banana] model switch on ${this.logKey}: ${priorEngine} → ${this.cli} — seeding compact+50 from the thread log`,
+      );
+      this.emit({
+        type: 'event',
+        event: { type: '_engine_switch', from: priorEngine, to: this.cli, ts: Date.now() },
+      } as SessionEvent);
+    }
+    // Never exec-resume a week of opencode history. Seed compact(history − last50) + last 50.
+    const visible = extractVisibleTurns(this.eventLog);
+    if (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS) {
+      this.seedWindowOnNextTurn = true;
+      this.threadId = null;
+      void this.queueSessionId('');
+      console.warn(
+        `[chat banana] seeding compact+50 for ${this.logKey} (visible=${visible.length}, owed=${isRotationOwed(this.logKey)})`,
+      );
+    } else if (visible.length > 0) {
+      this.seedWindowOnNextTurn = true;
+    }
 
     // If we already know our banana sessionID, register the route up front so
     // a turn started elsewhere (or events that arrive before send) still land.
@@ -2543,7 +2578,7 @@ export class BananaSession {
     this.threadId = null;
     this.threadServeGeneration = null;
     this.wipedThisTurn = true;
-    await setSessionId(this.cli, this.cwd, '', this.chatId);
+    await this.queueSessionId('');
   }
 
   private quarantineThread(reason: string): void {
@@ -2557,99 +2592,6 @@ export class BananaSession {
     void setSessionId(this.cli, this.cwd, '', this.chatId).catch((err) => {
       console.warn(`[chat banana] failed to persist quarantined session: ${(err as Error).message}`);
     });
-  }
-
-  /** Build a compact transcript of the prior conversation from the persistent
-   *  event log so a session wipe can rehydrate context on the new opencode
-   *  session. Walks user echoes and reconstructed assistant text from the
-   *  stream events; budgeted to the most recent ~12k chars so it never blows
-   *  out the new session's context window. Returns '' when there is no prior
-   *  conversation to recap. */
-  private buildTranscriptRecap(): string {
-    type Turn = { role: 'user' | 'assistant'; text: string };
-    const turns: Turn[] = [];
-    const openText = new Map<number, string>();
-    let pendingAssistant = '';
-
-    const flushAssistant = () => {
-      const finalChunks: string[] = [];
-      for (const chunk of openText.values()) finalChunks.push(chunk);
-      openText.clear();
-      const trailing = finalChunks.join('').trim();
-      const body = (pendingAssistant + (trailing ? `\n${trailing}` : '')).trim();
-      pendingAssistant = '';
-      if (body && !looksLikeCompactionSummary(body)) turns.push({ role: 'assistant', text: body });
-    };
-
-    for (const se of this.eventLog) {
-      const wrapper = se.ev;
-      if (wrapper.type !== 'event') continue;
-      const ev = (wrapper as { type: 'event'; event: any }).event;
-      if (!ev || typeof ev !== 'object') continue;
-
-      if (ev.type === '_user_echo' && typeof ev.text === 'string') {
-        flushAssistant();
-        const trimmed = ev.text.trim();
-        if (trimmed) turns.push({ role: 'user', text: trimmed });
-        continue;
-      }
-
-      if (ev.type === 'stream_event' && ev.event && typeof ev.event === 'object') {
-        const inner = ev.event as { type?: unknown; index?: unknown; delta?: any; content_block?: any };
-        if (inner.type === 'content_block_start' && typeof inner.index === 'number') {
-          if (inner.content_block?.type === 'text') {
-            openText.set(inner.index, '');
-          }
-          continue;
-        }
-        if (inner.type === 'content_block_delta' && typeof inner.index === 'number') {
-          if (inner.delta?.type === 'text_delta' && typeof inner.delta.text === 'string') {
-            if (openText.has(inner.index)) {
-              openText.set(inner.index, (openText.get(inner.index) ?? '') + inner.delta.text);
-            }
-          }
-          continue;
-        }
-        if (inner.type === 'content_block_stop' && typeof inner.index === 'number') {
-          const finished = openText.get(inner.index);
-          if (finished !== undefined) {
-            openText.delete(inner.index);
-            const trimmed = finished.trim();
-            if (trimmed) pendingAssistant = pendingAssistant ? `${pendingAssistant}\n${trimmed}` : trimmed;
-          }
-          continue;
-        }
-      }
-    }
-    flushAssistant();
-
-    if (turns.length === 0) return '';
-
-    const MAX_RECAP_CHARS = 12_000;
-    const PER_TURN_OVERHEAD = 24;
-    let budget = MAX_RECAP_CHARS;
-    const kept: Turn[] = [];
-    for (let i = turns.length - 1; i >= 0; i -= 1) {
-      const turn = turns[i];
-      const cost = turn.text.length + PER_TURN_OVERHEAD;
-      if (cost > budget) {
-        if (kept.length === 0) {
-          // Always keep at least the most recent turn, even if it's huge —
-          // we'll trim it to fit.
-          kept.unshift({ role: turn.role, text: turn.text.slice(-budget + PER_TURN_OVERHEAD) });
-        }
-        break;
-      }
-      budget -= cost;
-      kept.unshift(turn);
-    }
-
-    const body = JSON.stringify(kept, null, 2);
-    return [
-      'The local Banana serve process was restarted, so the live opencode session this chat was attached to was lost.',
-      'The JSON array below contains the real prior turns of this conversation. Treat them as your own memory of what was said, then respond to the user\'s next message that follows this recovery block.',
-      body,
-    ].join('\n');
   }
 
   private latestAssistantTextFromLog(): string {
@@ -2723,11 +2665,7 @@ export class BananaSession {
     this.wipedThisTurn = false;
     if (opts.hidden) this.emit({ type: 'turnStart' });
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
-    // Snapshot the prior transcript BEFORE emitting this turn's user echo. If
-    // the upcoming send wipes the opencode session (serve restart, stale id),
-    // we'll prepend this recap to the new session's first message so context
-    // carries across the wipe instead of vanishing mid-conversation.
-    const preTurnRecap = this.buildTranscriptRecap();
+    const eventsForSeed = this.eventLog.slice();
     const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(text);
     // Echo for reconnect replay (banana's events don't re-emit the user prompt).
     // Internal auto-continues are intentionally hidden; they are just Rivendell
@@ -2735,14 +2673,14 @@ export class BananaSession {
     if (opts.peerFrom) {
       this.emit({
         type: 'event',
-        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text, ts: Date.now() },
+        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
       });
     } else if (!opts.hidden) {
       this.emit({
         type: 'event',
         event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
       });
-      noteUserTurn(this.key); // compaction cadence (monotonic)
+      noteUserTurn(this.logKey); // compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
     }
 
@@ -2869,7 +2807,7 @@ export class BananaSession {
         }
         this.threadId = newId;
         this.threadServeGeneration = serveGeneration;
-        await setSessionId(this.cli, this.cwd, newId, this.chatId);
+        await this.queueSessionId(newId);
         this.emit({ type: 'event', event: { type: 'system', subtype: 'init', session_id: newId } });
       } catch (err) {
         this.failTurn(`banana session.create failed: ${(err as Error).message}`);
@@ -2949,27 +2887,22 @@ export class BananaSession {
       }
     }
     const model = parseModel(requestedModelId);
+    this.turnModel = requestedModelId ?? null;
     const slashCommand = await parseBananaSlashCommand(text, this.cwd);
     const needsContextRecovery = this.wipedThisTurn || recoverContextThisTurn;
-    // Vision-adapted text wins over raw text. (A slash command + pasted image in
-    // the same turn is vanishingly rare; if it happens the image description is
-    // preserved and the command stays literal rather than silently dropping the
-    // image.)
+    const seedWindow = this.consumeWindowSeed() || needsContextRecovery;
     const commandExpandedText = visionPromptText ?? (slashCommand ? expandBananaSlashCommand(slashCommand) : text);
-    const recap = needsContextRecovery && preTurnRecap ? preTurnRecap : '';
-    const compactPrimer = this.consumeCompactPrimer();
+    const seed = seedWindow ? peekEnginePrimer(this.logKey, eventsForSeed) : '';
     const personaScope = personaPromptFor(this.chatId);
     const personaPrefix = personaScope ? `${personaScope}\n\n---\n\n` : '';
-    const effectiveText = compactPrimer
-      ? `${personaPrefix}${compactPrimer}\n\n---\n\n${recap ? `${recap}\n\n` : ''}${commandExpandedText}`
-      : recap ? `${personaPrefix}${recap}\n\n${commandExpandedText}` : `${personaPrefix}${commandExpandedText}`;
-    if (recap) {
+    const effectiveText = `${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${commandExpandedText}`;
+    if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
         type: 'event',
-        event: { type: '_context_recovered', chars: recap.length, ts: Date.now() },
+        event: { type: '_context_recovered', chars: seed.length, ts: Date.now() },
       });
-    } else if (recoverContextThisTurn && !preTurnRecap) {
+    } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
     const localDirective = this.cli === 'banana-local'
@@ -3230,7 +3163,10 @@ export class BananaSession {
 
   private markPromptAccepted(state: BananaTurnState): void {
     state.promptAccepted = true;
-    if (state.recoveryRecapUsed) this.recoverContextOnNextTurn = false;
+    if (state.recoveryRecapUsed) {
+      this.recoverContextOnNextTurn = false;
+      this.ackWindowSeed();
+    }
   }
 
   // ── streaming normalization ────────────────────────────────
@@ -3866,7 +3802,7 @@ export class BananaSession {
     }
     // Don't persist events emitted after shutdown — late child-close output
     // must not repollute a freshly-cleared log (would resurrect a reset thread).
-    if (!this.dead) appendEventLog(this.key, se);
+    if (!this.dead) appendEventLog(this.logKey, { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) });
     for (const fn of this.listeners) fn(se);
   }
 
@@ -4025,7 +3961,9 @@ export async function freshStartBanana(opts: {
   await setSessionId(cli, cwd, '', chatId);
   // Wipe the durable log before the new session loads it, so a reset thread
   // can't be resurrected by a full (sinceSeq=0) replay from an empty client.
-  await clearEventLog(key);
+  const logKey = logKeyFor(cli, cwd, chatId);
+  await clearEventLog(logKey);
+  await clearThreadMemory(logKey);
   const session = new BananaSession(cwd, chatId, null, { cli });
   bananaSessions.set(key, session);
   return session;

@@ -3,12 +3,13 @@
 // Routines card (real cron jobs from /api/cron with status + schedule), and a
 // Session card with the live context meter + compaction state.
 
-import { X, Play, Pause, Trash2 } from 'lucide-react';
+import { X, Play, Pause, Trash2, Pin } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { CheckCircle2, PauseCircle, Plus } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useCronJobs } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
+import { scrollToPinnedMessage, useAgentMessagePins } from './messagePins';
 
 type ArtifactMeta = { id: string; title?: string; kind?: string; createdAt?: number };
 
@@ -91,6 +92,8 @@ export type ChatMeta = {
 export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: { meta: ChatMeta | null; onOpenForge: () => void; onClose?: () => void; className?: string; agent?: import('./agents').Agent | null }) {
   const viewer = useProxyViewer();
   const { data: cronJobs } = useCronJobs();
+  const messagePins = useAgentMessagePins(agent?.id);
+  const visiblePins = agent ? messagePins.pins.filter((p) => p.agentId === agent.id) : [];
   const [latest, setLatest] = useState<ArtifactMeta | null>(null);
   const [routines, setRoutines] = useState<Array<{ id: string; name: string; agentName: string; agentId: string; schedule: string; prompt: string; paused?: boolean; lastRunAt?: number }>>([]);
   const [routineForm, setRoutineForm] = useState(false);
@@ -258,6 +261,40 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
           <div className="bt-pane-empty">{agent ? `No automations for ${agent.name} yet — + to schedule one.` : 'No automations yet.'}</div>
         ) : null}
       </section>
+
+      {agent ? (
+        <section className="bt-pane-sec">
+          <div className="bt-pane-title">Pinned from {agent.name}</div>
+          {messagePins.loadError && !visiblePins.length ? (
+            <div className="bt-pane-empty">Pins hid for a second — I’ll try again in a moment.</div>
+          ) : visiblePins.length ? visiblePins.map((p) => (
+            <div key={p.id} className="bt-msgpin">
+              <button
+                type="button"
+                className="bt-msgpin-body"
+                title="Jump to this message"
+                onClick={() => scrollToPinnedMessage(p.blockId)}
+              >
+                <span className="bt-msgpin-text">{(p.text ?? '').trim() || 'Empty bubble'}</span>
+              </button>
+              <button
+                type="button"
+                className="bt-iconbtn bt-msgpin-unpin"
+                title="Unpin"
+                aria-label="Unpin"
+                onClick={() => { void messagePins.unpin(p.id); }}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          )) : (
+            <div className="bt-msgpin-empty">
+              <Pin size={16} className="bt-msgpin-idle" />
+              <span>Nothing pocketed yet. Hover a bubble, tap pin, and I’ll hold it here.</span>
+            </div>
+          )}
+        </section>
+      ) : null}
 
       <section className="bt-pane-sec">
         <div className="bt-pane-title">

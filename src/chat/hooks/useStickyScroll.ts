@@ -18,6 +18,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 //    bottom (within RESUME_THRESHOLD_PX).
 //  - Programmatic scrolls set a short timestamp window so the onScroll
 //    handler can ignore them when deciding whether to resume sticky.
+//  - The Grok shell unmounts the feed while the thread is empty, then mounts
+//    it after localStorage restore / WS replay. Object refs + mount-only
+//    effects miss that node. Callback refs bind observer + listeners when
+//    the scroller actually appears, and treat that as a new visit (pin to
+//    latest unless the user then scrolls up).
 
 // §3.6: pinned when within 56px of the feed bottom.
 const RESUME_THRESHOLD_PX = 56;
@@ -27,9 +32,10 @@ const NAV_KEYS = new Set([
 ]);
 
 export function useStickyScroll() {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollNodeRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
+  const scrollTeardownRef = useRef<(() => void) | null>(null);
   const userOverrideRef = useRef(false);
   const programmaticUntilRef = useRef(0);
   // `pinned` is the React-visible mirror of `!userOverrideRef` so the jump pill
@@ -52,17 +58,18 @@ export function useStickyScroll() {
   const pin = useCallback(() => {
     if (userOverrideRef.current) return;
     if (selectingRef.current) return;
-    const el = scrollRef.current;
+    const el = scrollNodeRef.current;
     if (!el) return;
     programmaticUntilRef.current = Date.now() + PROGRAMMATIC_GUARD_MS;
-    bottomRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' });
+    // Scroll the known scroller only. scrollIntoView can walk ancestors and
+    // fight a layout that is still settling after history replay.
     el.scrollTop = el.scrollHeight;
   }, []);
 
   // §3.6: sending force-follows the feed regardless of the user's scroll
   // position, and clears the override so live appends keep auto-following.
   const forcePin = useCallback(() => {
-    const el = scrollRef.current;
+    const el = scrollNodeRef.current;
     if (!el) return;
     programmaticUntilRef.current = Date.now() + PROGRAMMATIC_GUARD_MS;
     el.scrollTop = el.scrollHeight;
@@ -71,7 +78,7 @@ export function useStickyScroll() {
 
   // Smooth-scroll to the very bottom and clear the unread counter (jump pill).
   const jumpToBottom = useCallback(() => {
-    const el = scrollRef.current;
+    const el = scrollNodeRef.current;
     if (!el) return;
     programmaticUntilRef.current = Date.now() + PROGRAMMATIC_GUARD_MS;
     el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
@@ -84,11 +91,10 @@ export function useStickyScroll() {
     setUnread((n) => n + 1);
   }, []);
 
-  // Pin on every content size change. ResizeObserver fires for token deltas,
-  // image loads, and any other layout reflow inside the content wrapper.
-  useEffect(() => {
-    const el = contentRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') {
+  const observeContent = useCallback((node: HTMLDivElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    if (!node || typeof ResizeObserver === 'undefined') {
       pin();
       return;
     }
@@ -96,17 +102,39 @@ export function useStickyScroll() {
       pin();
       requestAnimationFrame(pin);
     });
-    observer.observe(el);
-    return () => observer.disconnect();
+    observer.observe(node);
+    observerRef.current = observer;
+    pin();
+    requestAnimationFrame(pin);
   }, [pin]);
 
-  // User-intent capture. A gesture only counts as "I'm taking over" when it
-  // actually moves the view away from the bottom.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
+  const contentRef = useCallback((node: HTMLDivElement | null) => {
+    observeContent(node);
+  }, [observeContent]);
+
+  const scrollRef = useCallback((node: HTMLDivElement | null) => {
+    if (node === scrollNodeRef.current) return;
+    const prev = scrollNodeRef.current;
+    scrollTeardownRef.current?.();
+    scrollTeardownRef.current = null;
+    scrollNodeRef.current = node;
+    selectingRef.current = false;
+    if (!node) return;
+
+    // A newly mounted scroller (prev was null) is a new visit: Grok unmounts
+    // the feed while empty, then mounts it after restore/replay. Same-node
+    // updates must not clear a mid-thread scroll-up.
+    if (prev == null) {
+      const wasOverridden = userOverrideRef.current;
+      userOverrideRef.current = false;
+      if (wasOverridden) {
+        setPinned(true);
+        setUnread(0);
+      }
+    }
+
     const isAtBottom = () =>
-      el.scrollHeight - el.scrollTop - el.clientHeight <= RESUME_THRESHOLD_PX;
+      node.scrollHeight - node.scrollTop - node.clientHeight <= RESUME_THRESHOLD_PX;
     const takeover = () => {
       if (isAtBottom()) return;
       setOverride(true);
@@ -123,56 +151,57 @@ export function useStickyScroll() {
       }
       takeover();
     };
-    el.addEventListener('wheel', onWheel, { passive: true });
-    el.addEventListener('touchstart', takeover, { passive: true });
-    el.addEventListener('keydown', onKey);
-    return () => {
-      el.removeEventListener('wheel', onWheel);
-      el.removeEventListener('touchstart', takeover);
-      el.removeEventListener('keydown', onKey);
-    };
-  }, [setOverride]);
-
-  // Selection-aware pin gate (see original comment block — prevents programmatic
-  // scrolls from yanking an in-progress text selection).
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
 
     const hasLiveSelection = () => {
       const sel = typeof window !== 'undefined' ? window.getSelection() : null;
       if (!sel || sel.isCollapsed) return false;
       const anchor = sel.anchorNode;
       const focus = sel.focusNode;
-      return Boolean((anchor && el.contains(anchor)) || (focus && el.contains(focus)));
+      return Boolean((anchor && node.contains(anchor)) || (focus && node.contains(focus)));
     };
     const settle = () => { selectingRef.current = hasLiveSelection(); };
-
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 && event.pointerType !== 'touch') return;
       selectingRef.current = true;
     };
 
-    el.addEventListener('pointerdown', onPointerDown);
+    node.addEventListener('wheel', onWheel, { passive: true });
+    node.addEventListener('touchstart', takeover, { passive: true });
+    node.addEventListener('keydown', onKey);
+    node.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('pointerup', settle);
     document.addEventListener('pointercancel', settle);
     document.addEventListener('selectionchange', settle);
     window.addEventListener('blur', settle);
     document.addEventListener('visibilitychange', settle);
-    return () => {
-      el.removeEventListener('pointerdown', onPointerDown);
+
+    scrollTeardownRef.current = () => {
+      node.removeEventListener('wheel', onWheel);
+      node.removeEventListener('touchstart', takeover);
+      node.removeEventListener('keydown', onKey);
+      node.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('pointerup', settle);
       document.removeEventListener('pointercancel', settle);
       document.removeEventListener('selectionchange', settle);
       window.removeEventListener('blur', settle);
       document.removeEventListener('visibilitychange', settle);
     };
+
+    pin();
+    requestAnimationFrame(pin);
+  }, [pin, setOverride]);
+
+  useEffect(() => () => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    scrollTeardownRef.current?.();
+    scrollTeardownRef.current = null;
   }, []);
 
   // Resume sticky when the user lands at the very bottom on their own, and
   // mark takeover when the view leaves the bottom.
   const onScroll = useCallback(() => {
-    const el = scrollRef.current;
+    const el = scrollNodeRef.current;
     if (!el) return;
     if (Date.now() < programmaticUntilRef.current) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;

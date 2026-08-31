@@ -11,6 +11,7 @@ import { ArtifactCard } from '../blocks/ArtifactCard';
 import { DocLinkCard } from '../blocks/DocLinkCard';
 import { FolderLinkCard } from '../blocks/FolderLinkCard';
 import { ChevronDown, StarSigil } from './icons';
+import { isAutomationPeer, isNoopToken, shouldHideAutomationTurn } from '../../utils/routineNoise';
 
 const PHRASES = ['Elrond ponders', 'consulting the scrolls', 'weighing the words of the Wise', 'reading the stars'];
 
@@ -71,16 +72,32 @@ export function ThinkingIndicator({ phrases = PHRASES }: { phrases?: string[] })
   );
 }
 
+export type ThreadPin = {
+  pinnedBlockIds: string[];
+  onToggle: (target: { blockId: string; text: string; ts: number }) => void | Promise<void>;
+};
+
 // ── actions row (copy / pin) — §3.8 ───────────────────────────────────────
-export function ActionsRow({ getText }: { getText: () => string }) {
+export function ActionsRow({
+  getText,
+  pinned,
+  onTogglePin,
+}: {
+  getText: () => string;
+  pinned?: boolean;
+  onTogglePin?: () => void | Promise<void>;
+}) {
   const [copied, setCopied] = useState(false);
-  const [pinned, setPinned] = useState(false);
+  const [localPinned, setLocalPinned] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const isPinned = onTogglePin ? Boolean(pinned) : localPinned;
   return (
     <div className="acts">
       <button
         type="button"
         className={`act${copied ? ' copied' : ''}`}
-        onClick={async () => {
+        onClick={async (e) => {
+          e.stopPropagation();
           try {
             await navigator.clipboard?.writeText(getText());
             setCopied(true);
@@ -94,10 +111,21 @@ export function ActionsRow({ getText }: { getText: () => string }) {
       </button>
       <button
         type="button"
-        className={`act${pinned ? ' copied' : ''}`}
-        onClick={() => setPinned(true)}
+        className={`act${isPinned ? ' copied' : ''}`}
+        aria-pressed={isPinned}
+        title={isPinned ? 'Unpin from the sidebar' : 'Pin to the sidebar'}
+        onClick={async (e) => {
+          e.stopPropagation();
+          if (onTogglePin) {
+            if (busy) return;
+            setBusy(true);
+            try { await onTogglePin(); } finally { setBusy(false); }
+            return;
+          }
+          setLocalPinned((p) => !p);
+        }}
       >
-        {pinned ? 'pinned ✓' : 'pin'}
+        {isPinned ? 'pinned ✓' : 'pin'}
       </button>
     </div>
   );
@@ -260,6 +288,65 @@ function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) 
   );
 }
 
+type AssistantBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>;
+type StepBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' }>;
+
+function hasVisibleProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
+  return b.text.trim().length > 0;
+}
+
+/** Protocol no-ops that must not steal the Grok answer slot. Broader
+ *  isQuietRoutineReply ("nothing happened", …) is for automation hide, not
+ *  for promoting a human turn's last sentence. */
+function isProtocolNoopText(text: string): boolean {
+  return isNoopToken(text);
+}
+
+function isAnswerProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
+  const t = b.text.trim();
+  return t.length > 0 && !isProtocolNoopText(t);
+}
+
+function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boolean): boolean {
+  return Boolean(b.open) && streaming;
+}
+
+/** Grok mode: last real prose is the visible reply. Empty or quiet trailing
+ *  text used to steal that slot, so the feed was Thoughts-only and a completed
+ *  turn looked dead. While an empty/noop last block is still open, keep it as
+ *  the answer slot (caret only) so working narrative stays in the pod. */
+function planCollapsedSteps(
+  blocks: AssistantBlock[],
+  collapseSteps: boolean,
+  streaming: boolean,
+): { finalTextId: string | null; stepBlocks: StepBlock[] } {
+  if (!collapseSteps) return { finalTextId: null, stepBlocks: [] };
+  const textBlocks = blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
+  if (textBlocks.length === 0) return { finalTextId: null, stepBlocks: [] };
+
+  const answerTexts = textBlocks.filter(isAnswerProse);
+  const nonempty = textBlocks.filter(hasVisibleProse);
+  const visible = answerTexts.length > 0 ? answerTexts : nonempty;
+  const last = textBlocks[textBlocks.length - 1];
+  const holdStreamingSlot = Boolean(
+    streaming && last && last.open && (!hasVisibleProse(last) || isProtocolNoopText(last.text)),
+  );
+  const final = holdStreamingSlot ? last : (visible[visible.length - 1] ?? null);
+  const finalTextId = final?.id ?? null;
+  if (!finalTextId || textBlocks.length < 2) return { finalTextId: null, stepBlocks: [] };
+
+  const finalIdx = blocks.findIndex((b) => b.id === finalTextId);
+  // Only collapse work that happened BEFORE the answer. Tools after a
+  // promoted earlier reply must stay after it — they are not thoughts.
+  const stepBlocks = blocks.filter((b, i): b is StepBlock =>
+    (b.kind === 'text' || b.kind === 'tool')
+    && b.id !== finalTextId
+    && i < finalIdx
+    && (b.kind !== 'text' || isAnswerProse(b)),
+  );
+  return { finalTextId, stepBlocks };
+}
+
 // A run of consecutive assistant blocks that share a turnId render under a
 // single "✦ Elrond" header (the prototype's per-turn group).
 function ElrondGroup({
@@ -267,24 +354,27 @@ function ElrondGroup({
   streaming,
   mobile,
   collapseSteps = false,
+  pin,
 }: {
-  blocks: Array<Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>>;
+  blocks: AssistantBlock[];
   streaming: boolean;
   mobile: boolean;
   collapseSteps?: boolean;
+  pin?: ThreadPin;
 }) {
   const [acted, setActed] = useState(false);
   const first = blocks[0];
   const textBlocks = blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
-  const copyText = () => textBlocks.map((b) => b.text).join('\n\n');
+  const copyText = () => {
+    const src = textBlocks.filter(isAnswerProse);
+    return (src.length ? src : textBlocks.filter(hasVisibleProse)).map((b) => b.text).join('\n\n');
+  };
+  const isPinned = Boolean(pin?.pinnedBlockIds.includes(first.id));
   // Grok mode: collapse the working narrative into a Thoughts pod rendered
   // immediately before the final answer. The pod folds in non-final text AND
   // tool blocks (in original order), so chronology is preserved inside it and
   // no tool is ever shown after a step it actually preceded.
-  const finalTextId = collapseSteps && textBlocks.length > 0 ? textBlocks[textBlocks.length - 1].id : null;
-  const stepBlocks = collapseSteps && textBlocks.length > 1
-    ? blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' }> => (b.kind === 'text' || b.kind === 'tool') && b.id !== finalTextId)
-    : [];
+  const { finalTextId, stepBlocks } = planCollapsedSteps(blocks, collapseSteps, streaming);
   const stepIds = new Set(stepBlocks.map((b) => b.id));
   // Anchor the pod to the last collapsed step BEFORE the final answer — if a
   // tool runs after the final text, the pod must still land ahead of the
@@ -295,7 +385,12 @@ function ElrondGroup({
   const before = stepBlocks.filter((b) => (indexById.get(b.id) ?? 0) < finalIdx);
   const podAnchorId = before.length ? before[before.length - 1].id : finalTextId;
   return (
-    <div className={`msg m-elrond${acted ? ' acted' : ''}`} onClick={mobile ? () => setActed((a) => !a) : undefined}>
+    <div
+      id={`msg-pin-${first.id}`}
+      data-pin-block={first.id}
+      className={`msg m-elrond${acted ? ' acted' : ''}${isPinned ? ' pinned' : ''}`}
+      onClick={mobile ? () => setActed((a) => !a) : undefined}
+    >
       <div className="who">
         <span className="mini">✦</span> Elrond <span className="when">{timeLabel(first.ts)}</span>
       </div>
@@ -305,19 +400,30 @@ function ElrondGroup({
           return <StepsCard key="steps" steps={stepBlocks} />;
         }
         // Degenerate order (all steps after the answer): pod rides first.
-        if (b.id === podAnchorId && b.id === finalTextId && stepBlocks.length) {
+        if (b.id === podAnchorId && b.id === finalTextId && stepBlocks.length && b.kind === 'text') {
+          const open = showTextCaret(b, streaming);
+          const display = isProtocolNoopText(b.text) ? '' : b.text;
+          const showAnswer = open || display.length > 0;
+          if (!showAnswer) {
+            return <StepsCard key="steps" steps={stepBlocks} />;
+          }
           return (
             <Fragment key={`steps-plus-${b.id}`}>
               <StepsCard steps={stepBlocks} />
-              <StreamText text={(b as Extract<ChatBlock, { kind: 'text' }>).text} open={Boolean((b as Extract<ChatBlock, { kind: 'text' }>).open) && streaming} />
+              <StreamText text={display} open={open} />
             </Fragment>
           );
         }
         switch (b.kind) {
           case 'tool':
             return <ToolCard key={b.id} block={b} />;
-          case 'text':
-            return <StreamText key={b.id} text={b.text} open={Boolean(b.open) && streaming} />;
+          case 'text': {
+            const open = showTextCaret(b, streaming);
+            const display = isProtocolNoopText(b.text) ? '' : b.text;
+            if (!open && !display) return null;
+            if (!open && !isAnswerProse(b) && b.id !== finalTextId && textBlocks.some(isAnswerProse)) return null;
+            return <StreamText key={b.id} text={display} open={open} />;
+          }
           case 'doc-link':
             return <DocLinkCard key={b.id} path={b.path} title={b.title} />;
           case 'folder-link':
@@ -328,7 +434,18 @@ function ElrondGroup({
             return null;
         }
       })}
-      {textBlocks.length > 0 && !streaming ? <ActionsRow getText={copyText} /> : null}
+      {(textBlocks.some(isAnswerProse) || textBlocks.some(hasVisibleProse)) && !streaming ? (
+        <ActionsRow
+          getText={copyText}
+          pinned={isPinned}
+          onTogglePin={pin ? () => {
+            const src = textBlocks.filter(isAnswerProse);
+            const visible = src.length ? src : textBlocks.filter(hasVisibleProse);
+            const last = visible[visible.length - 1];
+            return pin.onToggle({ blockId: first.id, text: last?.text ?? copyText(), ts: first.ts });
+          } : undefined}
+        />
+      ) : null}
     </div>
   );
 }
@@ -344,12 +461,14 @@ export type ChatThreadProps = {
   phrases?: string[];
   /** Grok shell: collapse multi-step working narrative into a Thoughts pod. */
   collapseSteps?: boolean;
+  /** Grok shell: persist pin into the focused agent's right-pane pocket. */
+  pin?: ThreadPin;
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // Elrond groups (tool cards + streaming prose), and the thinking indicator
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin }: ChatThreadProps) {
   const streaming = status === 'streaming';
   const hasOpen = blocks.some(
     (b) =>
@@ -398,7 +517,46 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   }
 
   const nodes: ReactNode[] = [];
+  let pendingAutomation = false;
+  let hideThinking = false;
   for (const g of groups) {
+    if (g.type === 'peer' && isAutomationPeer(g.block.from, g.block.fromRole, g.block.text)) {
+      pendingAutomation = true;
+      hideThinking = true;
+      continue;
+    }
+    if (g.type === 'user' || g.type === 'compact' || g.type === 'peer') {
+      pendingAutomation = false;
+      hideThinking = false;
+    }
+    if (g.type === 'elrond' && pendingAutomation) {
+      pendingAutomation = false;
+      const hasRunningTool = g.blocks.some((b) => b.kind === 'tool' && b.running);
+      const isLive = g.blocks.some(
+        (b) => (b.kind === 'text' && b.open) || (b.kind === 'tool' && b.running),
+      );
+      const texts = g.blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text').map((b) => b.text);
+      const hasNonText = g.blocks.some((b) => b.kind !== 'text');
+      if (shouldHideAutomationTurn({ texts, hasRunningTool, isLive, hasNonText })) {
+        hideThinking = isLive;
+        continue;
+      }
+      hideThinking = false;
+    } else if (g.type === 'elrond') {
+      const hasRunningTool = g.blocks.some((b) => b.kind === 'tool' && b.running);
+      const isLive = g.blocks.some(
+        (b) => (b.kind === 'text' && b.open) || (b.kind === 'tool' && b.running),
+      );
+      const texts = g.blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text').map((b) => b.text);
+      // Standalone protocol no-ops (NO_UPDATE / Quiet) stay out of the feed.
+      // Broader quiet-routine phrases ("nothing happened") still show on human
+      // turns — automation hide is the pendingAutomation branch above.
+      const hasNonText = g.blocks.some((b) => b.kind !== 'text');
+      const hasRealProse = texts.some((t) => t.trim() && !isProtocolNoopText(t));
+      if (!hasRunningTool && !isLive && !hasNonText && !hasRealProse && texts.some((t) => t.trim())) {
+        continue;
+      }
+    }
     if (g.day !== lastDay) {
       nodes.push(<DayMark key={`dm-${g.day}-${nodes.length}`} label={g.day} />);
       lastDay = g.day;
@@ -410,12 +568,11 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     } else if (g.type === 'peer') {
       nodes.push(<PeerBubble key={g.block.id} block={g.block} />);
     } else {
-      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} />);
+      nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} />);
     }
   }
 
-
-  if (streaming && !hasOpen) {
+  if (streaming && !hasOpen && !hideThinking && !pendingAutomation) {
     nodes.push(<ThinkingIndicator key="thinking" phrases={phrases} />);
   }
 

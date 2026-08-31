@@ -1,6 +1,7 @@
 // Agent-scoped routines — Rivendell-local automations that fire a prompt into
-// a specific agent's home thread on a schedule. Output lands in the thread
-// (unread badge lights). Store: ~/.rivendell/routines.json.
+// a specific agent's home thread on a schedule. Quiet no-ops stay off the
+// visible feed and unread badge; real ship/fail/needs-Matt results still land.
+// Store: ~/.rivendell/routines.json.
 //
 // Schedules (kept deliberately simple + human):
 //   "every:30m"          — every 30 minutes
@@ -98,8 +99,12 @@ export async function runRoutine(id: string): Promise<{ ran: boolean; reason?: s
   const agent = listAgents().find((a) => a.id === routine.agentId);
   if (!agent) return { ran: false, reason: 'agent was deleted' };
   const stamp = Date.now();
-  const text = `[routine: ${routine.name}]\n${routine.prompt}\n\n(Scheduled automation — do the work, then post your result here in the thread.)`;
-  const result = await sendToAgentHome(agent, text, { peerFrom: `⚙︎ ${routine.name}`, peerFromRole: 'automation' });
+  const text = `[routine: ${routine.name}]\n${routine.prompt}\n\n(Scheduled automation — do the work. If nothing happened, reply with exactly NO_UPDATE and nothing else. Only post a thread message when something shipped, failed, or needs Matt.)`;
+  const result = await sendToAgentHome(agent, text, {
+    peerFrom: `⚙︎ ${routine.name}`,
+    peerFromRole: 'automation',
+    peerText: routine.name,
+  });
   markRun(id, stamp);
   return result.delivered ? { ran: true } : { ran: false, reason: result.reason };
 }

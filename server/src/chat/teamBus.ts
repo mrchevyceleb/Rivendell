@@ -8,6 +8,7 @@
 import { join } from 'node:path';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { listAgents, type Agent } from './agents.ts';
+import { eventText, isAutomationPeerEvent, isQuietRoutineReply, isRoutinePromptText } from './routineNoise.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -76,7 +77,7 @@ export function agentLogKey(agent: Agent): { cli: string; chatKey: string } {
 export async function sendToAgentHome(
   agent: Agent,
   text: string,
-  opts: { peerFrom: string; peerFromRole?: string },
+  opts: { peerFrom: string; peerFromRole?: string; peerText?: string },
 ): Promise<{ delivered: boolean; reason?: string }> {
   const runner = await getRunner();
   const { cli, chatKey } = agentLogKey(agent);
@@ -90,7 +91,11 @@ export async function sendToAgentHome(
     return { delivered: false, reason: 'agent is mid-turn — routine skipped this cycle' };
   }
   try {
-    await session.send(text, undefined, { peerFrom: opts.peerFrom, peerFromRole: opts.peerFromRole });
+    await session.send(text, undefined, {
+      peerFrom: opts.peerFrom,
+      peerFromRole: opts.peerFromRole,
+      peerText: opts.peerText,
+    });
   } catch (e) {
     return { delivered: false, reason: `delivery failed: ${(e as Error).message}` };
   }
@@ -273,6 +278,7 @@ export async function teamRecent(name: string, limit = 8): Promise<Array<{ who: 
     return [];
   }
   const out: Array<{ who: 'agent' | 'user' | 'peer'; text: string }> = [];
+  let afterAutomation = false;
   for (const line of raw.split('\n')) {
     if (!line || !line.includes('"text"')) continue;
     try {
@@ -281,16 +287,20 @@ export async function teamRecent(name: string, limit = 8): Promise<Array<{ who: 
       const inner = ev?.event ?? ev;
       let who: 'agent' | 'user' | 'peer' | null = null;
       let text: string | null = null;
-      if (inner?.type === '_user_echo') { who = 'user'; text = inner.text; }
-      else if (inner?.type === 'peer_message') { who = 'peer'; text = inner.text; }
-      else if (inner?.type === 'assistant') {
-        who = 'agent';
-        const content = inner?.message?.content;
-        if (typeof content === 'string') text = content;
-        else if (Array.isArray(content)) {
-          const t = [...content].reverse().find((c: any) => c?.type === 'text' && typeof c.text === 'string');
-          text = t?.text ?? null;
+      if (inner?.type === '_user_echo') {
+        afterAutomation = false;
+        who = 'user'; text = inner.text;
+      } else if (inner?.type === 'peer_message') {
+        if (isAutomationPeerEvent(parsed) || isRoutinePromptText(typeof inner.text === 'string' ? inner.text : '')) {
+          afterAutomation = true;
+          continue;
         }
+        afterAutomation = false;
+        who = 'peer'; text = inner.text;
+      } else if (inner?.type === 'assistant') {
+        who = 'agent';
+        text = eventText(parsed) || null;
+        if (text && afterAutomation && isQuietRoutineReply(text)) continue;
       }
       if (who && typeof text === 'string' && text.trim()) {
         out.push({ who, text: text.replace(/\s+/g, ' ').trim().slice(0, 400) });

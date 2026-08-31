@@ -28,6 +28,7 @@ import { AgentEditor } from './AgentEditor';
 import { CallOverlay } from '../voice/CallOverlay';
 import { useAgents, reorderAgentIds, sameChatId, type Agent } from './agents';
 import { useChatHistory, type HistoryItem } from './history';
+import { OPEN_PANE_EVENT } from './messagePins';
 
 import { Council } from '../rooms/Council';
 import { Dashboard } from '../rooms/Dashboard';
@@ -105,6 +106,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   }, [theme]);
   useEffect(() => { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); }, [view]);
   useEffect(() => { localStorage.setItem(PANE_KEY, String(paneOpen)); }, [paneOpen]);
+  useEffect(() => {
+    const open = () => setPaneOpen(true);
+    window.addEventListener(OPEN_PANE_EVENT, open);
+    return () => window.removeEventListener(OPEN_PANE_EVENT, open);
+  }, []);
   useEffect(() => { localStorage.setItem('rivendell:rail-collapsed', String(railCollapsed)); }, [railCollapsed]);
   // Esc also collapses the desktop rail (quick focus-the-chat shortcut).
   useEffect(() => {

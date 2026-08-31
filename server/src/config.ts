@@ -6,6 +6,23 @@ import { fileProviderErrorMessage, isTransientFileProviderError } from './lib/fi
 
 export const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+/** Absolute path to the team-bus MCP. `npm --workspace server` sets cwd to
+ *  `server/`, so `join(process.cwd(), 'server/scripts/...')` resolves to a
+ *  missing `server/server/scripts` path and every agent’s team_message dies. */
+export const TEAM_MCP_SCRIPT = (() => {
+  if (process.env.RIVENDELL_TEAM_MCP) return process.env.RIVENDELL_TEAM_MCP;
+  const candidates = [
+    join(APP_ROOT, 'server', 'scripts', 'team-mcp.mjs'),
+    join(process.cwd(), 'scripts', 'team-mcp.mjs'),
+    join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs'),
+  ];
+  const resolved = candidates.find((p) => existsSync(p)) ?? candidates[0];
+  if (!existsSync(resolved)) {
+    console.warn(`[config] rivendell-team MCP missing at ${resolved}`);
+  }
+  return resolved;
+})();
+
 export const PORT = Number(process.env.PORT || process.env.RIVENDELL_PORT) || 8091;
 export const HOST = process.env.HOST || '0.0.0.0';
 export const STATE_DIR = process.env.RIVENDELL_STATE_DIR || join(homedir(), '.rivendell');

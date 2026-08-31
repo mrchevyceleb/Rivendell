@@ -95,20 +95,29 @@ export function GrokChat(props: GrokChatProps) {
     return () => window.clearInterval(iv);
   }, [onMeta, agentLabel, picker.model, chat.status, chat.usage?.fraction, chat.compactingRef]);
 
-  // Unread badge hygiene: while this agent's thread is focused, keep the
-  // server's read marker at the log head so only unfocused agents light up.
+  // Unread badge hygiene: while this agent's thread is on a visible tab, keep
+  // the server's read marker at the log head. A backgrounded tab must not
+  // clear badges for replies it never showed — visibilityState covers that.
+  // document.hasFocus() is too strict (devtools / another pane steals focus
+  // and the badge sticks while Matt is looking at the thread).
   useEffect(() => {
     if (!props.agent) return;
     const agentId = props.agent.id;
     const post = () => {
-      // Only a VISIBLE, FOCUSED tab counts as "reading" — a backgrounded tab
-      // must not silently clear the unread badge for replies it never showed.
-      if (document.visibilityState === 'visible' && document.hasFocus()) void markAgentRead(agentId);
+      if (document.visibilityState === 'visible') void markAgentRead(agentId);
     };
-    const t = window.setTimeout(post, 1200); // let the WS replay land first
-    const iv = window.setInterval(post, 5000);
-    return () => { window.clearTimeout(t); window.clearInterval(iv); };
-  }, [props.agent?.id]);
+    post();
+    const t = window.setTimeout(post, 400);
+    const iv = window.setInterval(post, 4000);
+    document.addEventListener('visibilitychange', post);
+    window.addEventListener('focus', post);
+    return () => {
+      window.clearTimeout(t);
+      window.clearInterval(iv);
+      document.removeEventListener('visibilitychange', post);
+      window.removeEventListener('focus', post);
+    };
+  }, [props.agent?.id, chat.status]);
 
   return (
     <GrokConversation

@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSy
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
+import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
 
 const AGENTS_DIR = join(STATE_DIR, 'personas');
 const AGENTS_FILE = join(AGENTS_DIR, 'agents.json');
@@ -169,6 +170,7 @@ export function deleteAgent(id: string): boolean {
   if (next.length === agents.length) return false;
   saveAgents(next);
   deleteRoutinesForAgent(id);
+  try { deleteMessagePinsForAgent(id); } catch { /* pin pocket is ancillary to the agent record */ }
   clearAvatarFiles(id);
   try { unlinkSync(join(AGENTS_DIR, `${id}.md`)); } catch { /* scope file optional */ }
   return true;
