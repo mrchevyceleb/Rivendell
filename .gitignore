@@ -47,3 +47,6 @@ tmp/
 .playwright-mcp/
 
 .pi-subagents/
+
+# personal session notes, never publish
+Sessions/

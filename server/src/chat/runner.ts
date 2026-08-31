@@ -1173,10 +1173,8 @@ function retireOtherEnginesOnThread(cli: CliKind, repoPath: string, chatId: stri
       if (sessions.get(key) === session) sessions.delete(key);
     });
   }
-  // Codex/Banana maps self-clean: their getOrCreate only reuses an entry that
-  // still reports isAlive(), so a shut-down session is replaced on next use.
-  for (const session of activeCodexSessions()) retire(session);
-  for (const session of activeBananaSessions()) retire(session);
+  // Only claude-family engines are retired here. Codex and banana expose no live
+  // session accessor, so their child lingers until idle timeout after a switch.
 }
 
 /** Live, already-spawned session for a Claude-family lane, or null.
