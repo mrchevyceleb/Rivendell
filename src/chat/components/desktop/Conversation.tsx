@@ -48,6 +48,7 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
                 status={s.status}
                 contentRef={s.sticky.contentRef}
                 bottomRef={s.sticky.bottomRef}
+                suppressTyping={s.automationBusy}
               />
               {s.error ? (
                 <div className="chip" style={{ color: 'var(--amber)', borderColor: 'color-mix(in oklch, var(--amber) 40%, transparent)', background: 'color-mix(in oklch, var(--amber) 10%, transparent)' }}>

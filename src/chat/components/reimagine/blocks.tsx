@@ -72,6 +72,20 @@ export function ThinkingIndicator({ phrases = PHRASES }: { phrases?: string[] })
   );
 }
 
+/** SMS-style typing bubble: three bouncing dots in an agent-colored card,
+ *  shown the moment a turn is busy — covers the cold-resume silence before
+ *  any stream event lands (the old indicator never rendered in that gap
+ *  whenever a stale open block suppressed it). */
+export function TypingBubble() {
+  return (
+    <div className="typing-bubble" role="status" aria-label="Agent is typing">
+      <span />
+      <span />
+      <span />
+    </div>
+  );
+}
+
 export type ThreadPin = {
   pinnedBlockIds: string[];
   onToggle: (target: { blockId: string; text: string; ts: number }) => void | Promise<void>;
@@ -491,12 +505,16 @@ export type ChatThreadProps = {
   collapseSteps?: boolean;
   /** Grok shell: persist pin into the focused agent's right-pane pocket. */
   pin?: ThreadPin;
+  /** Grok shell: SMS-style typing bubble instead of the star indicator. */
+  typingBubble?: boolean;
+  /** Suppress the typing indicator entirely (silent automation turn running). */
+  suppressTyping?: boolean;
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // Elrond groups (tool cards + streaming prose), and the thinking indicator
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin, typingBubble = false, suppressTyping = false }: ChatThreadProps) {
   const streaming = status === 'streaming';
   const hasOpen = blocks.some(
     (b) =>
@@ -607,8 +625,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     }
   }
 
-  if (streaming && !hasOpen && !hideThinking && !pendingAutomation) {
-    nodes.push(<ThinkingIndicator key="thinking" phrases={phrases} />);
+  if (streaming && !hasOpen && !hideThinking && !pendingAutomation && !suppressTyping) {
+    nodes.push(typingBubble ? <TypingBubble key="thinking" /> : <ThinkingIndicator key="thinking" phrases={phrases} />);
   }
 
   return (

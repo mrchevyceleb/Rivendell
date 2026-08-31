@@ -57,22 +57,40 @@ export function isExactNoUpdate(text: string): boolean {
   return /^no_update[.!?]*$/.test(normalizeReply(text));
 }
 
+/** Negated failure phrase ("no jobs failed", "nothing failed", "zero
+ *  errors"): the negator must sit within 3 words of the failure word —
+ *  "No updates because the API failed" is NOT negated. */
+const NEGATED_FAILURE = /\b(?:no|nothing|never|zero|without)\s+(?:[\w-]+\s+){0,3}(?:failed|failures?|errors?|broken|timed out|timeouts?)\b/;
+
+/** Failure/delivery signals that always beat a quiet pattern. Negation- and
+ *  context-aware: "no jobs failed" and "previously posted items are
+ *  unchanged" are quiet, while "an API error" and "posted the summary" are not. */
+function hasFailureSignal(text: string): boolean {
+  const lower = normalizeReply(text);
+  if (/\b(needs you|needs matt|needs attention|action needed)\b/.test(lower)) return true;
+  if (/\b(failed|failures?|errors?|broken|timed out|timeouts?)\b/.test(lower) && !NEGATED_FAILURE.test(lower)) return true;
+  if (/\b(posted|shipped|deployed|sent|published|refreshed)\b/.test(lower)
+    && !/\b(previously|not|never)\b[^.;!\n]{0,20}\b(posted|shipped|deployed|sent|published|refreshed)\b/.test(lower)
+    && !/\b(posted|shipped|deployed|sent|published|refreshed)\b[^.;!\n]{0,30}\bunchanged\b/.test(lower)) return true;
+  return false;
+}
+
 /** No-op automation replies: hide these, keep real ship/fail/needs-Matt text. */
 export function isQuietRoutineReply(text: string): boolean {
   const t = text.trim();
   if (!t) return true;
   const lower = normalizeReply(t);
+  // Failure/delivery signals always win over the quiet patterns below —
+  // "Stayed silent because of an API error" must surface, not vanish.
+  if (hasFailureSignal(t)) return false;
   if (isExactNoUpdate(t)) return true;
-  if (/^quiet\b/.test(lower)) {
-    if (/\b(posted|failed|needs you|needs matt)\b/.test(lower) || /\berror:/.test(lower)) return false;
-    return true;
-  }
+  if (/^quiet\b/.test(lower)) return true;
   if (/\bstayed silent\b/.test(lower)) return true;
   if (/\bno new shipped rows\b/.test(lower)) return true;
-  if (/\bnothing (new|happened)\b/.test(lower) && lower.length < 500) {
-    if (/\b(posted|failed|needs you|needs matt)\b/.test(lower) || /\berror:/.test(lower)) return false;
-    return true;
-  }
+  if (NEGATED_FAILURE.test(lower) && lower.length < 500) return true; // "no jobs failed"
+  if (/\b(unchanged|no changes?|no updates?|up to date)\b/.test(lower) && lower.length < 500) return true;
+  if (/\b(zero|no) (errors?|failures?|issues?|problems?)\b/.test(lower) && lower.length < 500) return true;
+  if (/\bnothing (new|happened)\b/.test(lower) && lower.length < 500) return true;
   return false;
 }
 

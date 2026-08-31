@@ -100,5 +100,6 @@ export function useChatShell({ chat, picker }: ShellProps) {
     blocks: chat.blocks as ChatBlock[],
     status: chat.status,
     error: chat.error,
+    automationBusy: chat.automationBusy,
   };
 }

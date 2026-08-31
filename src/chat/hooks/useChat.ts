@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 import { contextWindowForCodexModel } from '../codexModels';
+import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
@@ -125,11 +126,25 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
 
   if (ev.type === 'message_start') {
     // New assistant turn. Mint a fresh turnId; close out any open blocks from
-    // a prior turn so their cbIndex correlation can no longer match.
+    // a prior turn so their cbIndex correlation can no longer match. Tool
+    // blocks also drop `running`: an interrupted turn never emits
+    // content_block_stop, and one stale running/open flag suppresses the
+    // typing indicator forever (hasOpen scans the whole history).
     turnIdRef.current = `t${nextId++}`;
-    return blocks.map((b) =>
-      b.kind === 'user' ? b : 'open' in b && b.open ? { ...b, open: false } : b,
-    );
+    return blocks.map((b) => {
+      if (b.kind === 'text' && b.open) return { ...b, open: false };
+      if (b.kind === 'tool' && (b.open || b.running)) return { ...b, open: false, running: false };
+      return b;
+    });
+  }
+
+  // Turn over (result) or killed (interrupted): nothing stays open/running.
+  if (ev.type === 'result' || ev.type === '_interrupted') {
+    return blocks.map((b) => {
+      if (b.kind === 'text' && b.open) return { ...b, open: false };
+      if (b.kind === 'tool' && (b.open || b.running)) return { ...b, open: false, running: false };
+      return b;
+    });
   }
 
   if (ev.type === 'content_block_start') {
@@ -329,7 +344,16 @@ function readStoredBlocks(cli: CompanionId, repoPath: string, chatId = 'main'): 
     const raw = localStorage.getItem(blocksStorageKey(cli, repoPath, chatId));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed as ChatBlock[];
+    // Snapshots from before the close-on-interrupt fix can carry stale
+    // open/running flags from killed turns — normalize on read too, or they
+    // suppress the typing bubble until the next message_start.
+    if (Array.isArray(parsed)) {
+      return (parsed as ChatBlock[]).map((block) => {
+        if (block.kind === 'text' && block.open) return { ...block, open: false };
+        if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
+        return block;
+      });
+    }
   } catch {}
   return [];
 }
@@ -339,9 +363,16 @@ function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
     .filter((block) => !(block.kind === 'text' && isLegacyCompactionSummaryText(block.text)))
     .slice(-200)
     .map((block) => {
-      if (block.kind !== 'user' || !block.images?.length) return block;
-      const { images: _images, ...rest } = block;
-      return { ...rest, imageCount: block.imageCount ?? block.images.length };
+      // A snapshot is never live: strip streaming flags so a reload can't
+      // resurrect a phantom "working" block from an interrupted turn (a stale
+      // open/running flag suppresses the typing indicator via hasOpen).
+      if (block.kind === 'text' && block.open) return { ...block, open: false };
+      if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
+      if (block.kind === 'user' && block.images?.length) {
+        const { images: _images, ...rest } = block;
+        return { ...rest, imageCount: block.imageCount ?? block.images.length };
+      }
+      return block;
     });
 }
 
@@ -1187,8 +1218,13 @@ export function useChat(opts: {
 
   const reconnect = () => forceReconnectRef.current();
 
+  // Automation turns (routines) stay silent unless the turn produced a real
+  // deliverable message. Raw blocks still persist untouched to storage.
+  const visibleBlocks = useMemo(() => filterAutomationNoise(blocks), [blocks]);
+  const automationBusy = useMemo(() => automationTurnInFlight(blocks), [blocks]);
+
   return {
-    blocks, status, error, send, steer, freshStart, stop, reconnect, usage,
+    blocks: visibleBlocks, status, error, send, steer, freshStart, stop, reconnect, usage, automationBusy,
     lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,
   };
 }
