@@ -107,11 +107,45 @@ function extractPreview(rawTail: string): string | undefined {
         continue;
       }
       if (skipQuietTurn) continue;
-      const clean = text.replace(/\s+/g, ' ').trim();
-      if (clean) return clean.length <= 110 ? clean : `${clean.slice(0, 110).replace(/\s+\S*$/, '')}…`;
+      const clean = stripMarkdown(text);
+      // Slice by code points, not UTF-16 units — a mid-emoji cut renders as
+      // the replacement glyph in the rail.
+      if (clean) {
+        const chars = [...clean];
+        return chars.length <= 110 ? clean : `${chars.slice(0, 110).join('').replace(/\s+\S*$/, '')}…`;
+      }
     } catch { /* keep scanning */ }
   }
   return undefined;
+}
+
+/** Preview text is one plain line — drop markdown syntax so the rail never
+ *  shows raw `**bold**` / `*em*` / `` `code` `` / headings. Only paired
+ *  delimiters are rewritten (plus stray asterisks from truncated markers);
+ *  plain text like C#, snake_case, ~10, and prose pipes survives intact. */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')                 // closed fenced code
+    .replace(/```[\s\S]*$/g, ' ')                    // unterminated fence: drop to end
+    .replace(/`([^`]*)`/g, '$1')                     // inline code
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')        // images → alt text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')         // links → link text
+    .replace(/^#{1,6}\s+/gm, '')                     // headings
+    .replace(/^>\s?/gm, '')                          // quotes
+    .replace(/^[-*+]\s+/gm, '')                      // bullets
+    .replace(/^\d+\.\s+/gm, '')                      // ordered lists
+    .replace(/^\s*\|?[\s:|-]*\|[\s:|-]*\|?\s*$/gm, ' ') // table separator rows
+    .replace(/^\s*\|/gm, '')                            // leading row pipe
+    .replace(/\|\s*$/gm, '')                            // trailing row pipe
+    .replace(/\s\|\s/g, ' — ')                          // interior cell pipes
+    .replace(/\*\*([^*]+)\*\*/g, '$1')               // bold
+    .replace(/\*([^*]+)\*/g, '$1')                   // italic
+    .replace(/(^|[^\w_])__([^_]+)__(?=[^\w_]|$)/gm, '$1$2') // bold, non-word boundaried (snake_case safe)
+    .replace(/(^|[^\w_])_([^_]+)_(?=[^\w_]|$)/gm, '$1$2')   // italic, non-word boundaried
+    .replace(/~~([^~]+)~~/g, '$1')                   // strikethrough
+    .replace(/\*+/g, '')                             // stray asterisks (truncated markers)
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 // Title/preview derived from a log's head+tail, keyed by (mtime, size). A log
 // whose bytes have not changed cannot have gained a title, so a *negative*
