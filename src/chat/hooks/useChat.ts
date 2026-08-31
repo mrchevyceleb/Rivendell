@@ -688,6 +688,9 @@ export function useChat(opts: {
       // thinking UI dies and a tool/think pause looks like a crashed line.
       const keepStreaming = statusRef.current === 'streaming' || pendingSendRef.current;
       if (!keepStreaming) setStatus('connecting');
+      // Replay guard lives at effect scope (declared below connect) — see
+      // reconcileNow for the second hello path.
+      socketReady = false;
       lastMessageAtRef.current = Date.now();
 
       ws.onopen = () => {
@@ -721,6 +724,7 @@ export function useChat(opts: {
           return;
         }
         if (msg.type === 'ready') {
+          socketReady = true;
           // If the server says we attached to a busy session (Sam is mid-turn
           // because the user reconnected from a phone unlock or tab switch),
           // jump straight to 'streaming' so the UI shows tending instead of
@@ -761,6 +765,7 @@ export function useChat(opts: {
           setError(null);
         }
         else if (msg.type === 'turnStart') {
+          if (!socketReady) return; // replayed control message from the hello buffer
           if (initialSendInFlightRef.current) {
             initialSendInFlightRef.current = false;
             initialMessageRef.current = null;
@@ -773,6 +778,7 @@ export function useChat(opts: {
           setStatus('streaming');
         }
         else if (msg.type === 'turnEnd') {
+          if (!socketReady) return; // replayed control message from the hello buffer
           pendingSendRef.current = false;
           compactingRef.current = false;
           const leftover = outboundQueue.get(conversationKey(cli, repo.path, chatId));
@@ -981,6 +987,15 @@ export function useChat(opts: {
       };
     };
 
+    // Replay guard: the server's hello replay includes the PREVIOUS turn's
+    // control messages (turnStart/turnEnd/errors). Processing them as live
+    // flips status and kills the typing indicator mid-send. Handshake-scoped:
+    // reset on every hello (new socket AND same-socket reconcile re-hello),
+    // and the `ready` message that follows each replay carries the true busy
+    // state. A legit live turnStart/turnEnd dropped mid-handshake is re-taught
+    // by that ready (busy flag) and its queued-outbound flush.
+    let socketReady = false;
+
     // Backgrounded tabs get their WebSocket throttled or silently killed by
     // the browser, and the setTimeout-based reconnect can be deferred for
     // minutes. When the tab comes back we force a reconcile: if the socket
@@ -1000,6 +1015,7 @@ export function useChat(opts: {
       ) return;
       if (live && live.readyState === WebSocket.OPEN) {
         try {
+          socketReady = false; // re-hello replay must not process as live
           live.send(JSON.stringify({
             type: 'hello',
             cli,

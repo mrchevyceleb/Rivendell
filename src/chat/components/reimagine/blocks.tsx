@@ -573,9 +573,12 @@ export type ChatThreadProps = {
 // while a turn is live but no content has landed yet.
 export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin, typingBubble = false, suppressTyping = false }: ChatThreadProps) {
   const streaming = status === 'streaming';
-  const hasOpen = blocks.some(
+  // The indicator lives until something VISIBLE is on screen — an open block
+  // with empty text (the window between content_block_start and the first
+  // token) renders as a bare caret, which reads as "the indicator vanished".
+  const hasVisible = blocks.some(
     (b) =>
-      (b.kind === 'text' && (b as Extract<ChatBlock, { kind: 'text' }>).open) ||
+      (b.kind === 'text' && (b as Extract<ChatBlock, { kind: 'text' }>).open && (b as Extract<ChatBlock, { kind: 'text' }>).text.trim().length > 0) ||
       (b.kind === 'tool' && (b as Extract<ChatBlock, { kind: 'tool' }>).running),
   );
 
@@ -682,7 +685,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     }
   }
 
-  if (streaming && !hasOpen && !hideThinking && !pendingAutomation && !suppressTyping) {
+  if (streaming && !hasVisible && !hideThinking && !pendingAutomation && !suppressTyping) {
     nodes.push(typingBubble ? <TypingBubble key="thinking" /> : <ThinkingIndicator key="thinking" phrases={phrases} />);
   }
 
