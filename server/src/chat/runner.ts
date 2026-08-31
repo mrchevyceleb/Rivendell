@@ -548,26 +548,17 @@ class ClaudeSession {
         '--append-system-prompt',
         [ASSISTANT_AGENT_PROMPT, voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n'),
       );
-      // Keep --mcp-config last: it's variadic and would greedily swallow any
-      // plain (non-dash) arg that followed it.
-      args.push('--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
-    } else if (cli === 'xai') {
-      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n');
-      if (sys) args.push('--append-system-prompt', sys);
-      // Grok's full toolbox: assistant-mcp + Matt's real Chrome.
-      // --strict-mcp-config overrides the stale entry in the xai account
-      // config with this fresh one. Keep --mcp-config last (variadic).
-      args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
     } else {
       const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
 
-    // Matt's real Chrome for the other sidebar lanes. Merging (no
-    // --strict-mcp-config) so nothing the account config already has is lost.
-    // Keep --mcp-config last: it is variadic and swallows any plain arg after it.
-    if (cli === 'claude' || cli === 'zai') {
-      args.push('--mcp-config', withTeamMcp(BROWSER_ONLY_MCP_CONFIG, chatId));
+    // Same toolbox on every claude-family engine: assistant-mcp + Matt's real
+    // Chrome + rivendell-team. --strict-mcp-config so a model switch cannot
+    // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
+    // --mcp-config last: it is variadic and swallows any plain arg after it.
+    if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai') {
+      args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
     }
 
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact

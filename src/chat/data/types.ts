@@ -86,6 +86,16 @@ export type ChatBlock =
       savedToRag?: boolean;
     }
   | {
+      /** Brain change mid-thread. The conversation continues; only the engine
+       *  that will answer the next turn changed. */
+      kind: 'switch';
+      id: string;
+      from: string;
+      to: string;
+      model?: string;
+      ts: number;
+    }
+  | {
       kind: 'text';
       id: string;
       text: string;

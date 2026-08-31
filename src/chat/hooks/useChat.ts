@@ -78,8 +78,23 @@ const id = () => `b${nextId++}`;
 function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
 
-  if (ev.type === 'stream_event' && ev.event) {
+  if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
     return reduce(blocks, ev.event, turnIdRef);
+  }
+
+  if (ev.type === 'system' && (ev.subtype === 'commands_changed' || ev.subtype === 'hook_response' || ev.subtype === 'hook_started' || ev.subtype === 'hook_progress')) {
+    return blocks;
+  }
+
+  if (ev.type === '_engine_switch') {
+    return [...blocks, {
+      kind: 'switch',
+      id: id(),
+      from: typeof ev.from === 'string' ? ev.from : 'unknown',
+      to: typeof ev.to === 'string' ? ev.to : 'unknown',
+      model: typeof ev.model === 'string' ? ev.model : undefined,
+      ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
+    }];
   }
 
   // Agent-to-agent delivery: a teammate's message landing in this thread.
@@ -265,8 +280,19 @@ function isLegacyCompactionSummaryText(text: string): boolean {
   );
 }
 
+function bareChatId(chatId: string): string {
+  return (chatId || 'main').replace(/__acct__[a-z0-9-]+$/i, '');
+}
+
+function isAgentHome(chatId: string): boolean {
+  return /^bot-[a-z0-9][a-z0-9-]*$/i.test(bareChatId(chatId));
+}
+
 function conversationKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   const normalized = chatId || 'main';
+  // Agent home threads share one durable log across engines. Key the client
+  // cache the same way so changing models does not wipe the visible thread.
+  if (isAgentHome(normalized)) return `thread|${repoPath}|${bareChatId(normalized)}`;
   return normalized === 'main'
     ? `${cli}|${repoPath}`
     : `${cli}|${repoPath}|${normalized}`;

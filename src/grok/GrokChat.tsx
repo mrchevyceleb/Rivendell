@@ -13,7 +13,7 @@ import type { CompanionId, Repo } from '../chat/data/types';
 import { GrokConversation } from './GrokConversation';
 import type { ChatMeta } from './BotPanel';
 import type { Agent } from './agents';
-import { markAgentRead } from './agents';
+import { markAgentRead, updateAgentReq } from './agents';
 
 export type GrokChatProps = {
   chatId: string;
@@ -75,6 +75,15 @@ export function GrokChat(props: GrokChatProps) {
   }, [chat.status, chat.stop]);
 
   const s = useChatShell({ chat, picker });
+
+  // A mid-thread model change has to stick on the agent, not just localStorage.
+  // Otherwise the sidebar / team bus reopen the old engine and it looks like
+  // the switch never happened.
+  useEffect(() => {
+    if (!props.agent) return;
+    if (picker.companion === props.agent.engine) return;
+    void updateAgentReq(props.agent.id, { engine: picker.companion }).catch(() => { /* next poll retries */ });
+  }, [picker.companion, props.agent?.id, props.agent?.engine]);
 
   // Report the Session-card snapshot upward. compactingRef is a ref, so poll
   // it lightly while the session is live.

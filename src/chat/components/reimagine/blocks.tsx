@@ -252,6 +252,34 @@ function CompactDivider({ block }: { block: Extract<ChatBlock, { kind: 'compact'
   );
 }
 
+const ENGINE_LABEL: Record<string, string> = {
+  xai: 'Grok',
+  zai: 'GLM',
+  claude: 'Claude',
+  assistant: 'Claude',
+  codex: 'Codex',
+  banana: 'OpenRouter',
+  'banana-local': 'Local',
+  'banana-fireworks': 'Fireworks',
+};
+
+function engineLabel(id: string): string {
+  return ENGINE_LABEL[id] ?? id;
+}
+
+function SwitchDivider({ block }: { block: Extract<ChatBlock, { kind: 'switch' }> }) {
+  const from = engineLabel(block.from);
+  const to = engineLabel(block.to);
+  const model = block.model ? ` · ${block.model}` : '';
+  return (
+    <div className="compact-mark switch-mark" title={`This thread stayed put. ${to} will answer from here on${block.model ? ` (${block.model})` : ''}.`}>
+      <span className="compact-line" />
+      <span className="compact-label">Switched {from} → {to}{model}</span>
+      <span className="compact-line" />
+    </div>
+  );
+}
+
 // ── user bubble ───────────────────────────────────────────────────────────
 // ── Thoughts pod (Grok anatomy) — in a multi-step turn, every assistant text
 //    block except the final one is working narrative; collapse it into an
@@ -481,6 +509,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     | { type: 'user'; block: Extract<ChatBlock, { kind: 'user' }>; day: string }
     | { type: 'elrond'; blocks: Array<Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>>; day: string }
     | { type: 'compact'; block: Extract<ChatBlock, { kind: 'compact' }>; day: string }
+    | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
     | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; day: string }
   > = [];
   let lastDay = '';
@@ -488,6 +517,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     const day = dayLabel(b.ts);
     if (b.kind === 'compact') {
       groups.push({ type: 'compact', block: b, day: lastDay || day });
+      continue;
+    }
+    if (b.kind === 'switch') {
+      groups.push({ type: 'switch', block: b, day: lastDay || day });
       continue;
     }
     if (b.kind === 'user') {
@@ -525,7 +558,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       hideThinking = true;
       continue;
     }
-    if (g.type === 'user' || g.type === 'compact' || g.type === 'peer') {
+    if (g.type === 'user' || g.type === 'compact' || g.type === 'switch' || g.type === 'peer') {
       pendingAutomation = false;
       hideThinking = false;
     }
@@ -565,6 +598,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<UserBubble key={g.block.id} block={g.block} />);
     } else if (g.type === 'compact') {
       nodes.push(<CompactDivider key={g.block.id} block={g.block} />);
+    } else if (g.type === 'switch') {
+      nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'peer') {
       nodes.push(<PeerBubble key={g.block.id} block={g.block} />);
     } else {

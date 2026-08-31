@@ -189,6 +189,16 @@ async function scanChatHistory(): Promise<ChatHistoryItem[]> {
     if (!mainKeys.has(base)) mainKeys.set(base, { cli: p.cli, cwd: p.cwd });
   }
 
+  const threadHomes = new Set(
+    files
+      .filter((f) => f.startsWith('thread_') && f.endsWith('.jsonl') && !f.endsWith('.archive.jsonl'))
+      .map((f) => {
+        const m = /_(bot-[a-z0-9][a-z0-9-]*)(?:__acct__[a-z0-9-]+)?\.jsonl$/i.exec(f);
+        return m ? m[1] : null;
+      })
+      .filter((h): h is string => Boolean(h)),
+  );
+
   // Stat first, cap the candidate set, THEN pay for content reads — and keep
   // every read async so a big log dir never stalls the chat/WebSocket loop.
   type Candidate = { file: string; chatId: string; cli: string; cwd: string; path: string; mtimeMs: number; size: number };
@@ -211,6 +221,10 @@ async function scanChatHistory(): Promise<ChatHistoryItem[]> {
     }
     const chatId = stem.slice(hit.prefix.length);
     if (!chatId || NOISE.test(chatId)) return;
+    // Per-engine leftovers of an already-migrated agent thread. The live row
+    // is the thread_ file; showing both forks the sidebar the way the logs did.
+    const bareHome = chatId.replace(/__acct__[a-z0-9-]+$/i, '');
+    if (hit.cli !== 'thread' && threadHomes.has(bareHome) && /^bot-/.test(bareHome)) return;
     try {
       const st = await stat(join(EVENT_LOG_DIR, file));
       candidates.push({ file, chatId, cli: hit.cli, cwd: hit.cwd, path: join(EVENT_LOG_DIR, file), mtimeMs: st.mtimeMs, size: st.size });

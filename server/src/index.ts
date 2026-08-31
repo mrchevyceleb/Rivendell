@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -34,8 +35,10 @@ import { jarvisRouter } from './routes/jarvis.ts';
 import { internalRouter } from './routes/internal.ts';
 import { xaiOauthRouter } from './routes/xai-oauth.ts';
 import { primeXaiOauthToken } from './chat/runner.ts';
+import { migrateAgentThreadLogs } from './chat/threadMigrate.ts';
 
 const app = express();
+app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: '25mb' }));
 
 app.get('/api/health', (_req, res) => {
@@ -88,6 +91,12 @@ try {
 // refresh every 30m) so xAI chat turns use the subscription, not API credits.
 await primeXaiOauthToken();
 ensureAgents(); // seed the agent store (one Chief of Staff)
+try {
+  const mig = migrateAgentThreadLogs();
+  if (!mig.skipped) console.log(`[thread-migrate] merged ${mig.migrated} agent thread(s)`);
+} catch (err) {
+  console.warn(`[thread-migrate] failed: ${(err as Error).message}`);
+}
 const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
 startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)

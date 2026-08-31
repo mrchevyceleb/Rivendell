@@ -38,6 +38,23 @@ export function sanitizeKey(key: string): string {
   return key.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200);
 }
 
+/** CLI plumbing that is not conversation. commands_changed dumps the whole
+ *  slash catalog (multi-KB) on every session start; hook_response is the same
+ *  SessionStart noise. Persisting it is what grew 4 MB lanes and made every
+ *  hello expensive. Filter on write AND on load so old logs shrink in memory. */
+export function isPlumbingEvent(ev: unknown): boolean {
+  const e = ev as { type?: unknown; event?: { type?: unknown; subtype?: unknown }; subtype?: unknown };
+  const inner = e?.type === 'event' ? e.event : e;
+  const type = (inner as { type?: unknown } | undefined)?.type ?? e?.type;
+  const subtype = (inner as { subtype?: unknown } | undefined)?.subtype ?? e?.subtype;
+  if (type !== 'system') return false;
+  return subtype === 'commands_changed'
+    || subtype === 'hook_response'
+    || subtype === 'hook_started'
+    || subtype === 'hook_progress';
+}
+
+
 function logPath(key: string): string {
   return join(EVENT_LOG_DIR, `${sanitizeKey(key)}.jsonl`);
 }
@@ -123,6 +140,7 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
     try {
       const parsed = JSON.parse(line);
       if (typeof parsed?.seq === 'number' && parsed?.ev) {
+        if (isPlumbingEvent(parsed.ev)) continue;
         const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
         if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
         if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
@@ -178,6 +196,7 @@ export function flushEventLog(key: string): Promise<void> {
 }
 
 export function appendEventLog(key: string, persisted: PersistedEvent): void {
+  if (isPlumbingEvent(persisted.ev)) return;
   const path = logPath(key);
   const line = JSON.stringify(persisted) + '\n';
   const prior = writeChains.get(key) ?? Promise.resolve();
