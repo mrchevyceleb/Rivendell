@@ -736,7 +736,13 @@
 }
 .bot-app .rc .send:hover { transform: scale(1.05); }
 .bot-app .rc .send:active { transform: scale(0.94); }
-.bot-app .rc .send.streaming { background: #FAFAFA; color: #070707; animation: none; }
+.bot-app .rc .send.streaming { width: auto; min-width: 36px; height: 36px; padding: 0 13px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: #DC2626; color: #FFFFFF; animation: rc-stop-pulse 1.8s ease-in-out infinite; }
+.bot-app .rc .send.streaming .stop-txt { font-size: 12px; }
+.bot-app[data-theme="light"] .rc .send.streaming,
+.bot-app[data-theme="light"] .rc .send.streaming:hover { background: #DC2626; color: #FFFFFF; }
+@media (prefers-reduced-motion: reduce) {
+  .bot-app .rc .send.streaming { animation: none; }
+}
 .bot-app .rc .send.steer { background: #FAFAFA; color: #070707; box-shadow: none; }
 .bot-app .rc .steer-cue { color: var(--r-ink-mute); }
 

@@ -223,6 +223,7 @@ export function Composer(props: ComposerProps) {
         <path d="M4 20v-7a4 4 0 0 1 4-4h12" />
       </svg>
       <StopSquare className="ic-stop" />
+      <span className="stop-txt" aria-hidden="true">Stop</span>
     </button>
   );
 

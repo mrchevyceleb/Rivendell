@@ -205,7 +205,23 @@
 .rc .send.ready:hover { transform: scale(1.08); }
 .rc .send.ready svg { transform: translateY(-1px); }
 .rc .send:active { transform: scale(.9); }
-.rc .send.streaming { background: var(--surface-hover); border-color: color-mix(in oklch, var(--accent) 40%, transparent); color: var(--accent-glow); animation: rc-glow-pulse 2s ease-in-out infinite; }
+/* Busy = STOP. Loud red pill with a label — the old bare glyph read as
+   decoration and nobody found it mid-stream. */
+.rc .send .stop-txt { display: none; font: 600 12.5px/1 var(--font-display); letter-spacing: .02em; }
+.rc .send.streaming { width: auto; min-width: 40px; padding: 0 14px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  background: #DC2626; border-color: transparent; color: #fff;
+  animation: rc-stop-pulse 1.8s ease-in-out infinite; }
+.rc .send.streaming:hover { transform: scale(1.05); }
+.rc .send.streaming svg { width: 14px; height: 14px; }
+.rc .send.streaming .stop-txt { display: inline; }
+@keyframes rc-stop-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, .45); }
+  50% { box-shadow: 0 0 0 7px rgba(220, 38, 38, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rc .send.streaming { animation: none; }
+}
 .rc .send.streaming .ic-send { display: none; } .rc .send.streaming .ic-stop { display: block; }
 /* Steer: typing mid-stream turns the button amber with a redirect glyph
    (inject guidance, don't stop) */
