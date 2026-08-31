@@ -55,7 +55,11 @@ type ResumeWatchableSession = AnySession & {
   waitForInitOrExit?: (timeoutMs: number) => Promise<'initialized' | 'closed' | 'timeout'>;
 };
 
-const IDLE_SESSION_TTL_MS = 30 * 60 * 1000;
+// Personas stay warm all day: measured cost is ~0.5GB per warm session
+// (claude CLI + MCP stack) on a 128GB box, so the 30-minute prune was pure
+// cold-start tax. 24h still self-heals stale processes overnight (old CLI
+// builds, dead OAuth) — and sessions with an open tab are never pruned.
+const IDLE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const IDLE_REAPER_INTERVAL_MS = 60 * 1000;
 const RESUME_STARTUP_WATCH_MS = 8000;
 const DEFAULT_CHAT_ID = 'main';
