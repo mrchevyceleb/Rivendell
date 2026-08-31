@@ -9,6 +9,7 @@ import { readdir, stat, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EVENT_LOG_DIR } from './event-log-store.ts';
 import { discoverRepos } from './repos.ts';
+import { eventText, eventType, isAutomationPeerEvent, isQuietRoutineReply, isRoutinePromptText } from './routineNoise.ts';
 
 export type ChatHistoryItem = {
   chatId: string;
@@ -20,12 +21,19 @@ export type ChatHistoryItem = {
   updatedAt: number;
 };
 
-const CLI_KINDS = ['claude', 'codex', 'assistant', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai'];
+// `thread` is not an engine — it is the engine-free key an agent home thread's
+// continuous log lives under (see threadKey.ts). It shares the prefix grammar
+// (`<kind>|<cwd>|<chatId>`), so listing it here is all the mapping this index
+// needs: one stat + one head/tail read per conversation, exactly as before.
+const CLI_KINDS = ['claude', 'codex', 'assistant', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai', 'thread'];
 // Automation/spam logs that would drown the sidebar (bridge probes, browser
 // sessions, account bootstraps). Real conversations (studio-*, grok-*, main)
 // never start with these prefixes.
 const NOISE = /^(bridge|browser|acct|test|probe|smoke)[-_]/i;
 const MAX_ITEMS = 200;
+// Overflow sinks written by the log trimmer. Real history, but not a
+// conversation row — the live log next to them is the row.
+const ARCHIVE_SUFFIX = '.archive';
 
 function sanitizeKey(key: string): string {
   return key.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200);
@@ -80,31 +88,78 @@ function extractTitle(raw: string): string | null {
 // preview line. Same tolerant shapes as extractTitle.
 function extractPreview(rawTail: string): string | undefined {
   const lines = rawTail.split('\n');
+  let skipQuietTurn = false;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line || !line.includes('"text"')) continue;
     try {
       const parsed = JSON.parse(line);
-      const ev = parsed?.ev ?? parsed;
-      const msg = ev?.event?.message ?? ev?.message;
-      const content = msg?.content ?? ev?.text ?? ev?.event?.text;
-      let text: string | null = null;
-      if (typeof content === 'string') text = content;
-      else if (Array.isArray(content)) {
-        const t = [...content].reverse().find((c: any) => c?.type === 'text' && typeof c.text === 'string');
-        if (t) text = t.text;
+      const t = eventType(parsed);
+      if (t === 'peer_message' && isAutomationPeerEvent(parsed)) {
+        skipQuietTurn = false;
+        continue;
       }
-      if (text) {
-        const clean = text.replace(/\s+/g, ' ').trim();
-        if (clean) return clean.length <= 110 ? clean : `${clean.slice(0, 110).replace(/\s+\S*$/, '')}…`;
+      if (t === '_user_echo' || t === 'user') skipQuietTurn = false;
+      const text = eventText(parsed);
+      if (!text) continue;
+      if (isRoutinePromptText(text) || isQuietRoutineReply(text)) {
+        skipQuietTurn = true;
+        continue;
       }
+      if (skipQuietTurn) continue;
+      const clean = text.replace(/\s+/g, ' ').trim();
+      if (clean) return clean.length <= 110 ? clean : `${clean.slice(0, 110).replace(/\s+\S*$/, '')}…`;
     } catch { /* keep scanning */ }
   }
   return undefined;
 }
-const cache = new Map<string, { mtimeMs: number; item: ChatHistoryItem }>();
+// Title/preview derived from a log's head+tail, keyed by (mtime, size). A log
+// whose bytes have not changed cannot have gained a title, so a *negative*
+// result is cacheable too. Caching only the hits meant every untitled
+// automation log re-read 192 KB + 48 KB and re-parsed 400 JSON lines on every
+// single request — with 650+ logs on disk that alone pegged a core.
+/** Last engine stamped in a log tail — a thread-keyed log's filename no longer
+ *  names one, and the sidebar has to reopen the conversation on the brain that
+ *  spoke last. Scans backwards; `eng` is a top-level field so this is cheap. */
+function extractEngine(rawTail: string): string | null {
+  const lines = rawTail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || !line.includes('"eng"')) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed?.eng === 'string' && parsed.eng) return parsed.eng;
+    } catch { /* partial first line of the tail window — keep scanning */ }
+  }
+  return null;
+}
+
+type DerivedEntry = { mtimeMs: number; size: number; title: string | null; preview?: string; engine?: string | null };
+const cache = new Map<string, DerivedEntry>();
+const CACHE_MAX = 400;
+
+// The sidebar polls every 15s and several callers can land at once; one
+// directory walk per few seconds is plenty for a conversation list.
+const RESULT_TTL_MS = 5_000;
+let resultCache: { at: number; items: ChatHistoryItem[] } | null = null;
+let inFlight: Promise<ChatHistoryItem[]> | null = null;
 
 export async function listChatHistory(): Promise<ChatHistoryItem[]> {
+  const now = Date.now();
+  if (resultCache && now - resultCache.at < RESULT_TTL_MS) return resultCache.items;
+  if (inFlight) return inFlight;
+  inFlight = scanChatHistory()
+    .then((items) => {
+      resultCache = { at: Date.now(), items };
+      return items;
+    })
+    .finally(() => {
+      inFlight = null;
+    });
+  return inFlight;
+}
+
+async function scanChatHistory(): Promise<ChatHistoryItem[]> {
   let files: string[] = [];
   try {
     files = await readdir(EVENT_LOG_DIR);
@@ -141,6 +196,7 @@ export async function listChatHistory(): Promise<ChatHistoryItem[]> {
   await Promise.all(files.map(async (file) => {
     if (!file.endsWith('.jsonl')) return;
     const stem = file.slice(0, -'.jsonl'.length);
+    if (stem.endsWith(ARCHIVE_SUFFIX)) return;
     let hit = prefixes.find((p) => stem.startsWith(p.prefix));
     if (!hit) {
       // main-session form: stem is exactly the cli|cwd key (no chatId part)
@@ -165,34 +221,53 @@ export async function listChatHistory(): Promise<ChatHistoryItem[]> {
 
   const out: ChatHistoryItem[] = [];
   for (const c of candidates) {
-    const cached = cache.get(c.file);
-    if (cached && cached.mtimeMs === c.mtimeMs) {
-      // Untitled entries never outlive the 30-minute grace window, cache or not.
-      if (cached.item.title === 'New conversation' && Date.now() - c.mtimeMs > 30 * 60 * 1000) continue;
-      out.push(cached.item);
-      continue;
-    }
-
-    // Read a prefix for the title and a tail for the preview — a long log's
-    // first user message lands early, its last message lands late.
     let title: string | null = null;
     let preview: string | undefined;
-    try {
-      const fh = await open(c.path, 'r');
+    let engine: string | null = null;
+    const cached = cache.get(c.file);
+    if (cached && cached.mtimeMs === c.mtimeMs && cached.size === c.size) {
+      title = cached.title;
+      preview = cached.preview;
+      engine = cached.engine ?? null;
+    } else {
+      // Read a prefix for the title and a tail for the preview — a long log's
+      // first user message lands early, its last message lands late.
+      let readFailed = false;
       try {
-        const headSize = Math.min(c.size, 192 * 1024);
-        const head = Buffer.alloc(headSize);
-        await fh.read(head, 0, headSize, 0);
-        title = extractTitle(head.toString('utf8'));
-        const tailSize = Math.min(c.size, 48 * 1024);
-        const tail = Buffer.alloc(tailSize);
-        await fh.read(tail, 0, tailSize, Math.max(0, c.size - tailSize));
-        preview = extractPreview(tail.toString('utf8'));
-      } finally {
-        await fh.close();
+        const fh = await open(c.path, 'r');
+        try {
+          const headSize = Math.min(c.size, 192 * 1024);
+          const head = Buffer.alloc(headSize);
+          await fh.read(head, 0, headSize, 0);
+          title = extractTitle(head.toString('utf8'));
+          const tailSize = Math.min(c.size, 48 * 1024);
+          const tail = Buffer.alloc(tailSize);
+          await fh.read(tail, 0, tailSize, Math.max(0, c.size - tailSize));
+          const tailText = tail.toString('utf8');
+          preview = extractPreview(tailText);
+          engine = extractEngine(tailText);
+        } finally {
+          await fh.close();
+        }
+      } catch {
+        title = null;
+        preview = undefined;
+        engine = null;
+        readFailed = true;
       }
-    } catch {
-      title = null;
+      // A negative result is only cacheable when the bytes were actually READ
+      // and held no title. Caching an EMFILE/EIO failure under (mtime, size)
+      // makes it permanent: an idle log's bytes never change, so the
+      // conversation would stay mistitled — or, past the 30-minute grace
+      // window, invisible — until the entry is evicted or the log is appended
+      // to again.
+      if (!readFailed) {
+        if (cache.size >= CACHE_MAX) {
+          const evict = cache.keys().next().value;
+          if (evict !== undefined) cache.delete(evict);
+        }
+        cache.set(c.file, { mtimeMs: c.mtimeMs, size: c.size, title, preview, engine });
+      }
     }
 
     // Automation runs often leave logs with no user-authored message at all.
@@ -201,18 +276,16 @@ export async function listChatHistory(): Promise<ChatHistoryItem[]> {
     // conversation list instead of an automation log dir.
     if (!title && Date.now() - c.mtimeMs > 30 * 60 * 1000) continue;
 
-    const item: ChatHistoryItem = {
+    out.push({
       chatId: c.chatId,
-      cli: c.cli,
+      // A thread-keyed log's filename names no engine. Reopen it on whichever
+      // brain spoke last, so clicking the row lands on the live model.
+      cli: c.cli === 'thread' ? (engine ?? 'xai') : c.cli,
       repo: c.cwd,
       title: title ?? 'New conversation',
       preview,
       updatedAt: Math.round(c.mtimeMs),
-    };
-    // Only titled conversations are cacheable — an untitled log's title can
-    // still arrive, and its grace-window expiry must re-evaluate each fetch.
-    if (title) cache.set(c.file, { mtimeMs: c.mtimeMs, item });
-    out.push(item);
+    });
   }
 
   out.sort((a, b) => b.updatedAt - a.updatedAt);

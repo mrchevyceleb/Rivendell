@@ -272,6 +272,27 @@ function conversationKey(cli: CompanionId, repoPath: string, chatId = 'main'): s
     : `${cli}|${repoPath}|${normalized}`;
 }
 
+/** Outbound turns waiting for a live `ready` socket. Module-level so a click
+ *  to another agent (unmount) does not drop a message the user already sent —
+ *  coming back to the thread flushes it. */
+type QueuedOutbound = { text: string; images?: ChatSendImage[] };
+const outboundQueue = new Map<string, QueuedOutbound[]>();
+
+function enqueueOutbound(key: string, item: QueuedOutbound): void {
+  const q = outboundQueue.get(key) ?? [];
+  q.push(item);
+  outboundQueue.set(key, q);
+}
+
+function shiftOutbound(key: string): QueuedOutbound | undefined {
+  const q = outboundQueue.get(key);
+  if (!q?.length) return undefined;
+  const item = q.shift();
+  if (!q.length) outboundQueue.delete(key);
+  else outboundQueue.set(key, q);
+  return item;
+}
+
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
   return `rivendell:chat-blocks:${conversationKey(cli, repoPath, chatId)}`;
 }
@@ -365,6 +386,19 @@ function payloadImages(images: ChatSendImage[] | undefined): Array<{ mediaType: 
   return images.map((image) => ({ mediaType: image.mediaType, base64: image.base64 }));
 }
 
+/** Sync restore so the first paint of a remounted thread already has the
+ *  transcript (Grok unmounts the feed while blocks are empty; an effect-only
+ *  restore would flash the empty state and leave scrollTop at 0). */
+function initialStoredBlocks(
+  enabled: boolean | undefined,
+  repo: Repo | undefined,
+  cli: CompanionId,
+  chatId: string,
+): ChatBlock[] {
+  if (enabled === false || !repo) return [];
+  return restoreBlocksWithUniqueIds(readStoredBlocks(cli, repo.path, chatId));
+}
+
 export function useChat(opts: {
   repo: Repo | undefined;
   cli: CompanionId;
@@ -404,7 +438,14 @@ export function useChat(opts: {
   modelRef.current = model;
   const effortRef = useRef<string | undefined>(effort);
   effortRef.current = effort;
-  const [blocks, setBlocks] = useState<ChatBlock[]>([]);
+  const [blocks, setBlocks] = useState<ChatBlock[]>(() => initialStoredBlocks(enabled, repo, cli, chatId));
+  // `chatId` already carries `__acct__<account>` when the lane is pinned.
+  const restoreKey = enabled && repo ? conversationKey(cli, repo.path, chatId) : '';
+  const restoreKeyRef = useRef(restoreKey);
+  if (restoreKeyRef.current !== restoreKey) {
+    restoreKeyRef.current = restoreKey;
+    setBlocks(initialStoredBlocks(enabled, repo, cli, chatId));
+  }
   const [status, setStatus] = useState<Status>('idle');
   // Mirror status into a ref so WS handlers can read the latest value
   // without depending on render closure (used by error-suppression logic).
@@ -451,6 +492,30 @@ export function useChat(opts: {
    *  storage. Writes are gated on this so we don't wipe a saved chat with the
    *  empty initial state on the first render after repos load. */
   const restoredKeyRef = useRef<string | null>(null);
+  const flushOutboundRef = useRef<() => void>(() => {});
+  const flushOutbound = () => {
+    if (!repo) return;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const key = conversationKey(cli, repo.path, chatId);
+    const item = shiftOutbound(key);
+    if (!item) return;
+    pendingSendRef.current = true;
+    setError(null);
+    turnStartRef.current = Date.now();
+    lastMessageAtRef.current = Date.now();
+    compactingRef.current = false;
+    setStatus('streaming');
+    ws.send(JSON.stringify({
+      type: 'send',
+      chatId,
+      text: item.text,
+      images: payloadImages(item.images),
+      model: modelRef.current,
+      effort: effortRef.current,
+    }));
+  };
+  flushOutboundRef.current = flushOutbound;
 
   useEffect(() => {
     const nextWindow = windowForCli(cli, model, contextWindowTokens);
@@ -550,15 +615,26 @@ export function useChat(opts: {
 
     const connect = () => {
       if (!isCurrentConnection()) return;
+      // Detach whatever is still parked in wsRef. A socket left CONNECTING or
+      // CLOSING keeps its handlers: its onopen fires a duplicate hello and its
+      // onclose schedules a competing reconnect. That is how one tab
+      // accumulated dozens of live sockets, each re-helloing the same lane.
+      if (wsRef.current) detachSocket(wsRef.current);
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${window.location.host}/api/ws`);
       wsRef.current = ws;
-      setStatus('connecting');
-      setError(null);
+      // Mid-turn reconnects must not flip 'streaming' → 'connecting' or the
+      // thinking UI dies and a tool/think pause looks like a crashed line.
+      const keepStreaming = statusRef.current === 'streaming' || pendingSendRef.current;
+      if (!keepStreaming) setStatus('connecting');
+      lastMessageAtRef.current = Date.now();
 
       ws.onopen = () => {
         if (!isCurrentConnection()) return;
-        reconnectAttemptRef.current = 0;
         ws.send(JSON.stringify({
           type: 'hello',
           cli,
@@ -582,18 +658,26 @@ export function useChat(opts: {
         if (typeof msg.latestSeq === 'number' && msg.latestSeq > lastSeqRef.current) {
           lastSeqRef.current = msg.latestSeq;
         }
+        if (msg.type === 'working') {
+          // Transport keepalive while the engine is on a tool/think pause.
+          // lastMessageAtRef was already bumped; nothing to render.
+          return;
+        }
         if (msg.type === 'ready') {
           // If the server says we attached to a busy session (Sam is mid-turn
           // because the user reconnected from a phone unlock or tab switch),
           // jump straight to 'streaming' so the UI shows tending instead of
           // looking idle while events stream in via replay.
-          setStatus(msg.busy ? 'streaming' : 'ready');
+          setError(null);
+          reconnectAttemptRef.current = 0;
           // Send a pending first message (typed straight into the threshold)
           // the moment the server says ready. Keep it pending until turnStart
           // confirms the server accepted it, so startup reconnects do not lose
           // threshold-entered prompts.
           const pending = initialMessageRef.current;
+          const queued = outboundQueue.get(conversationKey(cli, repo.path, chatId));
           if (pending && !initialSendInFlightRef.current && ws.readyState === WebSocket.OPEN) {
+            setStatus(msg.busy ? 'streaming' : 'ready');
             initialSendInFlightRef.current = true;
             setBlocks((prev) => {
               const lastUser = [...prev].reverse().find((b) => b.kind === 'user');
@@ -604,6 +688,15 @@ export function useChat(opts: {
               ];
             });
             ws.send(JSON.stringify({ type: 'send', chatId, text: pending, model: modelRef.current, effort: effortRef.current }));
+          } else if (queued && queued.length > 0 && ws.readyState === WebSocket.OPEN) {
+            setStatus('streaming');
+            flushOutboundRef.current();
+          } else {
+            setStatus(msg.busy ? 'streaming' : 'ready');
+            if (!msg.busy) {
+              pendingSendRef.current = false;
+              compactingRef.current = false;
+            }
           }
         }
         else if (msg.type === 'sessionRebound') {
@@ -625,7 +718,12 @@ export function useChat(opts: {
         else if (msg.type === 'turnEnd') {
           pendingSendRef.current = false;
           compactingRef.current = false;
-          setStatus('ready');
+          const leftover = outboundQueue.get(conversationKey(cli, repo.path, chatId));
+          if (leftover && leftover.length > 0) {
+            flushOutboundRef.current();
+          } else {
+            setStatus('ready');
+          }
         }
         else if (msg.type === 'compacted') {
           // Auto-compaction marker: the model's context rotated (juicy summary
@@ -765,6 +863,12 @@ export function useChat(opts: {
           }
         }
         else if (msg.type === 'error') {
+          // Claude Code writes this once per unknown model id per process.
+          // xAI/Z.ai ids are off its registry by design; the turn still runs.
+          if (typeof msg.message === 'string' && /^\s*\[claude-code:unrecognized_model\]/.test(msg.message)) {
+            console.warn('[chat] ignored unrecognized_model warning');
+            return;
+          }
           // Surface errors when a turn is in flight OR when the user just
           // sent and we're still waiting on the server to flip to
           // 'streaming' (covers respawn failures after an idle CLI close).
@@ -784,17 +888,39 @@ export function useChat(opts: {
       };
       ws.onclose = () => {
         if (!isCurrentConnection()) return;
+        // Only the socket currently owned by wsRef drives reconnects. An
+        // orphan closing later must not open yet another connection.
+        if (wsRef.current && wsRef.current !== ws) return;
         if (initialSendInFlightRef.current) initialSendInFlightRef.current = false;
-        pendingSendRef.current = false;
-        setStatus('closed');
+        const keepStreaming =
+          (statusRef.current === 'streaming' || pendingSendRef.current) &&
+          reconnectAttemptRef.current < 3;
+        if (!keepStreaming) {
+          pendingSendRef.current = false;
+          setStatus('closed');
+        }
         const attempt = Math.min(reconnectAttemptRef.current, 3);
         const delay = Math.min(1000 * 2 ** attempt, 8000);
         reconnectAttemptRef.current += 1;
+        // Replace, never stack: overwriting the ref without clearing left the
+        // previous timer live, so two connects raced and one socket leaked.
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = window.setTimeout(connect, delay);
       };
       ws.onerror = () => {
         if (!isCurrentConnection()) return;
-        setError('the line went quiet, reconnecting…');
+        // Browsers fire onerror on every abnormal close (process restart,
+        // proxy blip). onclose already reconnects. A red pill here makes a
+        // Grok tool/think pause look like a dead line.
+        if (
+          statusRef.current !== 'streaming' &&
+          !pendingSendRef.current &&
+          reconnectAttemptRef.current >= 3
+        ) {
+          setError('the line went quiet, reconnecting…');
+        } else {
+          console.warn('[chat] socket error; reconnecting');
+        }
       };
     };
 
@@ -803,9 +929,18 @@ export function useChat(opts: {
     // minutes. When the tab comes back we force a reconcile: if the socket
     // is still open, re-send hello so the server replays anything missed
     // via sinceSeq; otherwise reconnect immediately.
-    const reconcile = () => {
+    const reconcileNow = () => {
       if (!isCurrentConnection()) return;
       const live = wsRef.current;
+      // A CONNECTING handshake must not be killed on window focus (clicking
+      // from another app back into Rivendell). That loop is how messages
+      // never reached hello, so every agent looked dead.
+      // CLOSING counts too: its onclose is about to run the reconnect, and
+      // opening one here would leave the closing socket orphaned.
+      if (
+        live
+        && (live.readyState === WebSocket.CONNECTING || live.readyState === WebSocket.CLOSING)
+      ) return;
       if (live && live.readyState === WebSocket.OPEN) {
         try {
           live.send(JSON.stringify({
@@ -833,6 +968,17 @@ export function useChat(opts: {
       detachSocket(wsRef.current);
       wsRef.current = null;
       connect();
+    };
+    // Restoring a window fires visibilitychange, focus and often pageshow in
+    // the same tick, and each one used to send its own hello. Coalesce them.
+    let reconcileTimer: number | null = null;
+    const reconcile = () => {
+      if (!isCurrentConnection()) return;
+      if (reconcileTimer !== null) return;
+      reconcileTimer = window.setTimeout(() => {
+        reconcileTimer = null;
+        reconcileNow();
+      }, 150);
     };
     const onVisibility = () => {
       if (document.visibilityState === 'visible') reconcile();
@@ -873,7 +1019,6 @@ export function useChat(opts: {
       // connection's state. Detach handlers before replacing.
       detachSocket(wsRef.current);
       wsRef.current = null;
-      setError(null);
       connect();
     };
 
@@ -882,14 +1027,19 @@ export function useChat(opts: {
     // server already emitted turnEnd, it just never arrived). Force a fresh WS
     // so bindSession replies with a fresh ready{busy:false} (or replays the
     // missed turnEnd) and the "tending" dots clear instead of hanging forever.
-    const STREAM_SILENCE_MS = 45_000;
+    // 90s (not 45s): Grok/Claude tool calls, MCP, and thinking can sit quiet
+    // well past 45s. Server `working` keepalives should refresh lastMessageAt
+    // well before this; the extra room covers keepalive loss during compaction.
+    const STREAM_SILENCE_MS = 90_000;
+    const COMPACT_SILENCE_MS = 180_000;
     const WATCHDOG_TICK_MS = 5_000;
     const watchdog = window.setInterval(() => {
       if (!isCurrentConnection()) return;
       if (statusRef.current !== 'streaming') return;
-      if (Date.now() - lastMessageAtRef.current < STREAM_SILENCE_MS) return;
+      const silenceMs = compactingRef.current ? COMPACT_SILENCE_MS : STREAM_SILENCE_MS;
+      if (Date.now() - lastMessageAtRef.current < silenceMs) return;
       // eslint-disable-next-line no-console
-      console.warn(`[useChat] stream watchdog: silent ${STREAM_SILENCE_MS}ms, forcing reconnect`);
+      console.warn(`[useChat] stream watchdog: silent ${silenceMs}ms, forcing reconnect`);
       lastMessageAtRef.current = Date.now();
       forceReconnectRef.current();
     }, WATCHDOG_TICK_MS);
@@ -900,6 +1050,10 @@ export function useChat(opts: {
       teardownRef.current = true;
       forceReconnectRef.current = () => {};
       window.clearInterval(watchdog);
+      if (reconcileTimer !== null) {
+        clearTimeout(reconcileTimer);
+        reconcileTimer = null;
+      }
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('focus', reconcile);
       window.removeEventListener('online', reconcile);
@@ -920,25 +1074,35 @@ export function useChat(opts: {
     text: string,
     images?: ChatSendImage[],
   ) => {
-    const ws = wsRef.current;
+    if (!repo) {
+      setError('Sam is not on the line. Please wait a moment.');
+      return;
+    }
     setBlocks((prev) => [
       ...prev,
       { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, ts: Date.now() },
     ]);
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      setError('Sam is not on the line. Please wait a moment.');
-      return;
-    }
+    const key = conversationKey(cli, repo.path, chatId);
+    const inFlight = pendingSendRef.current || statusRef.current === 'streaming';
+    enqueueOutbound(key, { text, images });
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'send', chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));
-    // Show the thinking/working indicator immediately. A slow local model (e.g.
-    // a 30B reasoning model) can take many seconds before turnStart arrives,
-    // which otherwise looks frozen. turnStart/turnEnd/result/error reset this.
     turnStartRef.current = Date.now();
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');
+    const ws = wsRef.current;
+    if (
+      !inFlight
+      && ws
+      && ws.readyState === WebSocket.OPEN
+      && (statusRef.current === 'ready' || statusRef.current === 'closed')
+    ) {
+      // 'closed' means the engine idled out, not that the socket is gone: the
+      // server respawns on demand. Waiting for a 'ready' that only arrives on
+      // the next reconnect is how a typed message sat in the queue unsent.
+      flushOutbound();
+    }
   };
 
   const freshStart = () => {
@@ -974,14 +1138,18 @@ export function useChat(opts: {
   ) => {
     if (!repo) return;
     const ws = wsRef.current;
+    const key = conversationKey(cli, repo.path, chatId);
+    const waiting = (outboundQueue.get(key)?.length ?? 0) > 0
+      || !ws
+      || ws.readyState !== WebSocket.OPEN;
+    if (waiting) {
+      send(text, images);
+      return;
+    }
     setBlocks((prev) => [
       ...prev,
       { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, ts: Date.now() },
     ]);
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      setError('Sam is not on the line. Please wait a moment.');
-      return;
-    }
     pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));

@@ -4,11 +4,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
+import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { CodexSession, getOrCreateCodexSession } from './codex-runner.ts';
-import { BananaSession, getOrCreateBananaSession } from './banana-runner.ts';
+import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
+import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
 import { appendEventLog, clearEventLog, compactEventLog, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, peekEnginePrimer, clearThreadMemory, clearRotation, isRotationOwed } from './compaction.ts';
+import { shouldSkipEngineResume } from './threadWindow.ts';
+import { isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
@@ -256,11 +259,27 @@ function xaiEnv(): NodeJS.ProcessEnv {
   env.SAMWISE_ACCOUNT = 'xai';
   return env;
 }
+/** Persistent `claude` binary lanes (Anthropic, Z.ai, xAI). Not Codex/Banana. */
+export function isClaudeFamilyCli(cli: CliKind | null | undefined): cli is 'claude' | 'assistant' | 'zai' | 'xai' {
+  return cli === 'claude' || cli === 'assistant' || cli === 'zai' || cli === 'xai';
+}
+
 const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'zai') return resolveZaiModel(m, ZAI_MODEL);
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
-  return m && VALID_MODEL_ID.test(m) ? m : CLAUDE_MODEL;
+  // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
+  // here; those ids are valid xAI/Z.ai spawn args and must not become `--model`
+  // on kim's Claude process (which then prints unrecognized_model to stderr).
+  if (m && VALID_MODEL_ID.test(m) && m.startsWith('claude-')) return m;
+  return CLAUDE_MODEL;
 };
+
+/** Claude Code `-p` writes this once per unknown model id per process. It still
+ *  sends the request — the line is a registry warning, not a failed turn. */
+export function isClaudeUnrecognizedModelWarning(message: string): boolean {
+  return message.includes('[claude-code:unrecognized_model]');
+}
+
 const resolveClaudeEffort = (cli: CliKind, e?: string): string =>
   cli === 'zai' ? resolveZaiEffort(e, ZAI_EFFORT)
   : cli === 'xai' ? resolveXaiEffort(e, XAI_EFFORT)
@@ -326,14 +345,16 @@ const ASSISTANT_MCP_CONFIG = JSON.stringify({
   },
 });
 
-const TEAM_MCP_SCRIPT =
-  process.env.RIVENDELL_TEAM_MCP ||
-  join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs');
 
 /** Add the rivendell-team MCP (agent-to-agent messaging) to any mcp-config
  *  JSON, stamping the calling agent's name so the tool can attribute sends. */
+let teamMcpLogged = false;
 function withTeamMcp(configJson: string, chatId: string): string {
   try {
+    if (!teamMcpLogged) {
+      teamMcpLogged = true;
+      console.log(`[chat] rivendell-team MCP ${TEAM_MCP_SCRIPT}`);
+    }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
     const name = agentForChatId(chatId)?.name;
     cfg.mcpServers['rivendell-team'] = {
@@ -379,11 +400,17 @@ export type SeqEvent = { seq: number; ev: SessionEvent };
 
 class ClaudeSession {
   readonly key: string;
+  /** Durable-history key. Equals `key` for ordinary lanes; for an agent home
+   *  thread it drops the engine so every brain appends to one continuous log
+   *  (see threadKey.ts). The live process and its native resume id stay under
+   *  `key`. */
+  readonly logKey: string;
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
   private child: ChildProcessByStdio<Writable, Readable, Readable>;
   private stdoutBuf = '';
+  private stderrBuf = '';
   private listeners = new Set<(e: SeqEvent) => void>();
   private subscriberCount = 0;
   /** Rolling tail of recent events (with sequence numbers) for reconnect replay. */
@@ -395,8 +422,10 @@ class ClaudeSession {
   /** session_id reported by the most recent init event. Persisted on every change. */
   private currentSessionId: string | null = null;
   private readonly startedResumeId: string | null = null;
-  /** Compaction primer applied to this process's system prompt (if rotated). */
-  private readonly primer: string | null = null;
+  /** Next send prepends compact + last 50 at user-message precedence (not system). */
+  private seedWindowOnNextTurn = false;
+  /** Seeded stdin is in flight; ack rotation debt only after a successful result. */
+  private pendingSeedAck = false;
   /** Model + effort this process was spawned with (per-session, defaults from config). */
   readonly spawnModel: string;
   readonly spawnEffort: string;
@@ -418,19 +447,20 @@ class ClaudeSession {
   readonly ready: Promise<boolean>;
   private resolveReady!: (ok: boolean) => void;
 
-  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, primer?: string) {
+  constructor(cli: CliKind, cwd: string, chatId: string, resumeId: string | null, model?: string, effort?: string, seedFirst = false, switchedFrom: string | null = null) {
     this.cli = cli;
     this.cwd = cwd;
     this.chatId = chatId;
     this.key = keyOf(cli, cwd, chatId);
+    this.logKey = logKeyFor(cli, cwd, chatId);
     this.pendingResumeId = resumeId;
     this.startedResumeId = resumeId;
     this.spawnModel = resolveClaudeModel(cli, model);
     this.spawnEffort = resolveClaudeEffort(cli, effort);
-    // Auto-compaction: a rotated session respawns with the durable memory
-    // document appended to its system prompt (context-level only — the
-    // durable event log the user sees is never touched by compaction).
-    this.primer = primer ?? null;
+    // Persona/FACE stay in --append-system-prompt. The forever-window
+    // (compact + last 50) is prepended to the first user message so raw
+    // turns are not promoted to system-level instructions.
+    this.seedWindowOnNextTurn = seedFirst;
     this.ready = new Promise<boolean>((res) => { this.resolveReady = res; });
 
     // Restore any prior emitted events from disk so a server restart (manual
@@ -439,18 +469,32 @@ class ClaudeSession {
     // disk is the failover so reconnecting clients with a stale `sinceSeq`
     // can still replay everything past their last-seen seq.
     try {
-      const restored = loadEventLogSync(this.key);
+      const restored = loadEventLogSync(this.logKey);
       if (restored.events.length > 0) {
         this.eventLog = restored.events;
         this.nextSeq = restored.nextSeq;
         console.log(
-          `[chat ${cli}] restored ${restored.events.length} event(s) from disk for ${this.key} (nextSeq=${this.nextSeq})`,
+          `[chat ${cli}] restored ${restored.events.length} event(s) from disk for ${this.logKey} (nextSeq=${this.nextSeq})`,
         );
       }
     } catch (err) {
-      console.warn(`[chat ${cli}] event-log restore failed for ${this.key}:`, (err as Error).message);
+      console.warn(`[chat ${cli}] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
-    void compactEventLog(this.key);
+    // Mark the handover in the transcript itself, so the thread shows where the
+    // brain changed instead of silently changing voice mid-conversation.
+    if (switchedFrom && switchedFrom !== cli) {
+      this.emit({
+        type: 'event',
+        event: {
+          type: '_engine_switch',
+          from: switchedFrom,
+          to: cli,
+          model: this.spawnModel,
+          ts: Date.now(),
+        },
+      } as SessionEvent);
+    }
+    void compactEventLog(this.logKey);
 
     // Quiet-ready: the modern claude binary doesn't emit system/init until it
     // receives its first stdin message. Per Banana IDE: if the process is
@@ -495,7 +539,6 @@ class ClaudeSession {
     // jarvis-agent worker) so it survives respawns/recycles with no protocol
     // changes — see voicePrompt.ts.
     const voice = isVoiceChatId(chatId);
-    const sysPrimer = this.primer;
     // Persona scope: the teammate's who-I-am/what-I-do document follows the
     // home thread's chatId — survives rebrains (any engine) and compaction
     // rotations (fresh spawns re-read the file).
@@ -503,20 +546,20 @@ class ClaudeSession {
     if (cli === 'assistant') {
       args.push(
         '--append-system-prompt',
-        [ASSISTANT_AGENT_PROMPT, voice ? VOICE_STYLE_ADDENDUM : null, personaScope, sysPrimer].filter(Boolean).join('\n\n'),
+        [ASSISTANT_AGENT_PROMPT, voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n'),
       );
       // Keep --mcp-config last: it's variadic and would greedily swallow any
       // plain (non-dash) arg that followed it.
       args.push('--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
     } else if (cli === 'xai') {
-      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope, sysPrimer].filter(Boolean).join('\n\n');
+      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
       // Grok's full toolbox: assistant-mcp + Matt's real Chrome.
       // --strict-mcp-config overrides the stale entry in the xai account
       // config with this fresh one. Keep --mcp-config last (variadic).
       args.push('--strict-mcp-config', '--mcp-config', withTeamMcp(ASSISTANT_MCP_CONFIG, chatId));
     } else {
-      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope, sysPrimer].filter(Boolean).join('\n\n');
+      const sys = [voice ? VOICE_STYLE_ADDENDUM : null, personaScope].filter(Boolean).join('\n\n');
       if (sys) args.push('--append-system-prompt', sys);
     }
 
@@ -548,13 +591,14 @@ class ClaudeSession {
     this.child.stdout.on('data', (chunk: string) => this.onStdout(chunk));
 
     this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (chunk: string) => {
-      // Surface stderr as a soft error event but don't kill the session — the
-      // CLI prints harmless warnings here too.
-      this.emit({ type: 'error', message: chunk.trim() });
-    });
+    this.child.stderr.on('data', (chunk: string) => this.onStderr(chunk));
+    // Remaining bytes can arrive after `exit`; flush on stream close so a
+    // trailing error without a newline is not stuck in stderrBuf forever.
+    this.child.stderr.on('end', () => this.flushStderr());
+    this.child.stderr.on('close', () => this.flushStderr());
 
     this.child.on('exit', (code, signal) => {
+      this.flushStderr();
       const idleMs = Date.now() - this.lastActivityAtMs;
       console.log(
         `[chat ${this.cli}] child exit cwd=${this.cwd} code=${code} signal=${signal ?? '-'} initSeen=${this.initSeen} idleMs=${idleMs}`,
@@ -614,12 +658,15 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string } = {}): Promise<void> {
     if (this.child.exitCode !== null) {
       this.emit({ type: 'error', message: 'session has exited' });
       return;
     }
     this.turnStartedAt = Date.now();
+    const eventsForSeed = this.eventLog.slice();
+    const wantSeed = this.seedWindowOnNextTurn;
+    const seed = wantSeed ? peekEnginePrimer(this.logKey, eventsForSeed) : '';
     // Echo the user message into our event log so reconnecting clients can
     // replay the full conversation, not just Sam's responses (claude doesn't
     // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
@@ -628,7 +675,7 @@ class ClaudeSession {
     if (opts.peerFrom) {
       this.emit({
         type: 'event',
-        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text, ts: Date.now() },
+        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
       });
     } else {
       this.emit({
@@ -640,7 +687,7 @@ class ClaudeSession {
           ts: Date.now(),
         },
       });
-      noteUserTurn(this.key); // forever-thread compaction cadence (monotonic)
+      noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
     }
     // Z.ai GLM models are text-only over the Anthropic-compatible endpoint, so a
@@ -673,7 +720,8 @@ class ClaudeSession {
     // `/<skill> <body>` and invokes the Skill tool with empty args. Wrap any
     // body in `<command-args>` so the args are structurally obvious before the
     // text reaches claude stdin. The UI echo above keeps the original visible.
-    const stdinText = wrapSlashArgs(promptText);
+    const commandText = wrapSlashArgs(promptText);
+    const stdinText = seed ? `${seed}\n\n---\n\n${commandText}` : commandText;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -697,7 +745,12 @@ class ClaudeSession {
     });
     try {
       this.child.stdin.write(payload + '\n');
+      if (wantSeed) {
+        this.seedWindowOnNextTurn = false;
+        if (seed) this.pendingSeedAck = true;
+      }
     } catch (e) {
+      if (wantSeed) this.seedWindowOnNextTurn = true;
       this.emit({ type: 'error', message: `stdin write failed: ${(e as Error).message}` });
     }
   }
@@ -809,7 +862,7 @@ class ClaudeSession {
     }
     // Don't persist events emitted after an intentional shutdown — they're the
     // dying child's trailing output and would repollute a freshly-cleared log.
-    if (!this.disposed) appendEventLog(this.key, se);
+    if (!this.disposed) appendEventLog(this.logKey, { ...se, eng: this.cli, mdl: this.spawnModel });
     for (const fn of this.listeners) fn(se);
   }
 
@@ -817,7 +870,7 @@ class ClaudeSession {
   private async maybeCompact(): Promise<void> {
     try {
       await maybeAutoCompact({
-        key: this.key,
+        key: this.logKey,
         cli: this.cli,
         chatId: this.chatId,
         events: this.eventLog,
@@ -830,25 +883,57 @@ class ClaudeSession {
     }
   }
 
-  /** Rotate the MODEL context: fresh CLI process (no --resume) carrying the
-   *  compact as its system prompt. The durable event log is untouched — the
-   *  thread the user sees stays lossless; clients rebind transparently via the
-   *  normal sessionClosed → reconnect dance. */
-  async rotateContextWithPrimer(primer: string): Promise<void> {
+  /** Rotate the MODEL context after visible-overflow compact: fresh CLI
+   *  process (no --resume) seeded with persona + rolling compact + last 50.
+   *  Not used for bloated jsonl. The durable event log is untouched. */
+  async rotateContextWithPrimer(_primer: string): Promise<boolean> {
     const { cli, cwd, chatId, key } = this;
     const model = this.spawnModel;
     const effort = this.spawnEffort;
     this.shutdown('compaction-rotate');
     sessions.delete(key);
-    await setSessionId(cli, cwd, '', chatId); // fresh CLI session — the primer replaces old context
-    await spawnSession(cli, cwd, chatId, null, key, 0, model, effort, primer);
+    await setSessionId(cli, cwd, '', chatId); // fresh CLI session — first send seeds the forever-window
+    await spawnSession(cli, cwd, chatId, null, key, 0, model, effort, true);
     console.warn(`[chat ${cli}] context rotated with compaction primer for ${key}`);
+    return false;
   }
 
   private resolveStartupWaiters(state: 'initialized' | 'closed'): void {
     const waiters = Array.from(this.startupWaiters);
     this.startupWaiters.clear();
     for (const fn of waiters) fn(state);
+  }
+
+  private onStderr(chunk: string): void {
+    this.stderrBuf += chunk;
+    let nl = this.stderrBuf.indexOf('\n');
+    while (nl !== -1) {
+      const line = this.stderrBuf.slice(0, nl);
+      this.stderrBuf = this.stderrBuf.slice(nl + 1);
+      nl = this.stderrBuf.indexOf('\n');
+      this.handleStderrLine(line);
+    }
+  }
+
+  private flushStderr(): void {
+    if (!this.stderrBuf) return;
+    const rest = this.stderrBuf;
+    this.stderrBuf = '';
+    this.handleStderrLine(rest);
+  }
+
+  private handleStderrLine(raw: string): void {
+    const line = raw.trim();
+    if (!line) return;
+    // Surface stderr as a soft error but skip Claude Code's model-registry
+    // warning: xAI/Z.ai ids are off-registry by design, and the CLI still
+    // sends the request. Forwarding it became a red error pill on steer
+    // (respawn → first query of a new process).
+    if (isClaudeUnrecognizedModelWarning(line)) {
+      console.log(`[chat ${this.cli}] ignored unrecognized_model warning: ${line.slice(0, 180)}`);
+      return;
+    }
+    this.emit({ type: 'error', message: line });
   }
 
   private onStdout(chunk: string): void {
@@ -960,9 +1045,14 @@ class ClaudeSession {
     if (ev?.type === 'result') {
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       this.turnStartedAt = null;
-      // Forever-thread housekeeping: every 100 user turns, compact the model's
-      // context (juicy durable summary → RAG vault → rotate with primer).
-      void this.maybeCompact();
+      const seeded = this.pendingSeedAck;
+      const failed = seeded && (ev.is_error === true || typeof ev.api_error_status === 'number');
+      if (seeded) this.pendingSeedAck = false;
+      if (failed) this.seedWindowOnNextTurn = true;
+      void (async () => {
+        if (seeded && !failed) await clearRotation(this.logKey);
+        await this.maybeCompact();
+      })();
     }
   }
 }
@@ -994,6 +1084,7 @@ export async function getOrCreateSession(opts: {
   recycleOnMismatch?: boolean;
 }): Promise<AnySession> {
   const chatId = opts.chatId || 'main';
+  retireOtherEnginesOnThread(opts.cli, opts.repoPath, chatId);
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
     return getOrCreateCodexSession({
       repoPath: opts.repoPath,
@@ -1055,6 +1146,75 @@ export async function getOrCreateSession(opts: {
   return spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
 }
 
+/** One live engine per thread.
+ *
+ *  An agent thread's engines now share a single durable log and a single seq
+ *  allocator, primed from that log at construction. Two live processes on the
+ *  same thread would hand out the same sequence numbers — a routine firing into
+ *  the retired brain is enough to interleave duplicates into the transcript. So
+ *  when a turn is claimed for one engine, retire the thread's other engines.
+ *
+ *  A BUSY session is left alone: an in-flight turn is worth more than the
+ *  invariant, and it will be retired on the next turn once it is idle. */
+function retireOtherEnginesOnThread(cli: CliKind, repoPath: string, chatId: string): void {
+  const cwd = cli === 'assistant' ? ASSISTANT_HUB_PATH : repoPath;
+  const logKey = logKeyFor(cli, cwd, chatId);
+  if (!isThreadLogKey(logKey)) return;
+  const retire = (session: AnySession, drop?: () => void) => {
+    if (session.cli === cli || session.logKey !== logKey) return;
+    if (!session.isAlive()) return;
+    if (typeof session.isBusy === 'function' && session.isBusy()) return;
+    console.warn(`[chat ${cli}] retiring ${session.cli} on ${logKey} — one engine per thread`);
+    session.shutdown('model switch');
+    drop?.();
+  };
+  for (const [key, session] of [...sessions]) {
+    retire(session, () => {
+      if (sessions.get(key) === session) sessions.delete(key);
+    });
+  }
+  // Codex/Banana maps self-clean: their getOrCreate only reuses an entry that
+  // still reports isAlive(), so a shut-down session is replaced on next use.
+  for (const session of activeCodexSessions()) retire(session);
+  for (const session of activeBananaSessions()) retire(session);
+}
+
+/** Live, already-spawned session for a Claude-family lane, or null.
+ *  A passive `hello` uses this to attach to a warm lane WITHOUT spawning.
+ *  Reconnects used to run getOrCreateSession, so a client holding N sockets on a
+ *  lane started N CLI children; spawning a claude process (multi-KB argv) is
+ *  costly enough that a reconnect burst pinned the event loop and starved every
+ *  other request, including static assets. Engine children are now created
+ *  lazily, on the first real turn. */
+export function peekClaudeSession(opts: {
+  cli: CliKind;
+  repoPath: string;
+  chatId?: string;
+}): AnySession | null {
+  if (!isClaudeFamilyCli(opts.cli)) return null;
+  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
+  const live = sessions.get(keyOf(opts.cli, cwd, opts.chatId || 'main'));
+  return live && live.isAlive() ? live : null;
+}
+
+/** Durable event-log key for a lane - the same key its session would use, so a
+ *  cold attach can replay history without constructing a session. Agent home
+ *  threads resolve to their engine-free thread key, which is what makes a cold
+ *  attach on a *newly picked* engine replay the whole prior conversation. */
+export function laneLogKey(cli: CliKind, repoPath: string, chatId = 'main'): string {
+  const cwd = cli === 'assistant' ? ASSISTANT_HUB_PATH : repoPath;
+  return logKeyFor(cli, cwd, chatId || 'main');
+}
+
+/** Consecutive "died before init" spawns per lane. A lane whose engine cannot
+ *  start (bad auth, missing CLI, upstream 5xx) was retried on every reconnect,
+ *  and every retry is a full process spawn. After BREAKER_TRIP terminal failures
+ *  the lane stops spawning for a cooldown and reports why instead of burning the
+ *  event loop in a respawn loop. */
+const spawnFailures = new Map<string, { count: number; until: number }>();
+const BREAKER_TRIP = 3;
+const BREAKER_COOLDOWN_MS = 60_000;
+
 /** Concurrent getOrCreateSession calls for the same key (e.g. the hello handler
  *  and the send-reconcile firing on the same socket within a few ms) can each
  *  fall through to a spawn — the second would orphan the first process. Share a
@@ -1072,8 +1232,41 @@ async function spawnSessionOnce(
   const inFlight = pendingSpawns.get(key);
   if (inFlight) return inFlight;
   const spawnPromise = (async () => {
-    const resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
-    return spawnSession(cli, cwd, chatId, resumeId, key, 0, model, effort);
+    const logKey = logKeyFor(cli, cwd, chatId);
+    let resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
+    let seedFirst = !resumeId;
+    const restored = loadEventLogSync(logKey);
+    // Who spoke last on this thread. On a model switch that is a DIFFERENT
+    // engine, and this engine's own native session id (if it kept one from an
+    // earlier stint) is stale by exactly the turns the other brain produced.
+    // Resuming it would silently drop them, so seed compact+50 from the shared
+    // thread log instead. Cross-engine resume is never attempted: that is what
+    // produced `No conversation found with session ID: <uuid>`.
+    const priorEngine = lastEngineOf(restored.events);
+    const switchedFrom = priorEngine && priorEngine !== cli ? priorEngine : null;
+    const skipResume = shouldSkipEngineResume({
+      events: restored.events,
+      cli,
+      cwd,
+      sessionId: resumeId,
+    });
+    if (switchedFrom) {
+      console.warn(
+        `[chat ${cli}] model switch on ${logKey}: ${switchedFrom} → ${cli} — seeding compact+50 from the thread log, not resuming`,
+      );
+      if (resumeId) await setSessionId(cli, cwd, '', chatId);
+      resumeId = null;
+      seedFirst = true;
+    } else if (resumeId && (isRotationOwed(logKey) || skipResume)) {
+      const why = isRotationOwed(logKey) ? 'overflow-compact owed' : 'seed compact+50 (do not replay jsonl/tool dump)';
+      console.warn(
+        `[chat ${cli}] ${why} — skipping resume ${resumeId.slice(0, 8)}… for ${logKey}`,
+      );
+      await setSessionId(cli, cwd, '', chatId);
+      resumeId = null;
+      seedFirst = true;
+    }
+    return spawnSession(cli, cwd, chatId, resumeId, key, 0, model, effort, seedFirst, switchedFrom);
   })();
   pendingSpawns.set(key, spawnPromise);
   try {
@@ -1092,10 +1285,24 @@ async function spawnSession(
   attempt = 0,
   model?: string,
   effort?: string,
-  primer?: string,
+  seedFirst = false,
+  switchedFrom: string | null = null,
 ): Promise<ClaudeSession> {
+  const breaker = spawnFailures.get(key);
+  if (breaker && Date.now() >= breaker.until) {
+    // Window closed: those failures are history, not a streak. The count used to
+    // reset only on a SUCCESSFUL spawn, so three unrelated failures days apart
+    // tripped a breaker that documents itself as "3 in a row in 60s" - and a
+    // lane nobody had touched in a week refused its first message.
+    spawnFailures.delete(key);
+  } else if (breaker && breaker.count >= BREAKER_TRIP) {
+    const waitSec = Math.ceil((breaker.until - Date.now()) / 1000);
+    throw new Error(
+      `this lane's engine failed to start ${breaker.count} times in a row - paused for ${waitSec}s. Check the CLI auth/install, then send again.`,
+    );
+  }
   assertMemoryAvailableForSpawn(cli);
-  const session = new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, primer);
+  const session = new ClaudeSession(cli, cwd, chatId, resumeId, model, effort, seedFirst, switchedFrom);
   sessions.set(key, session);
 
   session.subscribe((se) => {
@@ -1112,10 +1319,18 @@ async function spawnSession(
     // something else is wrong.
     if (resumeId && attempt === 0) {
       await setSessionId(cli, cwd, '', chatId); // clear the bad id
-      return spawnSession(cli, cwd, chatId, null, key, attempt + 1, model, effort);
+      return spawnSession(
+        cli, cwd, chatId, null, key, attempt + 1, model, effort, true,
+      );
     }
+    const priorFailure = spawnFailures.get(key);
+    spawnFailures.set(key, {
+      count: (priorFailure?.count ?? 0) + 1,
+      until: Date.now() + BREAKER_COOLDOWN_MS,
+    });
     throw new Error('claude exited before initializing — check the CLI install or auth');
   }
+  spawnFailures.delete(key);
   return session;
 }
 
@@ -1192,7 +1407,11 @@ export async function freshStart(opts: {
   await setSessionId(opts.cli, cwd, '', chatId); // drop the stored id so we don't --resume
   // Wipe the durable log too — otherwise a client whose cache is empty would
   // pull the old thread back via a full (sinceSeq=0) replay after the reset.
-  await clearEventLog(key);
+  // For an agent home thread that log is the shared, engine-free one, so a
+  // fresh start resets the whole thread rather than just this brain's slice.
+  const logKey = logKeyFor(opts.cli, cwd, chatId);
+  await clearEventLog(logKey);
+  await clearThreadMemory(logKey);
   if (opts.cli === 'xai') await ensureXaiProxy();
   return spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
 }

@@ -13,10 +13,15 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>,
 );
 
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
+// Rivendell ships no service worker. The old PWA-only one registered a no-op
+// `fetch` handler, which browsers flag as dead weight on every navigation, and
+// it bought nothing: it cached neither the shell nor any API response. Retire
+// whatever is still installed on clients that picked it up.
+if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((err) => {
-      console.warn('[rivendell] service worker registration failed', err);
-    });
+    void navigator.serviceWorker
+      .getRegistrations()
+      .then((regs) => Promise.all(regs.map((r) => r.unregister())))
+      .catch(() => { /* best effort - nothing to retire */ });
   });
 }
