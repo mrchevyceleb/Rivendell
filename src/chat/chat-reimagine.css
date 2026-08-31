@@ -158,12 +158,18 @@
 .rc .tool-title { font-size: 13px; font-weight: 500; color: var(--fg-soft); }
 .rc .tool-meta { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); }
 .rc .tool-chev { width: 14px; height: 14px; color: var(--faint); transition: transform .25s var(--spring); flex: none; }
-.rc .tool.open .tool-chev { transform: rotate(180deg); }
+.rc .tool.open > .tool-head .tool-chev { transform: rotate(180deg); }
 .rc .tool-body { max-height: 0; overflow: hidden; transition: max-height .35s var(--ease-out); }
-.rc .tool.open .tool-body { max-height: 220px; }
+.rc .tool.open > .tool-body { max-height: 220px; }
 .rc .tool-body pre { margin: 0; padding: 4px 14px 12px 39px; font-family: var(--font-mono); font-size: 11px; line-height: 1.9; color: var(--muted); white-space: pre-wrap; overflow-y: auto; max-height: 220px; }
 .rc .tool-body .ln { opacity: 0; animation: rc-tok .3s ease-out forwards; display: block; }
 .rc .tool-body .ln b { color: var(--fg-soft); font-weight: 500; }
+
+/* tools-run — N consecutive calls folded into one card (Grok mode) */
+.rc .tools-summary { padding: 0 14px 10px 39px; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc .tools-run.open > .tool-body { max-height: 60vh; overflow-y: auto; }
+.rc .tools-list { display: flex; flex-direction: column; gap: 6px; padding: 4px 10px 12px; }
+.rc .tools-list .tool { border-color: var(--border); background: transparent; max-width: none; }
 
 /* ── jump pill — §3.6 ──────────────────────────────────────────── */
 .rc .jump { position: absolute; left: 50%; transform: translate(-50%, 8px) scale(.9); opacity: 0; pointer-events: none;

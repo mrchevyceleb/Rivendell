@@ -332,6 +332,39 @@ function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) 
 
 type AssistantBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>;
 type StepBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' }>;
+type ToolBlock = Extract<ChatBlock, { kind: 'tool' }>;
+
+// ── Tools card (Grok anatomy) — a run of consecutive tool calls collapses
+//    into ONE expandable card instead of N stacked pods eating the feed.
+//    Collapsed: "8 tool calls · done" plus a one-line name summary. Expanded:
+//    the individual ToolCards, each still expandable itself.
+function ToolsCard({ blocks }: { blocks: ToolBlock[] }) {
+  const [open, setOpen] = useState(false);
+  const running = blocks.some((b) => b.running);
+  const counts = new Map<string, number>();
+  for (const b of blocks) counts.set(b.tool, (counts.get(b.tool) ?? 0) + 1);
+  const summary = [...counts.entries()].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(' · ');
+  return (
+    <div className={`tool tools-run${running ? ' running' : ' done'}${open ? ' open' : ''}`}>
+      <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+        <StarSigil className="tstar" />
+        <span className="tool-title">{blocks.length} tool calls</span>
+        <span className="tool-meta">{running ? 'working…' : 'done'}</span>
+        <ChevronDown className="tool-chev" />
+      </button>
+      {open ? null : <div className="tools-summary">{summary}</div>}
+      <div className="tool-body">
+        {/* Mounted only while open: a zero-height overflow-hidden box still
+            exposes focusable buttons to keyboard/AT when collapsed. */}
+        {open ? (
+          <div className="tools-list">
+            {blocks.map((b) => <ToolCard key={b.id} block={b} />)}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 function hasVisibleProse(b: Extract<ChatBlock, { kind: 'text' }>): boolean {
   return b.text.trim().length > 0;
@@ -418,6 +451,26 @@ function ElrondGroup({
   // no tool is ever shown after a step it actually preceded.
   const { finalTextId, stepBlocks } = planCollapsedSteps(blocks, collapseSteps, streaming);
   const stepIds = new Set(stepBlocks.map((b) => b.id));
+  // Grok mode: fold RUNS of consecutive tool blocks (the ones not already in
+  // the Thoughts pod) into a single expandable card. One-off tools keep their
+  // own card. Studio mode stays fully inline.
+  const toolRuns = new Map<string, ToolBlock[]>();
+  const toolRunSkip = new Set<string>();
+  if (collapseSteps) {
+    let run: ToolBlock[] = [];
+    const flush = () => {
+      if (run.length > 1) {
+        toolRuns.set(run[0].id, run);
+        for (const b of run.slice(1)) toolRunSkip.add(b.id);
+      }
+      run = [];
+    };
+    for (const b of blocks) {
+      if (b.kind === 'tool' && !stepIds.has(b.id)) run.push(b);
+      else flush();
+    }
+    flush();
+  }
   // Anchor the pod to the last collapsed step BEFORE the final answer — if a
   // tool runs after the final text, the pod must still land ahead of the
   // answer (never after it). If every step comes after the final text
@@ -457,8 +510,12 @@ function ElrondGroup({
           );
         }
         switch (b.kind) {
-          case 'tool':
+          case 'tool': {
+            if (toolRunSkip.has(b.id)) return null;
+            const run = toolRuns.get(b.id);
+            if (run) return <ToolsCard key={b.id} blocks={run} />;
             return <ToolCard key={b.id} block={b} />;
+          }
           case 'text': {
             const open = showTextCaret(b, streaming);
             const display = isProtocolNoopText(b.text) ? '' : b.text;
