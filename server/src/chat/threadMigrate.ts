@@ -22,9 +22,9 @@ import { listAgents } from './agents.ts';
 import { isAgentThread, threadLogKey } from './threadKey.ts';
 import { adoptCompaction } from './compaction.ts';
 
-const MARKER = join(STATE_DIR, 'thread-migrate-v4.json');
-const ENGINE_PREFIX = /^(claude|codex|assistant|banana(?:-local|-fireworks)?|zai|xai|thread)_/;
-const SOURCE_KEY = /^(claude|codex|assistant|banana(?:-local|-fireworks)?|zai|xai|thread)\|(.+)\|(bot-[^|]+)$/;
+const MARKER = join(STATE_DIR, 'thread-migrate-v5.json');
+const ENGINE_PREFIX = /^(claude-personal|claude|codex-personal|codex|assistant|banana(?:-local|-fireworks)?|zai|xai|thread)_/;
+const SOURCE_KEY = /^(claude-personal|claude|codex-personal|codex|assistant|banana(?:-local|-fireworks)?|zai|xai|thread)\|(.+)\|(bot-[^|]+)$/;
 
 type Line = {
   seq: number;
@@ -78,7 +78,9 @@ function resolveCwd(cwdSanitized: string): string | null {
 function destFileName(cwdSanitized: string, home: string): string {
   const cwd = resolveCwd(cwdSanitized);
   if (cwd) return `${sanitizeKey(threadLogKey(cwd, home))}.jsonl`;
-  return `thread${cwdSanitized}_${home}.jsonl`;
+  // cwdSanitized is sanitizeKey(cwd). thread|cwd|home sanitizes to
+  // `thread_` + cwdSanitized + `_` + home — the extra `_` is the `|`.
+  return `thread_${cwdSanitized}_${home}.jsonl`;
 }
 
 function sourceLogKey(file: string): string | null {
@@ -140,7 +142,7 @@ function readLines(path: string, filename: string): ReadResult {
       if (typeof parsed.mdl === 'string' && parsed.mdl) row.mdl = parsed.mdl;
       out.push(row);
     } catch {
-      // skip malformed
+      return { ok: false, error: `malformed JSONL in ${filename}` };
     }
   }
   return { ok: true, lines: out };
@@ -193,11 +195,8 @@ export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean }
     files = readdirSync(EVENT_LOG_DIR);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') {
-      writeFileSync(MARKER, JSON.stringify({ at: Date.now(), migrated: 0, note: 'no event-logs dir' }));
-      return { migrated: 0, skipped: false };
-    }
-    throw err;
+    if (code !== 'ENOENT') throw err;
+    files = [];
   }
 
   const compactReport: Array<{ dest: string; from: string[]; blob: boolean; state: boolean }> = [];
@@ -327,9 +326,9 @@ export function migrateAgentThreadLogs(): { migrated: number; skipped: boolean }
 
   if (failed) {
     console.warn('[thread-migrate] one or more groups failed; marker not written, will retry on next boot');
-    return { migrated: report.length, skipped: false };
+    return { migrated: report.filter((r) => !r.skipped).length, skipped: false };
   }
 
   writeFileSync(MARKER, JSON.stringify({ at: Date.now(), archive: archiveDir, report, compact: compactReport }, null, 2));
-  return { migrated: report.length, skipped: false };
+  return { migrated: report.filter((r) => !r.skipped).length, skipped: false };
 }

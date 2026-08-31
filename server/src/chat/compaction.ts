@@ -137,36 +137,40 @@ export function adoptCompaction(fromKeys: string[], toKey: string): { blob: bool
   const unique = [...new Set(fromKeys.filter((k) => k && k !== toKey))];
   if (unique.length === 0) return { blob: false, state: false };
 
-  let destBlob = loadCompactBlob(toKey);
   const state = loadState();
-  let destRec = state[toKey];
-  let tookBlob = false;
-  let tookState = false;
+  const destBlob = loadCompactBlob(toKey);
+  const destRec = state[toKey];
+  let winKey = toKey;
+  let winBlob = destBlob;
+  let winRec = destRec;
+  let winAt = destBlob?.lastAt ?? destRec?.lastAt ?? -1;
 
   for (const from of unique) {
     const blob = loadCompactBlob(from);
-    if (blob && (!destBlob || blob.lastAt > destBlob.lastAt)) {
-      destBlob = blob;
-      tookBlob = true;
-    }
     const rec = state[from];
-    if (!rec) continue;
-    if (!destRec) {
-      destRec = { ...rec };
-      tookState = true;
-    } else if ((destRec.lastAt ?? 0) === 0 && (rec.lastAt ?? 0) > 0) {
-      destRec = { ...rec };
-      tookState = true;
+    const at = blob?.lastAt ?? rec?.lastAt ?? -1;
+    if (at > winAt) {
+      winKey = from;
+      winBlob = blob;
+      winRec = rec ? { ...rec } : rec;
+      winAt = at;
     }
   }
 
-  if (tookBlob && destBlob) {
-    if (!writeCompactBlob(toKey, destBlob)) tookBlob = false;
+  if (winKey === toKey) return { blob: false, state: false };
+
+  let tookBlob = false;
+  let tookState = false;
+  if (winBlob) {
+    tookBlob = writeCompactBlob(toKey, winBlob);
   }
-  if (tookState && destRec) {
-    state[toKey] = destRec;
+  if (winRec) {
+    state[toKey] = winRec;
     mkdirSync(STATE_DIR, { recursive: true });
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+    const tmp = `${STATE_FILE}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(state, null, 2));
+    renameSync(tmp, STATE_FILE);
+    tookState = true;
   }
   if (tookBlob || tookState) {
     console.log(`[compaction] adopted ${unique.length} legacy key(s) → ${toKey}`);
