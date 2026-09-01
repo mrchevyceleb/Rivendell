@@ -34,6 +34,17 @@ export function useAgents(): { agents: Agent[]; reload: () => void } {
       .catch(() => { /* agents are best-effort until the server answers */ });
   }, []);
   useEffect(() => {
+    // Optimistic badge clear: a successful markAgentRead zeroes the pin NOW,
+    // not at the next 10s poll. The server independently refuses to badge
+    // watched lanes (threadWatch), so this mostly covers the mark race.
+    const onRead = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, unread: 0 } : a)));
+    };
+    window.addEventListener('rivendell:agent-read', onRead);
+    return () => window.removeEventListener('rivendell:agent-read', onRead);
+  }, []);
+  useEffect(() => {
     reload();
     const iv = window.setInterval(reload, 10_000);
     return () => window.clearInterval(iv);
@@ -70,7 +81,10 @@ export async function reorderAgentIds(ids: string[]): Promise<Agent[]> {
 
 /** Report the focused thread as read (clears the unread badge). */
 export async function markAgentRead(id: string): Promise<void> {
-  try { await apiJson(`/api/agents/${encodeURIComponent(id)}/read`, { method: 'POST' }); } catch { /* best-effort */ }
+  try {
+    await apiJson(`/api/agents/${encodeURIComponent(id)}/read`, { method: 'POST' });
+    window.dispatchEvent(new CustomEvent('rivendell:agent-read', { detail: id }));
+  } catch { /* best-effort */ }
 }
 
 export async function deleteAgentReq(id: string): Promise<void> {

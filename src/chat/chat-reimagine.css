@@ -104,6 +104,12 @@
 
 .rc .msg { animation: rc-spring-in .5s var(--spring) both; }
 .rc .m-user { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+/* attached image thumbnails on user bubbles */
+.rc .uimg-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.rc .uimg-link { display: block; border-radius: 12px; overflow: hidden; border: 1px solid var(--border-strong); transition: transform .15s ease, border-color .15s ease; }
+.rc .uimg-link:hover { transform: scale(1.02); border-color: var(--accent); }
+.rc .uimg { display: block; max-width: 220px; max-height: 150px; object-fit: cover; }
+.rc .uimg-missing { font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); }
 .rc .bubble { max-width: 72%; padding: 11px 16px; border-radius: 18px 18px 6px 18px;
   background: linear-gradient(180deg, var(--surface-raised), var(--surface));
   border: 1px solid var(--border-strong); color: var(--fg); white-space: pre-wrap; word-break: break-word; }

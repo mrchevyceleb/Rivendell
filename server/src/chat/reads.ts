@@ -8,6 +8,7 @@ import { STATE_DIR, ELROND_WORKSPACE_PATH } from '../config.ts';
 import { loadEventLogSync } from './event-log-store.ts';
 import { agentLogKey } from './teamBus.ts';
 import { logKeyFor } from './threadKey.ts';
+import { isThreadWatched } from './threadWatch.ts';
 import type { Agent } from './agents.ts';
 import {
   eventInner,
@@ -97,6 +98,22 @@ export function agentUnread(agent: Agent): number {
   try {
     const { events } = loadEventLogSync(agentHistoryKey(agent));
     if (!events.length) return 0;
+    {
+      // A thread Matt is actively watching (visible tab) can never be "waiting
+      // for you" — replies there are seen as they land. Advance the durable
+      // cursor too, so a reply rendered on a visible tab can't re-badge after
+      // the tab backgrounds before the client's next mark-read POST.
+      const { chatKey } = agentLogKey(agent);
+      if (isThreadWatched(ELROND_WORKSPACE_PATH, chatKey)) {
+        const reads = readReads();
+        const lastSeq = events[events.length - 1].seq;
+        if ((reads[agent.id] ?? 0) < lastSeq) {
+          reads[agent.id] = lastSeq;
+          writeReads(reads);
+        }
+        return 0;
+      }
+    }
     const maxSeq = events.reduce((m, e) => (e.seq > m ? e.seq : m), 0);
     const reads = readReads();
     let lastRead = reads[agent.id] ?? 0;
