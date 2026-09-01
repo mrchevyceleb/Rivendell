@@ -8,13 +8,14 @@ import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
-import { appendEventLog, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, peekEnginePrimer, clearThreadMemory, clearRotation, isRotationOwed } from './compaction.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
+import { maybeAutoCompact, noteUserTurn, peekEnginePrimer, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
+import { crashTombstoneEvent, crashTombstoneText, restartMarkerEvent } from './crashTombstone.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
@@ -22,6 +23,7 @@ import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts'
 import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
 import { isVoiceChatId, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
+import { saveChatAttachments } from '../routes/chatAttachments.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -494,7 +496,7 @@ class ClaudeSession {
         },
       } as SessionEvent);
     }
-    void compactEventLog(this.logKey);
+    void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
 
     // Quiet-ready: the modern claude binary doesn't emit system/init until it
     // receives its first stdin message. Per Banana IDE: if the process is
@@ -600,6 +602,32 @@ class ClaudeSession {
         this.resolveReady(false);
         this.resolveStartupWaiters('closed');
       }
+      // Died mid-turn: no `result` event ever landed, so without this marker the
+      // event log holds the user's message and nothing after it. The next turn
+      // would then read a blank window and report that it did nothing, while the
+      // work it actually finished sits on disk. `disposed` is set first by
+      // shutdown()/interrupt(), so a deliberate stop stays quiet.
+      if (this.turnStartedAt !== null && !this.disposed) {
+        const ranMs = Date.now() - this.turnStartedAt;
+        console.warn(
+          `[chat ${this.cli}] mid-turn death after ${ranMs}ms — writing crash tombstone (code=${code} signal=${signal ?? '-'})`,
+        );
+        try {
+          this.emit(crashTombstoneEvent(crashTombstoneText({
+            cli: this.cli,
+            cwd: this.cwd,
+            sessionId: this.currentSessionId,
+            code,
+            signal: signal ?? null,
+            ranMs,
+          })));
+          this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+        } catch (err) {
+          console.warn(`[chat ${this.cli}] tombstone emit failed:`, (err as Error).message);
+        }
+      }
+      // A dead process is never busy, however it got there.
+      this.turnStartedAt = null;
       this.emit({ type: 'closed', code, signal });
     });
 
@@ -638,6 +666,12 @@ class ClaudeSession {
     };
   }
 
+  /** Reserve and return the next seq (tombstone writes race a dying session's
+   *  own emit path — never let two events share a seq). */
+  reserveSeq(): number {
+    return this.nextSeq++;
+  }
+
   /** The latest sequence number (clients can send this on reconnect). */
   latestSeq(): number {
     return this.nextSeq - 1;
@@ -645,11 +679,15 @@ class ClaudeSession {
 
   /** Most recent turn start (ms) — used for telegram-ping duration. */
   private turnStartedAt: number | null = null;
+  /** Set while a graceful (control-channel) interrupt is outstanding: the
+   *  interrupted turn ends with an error-shaped result, which must NOT be
+   *  surfaced as an API failure — Matt asked for the stop. */
+  private gracefulInterruptPending = false;
 
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
     if (this.child.exitCode !== null) {
       this.emit({ type: 'error', message: 'session has exited' });
       return;
@@ -675,6 +713,8 @@ class ClaudeSession {
           type: '_user_echo',
           text,
           imageCount: images?.length ?? 0,
+          attachments: opts.skipAttachments ? [] : await saveChatAttachments(images),
+          clientMsgId: opts.clientMsgId,
           ts: Date.now(),
         },
       });
@@ -765,6 +805,51 @@ class ClaudeSession {
   interrupt(reason = 'interrupt'): void {
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
     this.shutdown(reason);
+  }
+
+  /** GRACEFUL interrupt (steer): ask the CLI over the stream-json control
+   *  channel to end the current turn at the next safe point. The process,
+   *  MCP stack, and session all stay alive — the turn ends with a normal
+   *  `result` (which already maps to turnEnd and clears busy), and the next
+   *  send() continues the SAME warm session. No SIGTERM, no respawn, no
+   *  30-70s MCP re-warm. Resolves true when the turn actually ended; false
+   *  on timeout/death so the caller can fall back to a hard kill. */
+  interruptGracefully(timeoutMs = 30_000): Promise<boolean> {
+    if (this.disposed || this.child.exitCode !== null) return Promise.resolve(false);
+    if (this.turnStartedAt === null) return Promise.resolve(true); // idle: nothing to interrupt
+    const requestId = `interrupt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const done = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve(ok);
+      };
+      const timer = setTimeout(() => done(false), timeoutMs);
+      timer.unref?.();
+      // countSubscriber=false: a transient watcher must not skew listenerCount
+      // (idle-prune and the thread-watch registry read it).
+      const unsubscribe = this.subscribe((se) => {
+        const outer = se.ev;
+        if (outer?.type === 'closed' || outer?.type === 'error') { done(false); return; }
+        const ev = outer?.type === 'event' ? outer.event : outer;
+        if (ev?.type === 'result') done(true);
+        else if (ev?.type === 'control_response' && ev.response?.subtype === 'error') done(false);
+      }, -1, false);
+      try {
+        this.gracefulInterruptPending = true;
+        this.child.stdin.write(JSON.stringify({
+          type: 'control_request',
+          request_id: requestId,
+          request: { subtype: 'interrupt' },
+        }) + '\n');
+      } catch {
+        this.gracefulInterruptPending = false;
+        done(false);
+      }
+    });
   }
 
   isAlive(): boolean {
@@ -882,6 +967,13 @@ class ClaudeSession {
     const { cli, cwd, chatId, key } = this;
     const model = this.spawnModel;
     const effort = this.spawnEffort;
+    // Ownership guard: if this session was replaced since the compaction check
+    // began (steer respawn, model recycle), the LANE now has a different owner
+    // — rotating would shutdown/delete the replacement, possibly mid-turn.
+    if (sessions.get(key) !== this) {
+      console.warn(`[chat ${cli}] compaction rotate skipped for ${key}: lane owner changed`);
+      return false;
+    }
     this.shutdown('compaction-rotate');
     sessions.delete(key);
     await setSessionId(cli, cwd, '', chatId); // fresh CLI session — first send seeds the forever-window
@@ -972,12 +1064,10 @@ class ClaudeSession {
 
     this.emit({ type: 'event', event: ev });
 
-    // Surface API failures the CLI otherwise buries. z.ai (and Anthropic) return
-    // a rate-limit / error as a `result` event with `subtype:"success"` but
-    // `is_error:true` + `api_error_status` set and the human-readable reason in
-    // `.result` (e.g. "[1308][Usage limit reached for 5 hour...]"). Without this
-    // the turn just ends silently and the user sees nothing at all.
-    if (ev?.type === 'result' && (ev.is_error === true || typeof ev.api_error_status === 'number')) {
+    // A graceful interrupt's result is error-shaped by design, not a failure.
+    if (ev?.type === 'result' && this.gracefulInterruptPending) {
+      this.gracefulInterruptPending = false;
+    } else if (ev?.type === 'result' && (ev.is_error === true || typeof ev.api_error_status === 'number')) {
       const status = typeof ev.api_error_status === 'number' ? ` (${ev.api_error_status})` : '';
       const reason = typeof ev.result === 'string' && ev.result.trim()
         ? ev.result.trim()
@@ -1047,6 +1137,31 @@ class ClaudeSession {
       })();
     }
   }
+}
+
+/** On service shutdown: tag every BUSY lane's durable log with the restart
+ *  marker, so the resumed agent reads "your turn was killed — check the work
+ *  before answering" in its next seed window instead of stalling silently. */
+export function markBusyLanesRestarting(signal: string): number {
+  let marked = 0;
+  for (const s of sessions.values()) {
+    if (!s.isBusy()) continue;
+    try {
+      const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string; spawnModel: string };
+      // SYNC write: a dying process can't be trusted to flush an async queue.
+      const written = appendEventLogSync(session.logKey, {
+        seq: session.reserveSeq(),
+        ev: restartMarkerEvent(signal) as never,
+        eng: session.cli,
+        mdl: session.spawnModel,
+      });
+      if (written) marked++;
+      console.warn(`[rivendell] restart tombstone ${written ? 'written' : 'FAILED'} for ${session.logKey}`);
+    } catch (err) {
+      console.warn(`[rivendell] restart tombstone failed for ${s.key}:`, (err as Error).message);
+    }
+  }
+  return marked;
 }
 
 // ── Session manager ────────────────────────────────────────────────

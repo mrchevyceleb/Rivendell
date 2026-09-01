@@ -62,7 +62,7 @@ export type ChatImagePreview = {
 // `turnId` + `cbIndex` correlate a block back to claude's content_block_*
 // stream events so the reducer stays pure (no out-of-band Maps).
 export type ChatBlock =
-  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number }
+  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean }
   | {
       /** Agent-to-agent delivery (team bus): a teammate's message arriving in
        *  this thread — rendered with the SENDER's identity, not as a user turn. */
@@ -84,6 +84,14 @@ export type ChatBlock =
       turns: number;
       count: number;
       savedToRag?: boolean;
+    }
+  | {
+      /** Service restarted mid-turn — the in-flight tool call's output was
+       *  lost with the process. Rendered as a divider (never a bubble). */
+      kind: 'restart';
+      id: string;
+      ts: number;
+      reason?: string;
     }
   | {
       /** Brain change mid-thread. The conversation continues; only the engine

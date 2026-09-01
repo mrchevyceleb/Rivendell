@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
-import { flushEventLog, loadEventLogSync, MAX_EVENTS_PER_LOG } from './event-log-store.ts';
+import { flushEventLog, loadEventLogForCompactionSync } from './event-log-store.ts';
 import {
   WINDOW_TURNS,
   assembleForeverTurn,
@@ -37,10 +37,6 @@ const MIN_ACCEPT_WORDS = 400;
 const COMPACT_MAX_TOKENS = 8000;
 const TRANSCRIPT_HEAD = 24 * 1024;
 const TRANSCRIPT_TAIL = 220 * 1024;
-/** Compact leftover overflow before the 2000-event log trim drops it. */
-const LOG_CAP_SLACK = 80;
-/** Near the log cap, keep folding batches so trim cannot outrun compact. */
-const LOG_CAP_MAX_BATCHES = 8;
 
 const STATE_FILE = join(STATE_DIR, 'compaction-state.json');
 const COMPACTS_DIR = join(STATE_DIR, 'thread-compacts');
@@ -115,6 +111,11 @@ export function loadCompactBlob(key: string): CompactBlob | null {
   } catch {
     return null;
   }
+}
+
+/** Highest visible-turn seq already represented by the rolling compact. */
+export function compactedThroughSeq(key: string): number {
+  return loadCompactBlob(key)?.lastCompactedSeq ?? 0;
 }
 
 function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number): boolean {
@@ -275,7 +276,7 @@ function migrateLegacyPrimer(key: string): void {
 
 export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev: any }>): string {
   migrateLegacyPrimer(key);
-  const evs = events ?? loadEventLogSync(key).events;
+  const evs = events ?? loadEventLogForCompactionSync(key);
   const blob = loadCompactBlob(key);
   return assembleForeverTurn({
     events: evs,
@@ -292,6 +293,7 @@ export async function takeRotation(key: string): Promise<string | null> {
       state[key].pendingRotation = null;
     }
   });
+  await flushEventLog(key);
   const primer = peekEnginePrimer(key);
   return primer || null;
 }
@@ -397,7 +399,12 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       if (epochOf(key) !== epoch) return false;
       await flushEventLog(key);
       if (!recIsOwed(loadState()[key])) return false;
-      const primer = peekEnginePrimer(key, args.events);
+      // A turn can start during the flush await (e.g. a graceful steer
+      // landing right after its interrupt's result) — rotating now would
+      // kill the warm process mid-turn. Recheck and retry next time.
+      if (args.isBusy()) return false;
+      const durable = loadEventLogForCompactionSync(key);
+      const primer = peekEnginePrimer(key, durable.length ? durable : args.events);
       const applied = await args.rotate(primer);
       if (epochOf(key) !== epoch) return false;
       if (applied !== false) {
@@ -416,36 +423,37 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     }
   }
 
-  const visible = extractVisibleTurns(args.events);
+  // The live/UI buffer is intentionally capped at 2000 raw events, which can
+  // be fewer than 50 turns on tool-heavy lanes. Assemble memory from the full
+  // durable hot log after flushing the append chain; compactEventLog protects
+  // every seq newer than the rolling compact, so batched overflow stays here.
+  await flushEventLog(key);
+  if (epochOf(key) !== epoch) return false;
+  const durable = loadEventLogForCompactionSync(key);
+  const events = durable.length ? durable : args.events;
+  const visible = extractVisibleTurns(events);
   const { overflow } = splitWindow(visible);
   const blob = loadCompactBlob(key);
   const lastSeq = blob?.lastCompactedSeq ?? 0;
   let overflowNew = overflow.filter((t) => t.seq > lastSeq);
-  const nearLogCap = args.events.length >= MAX_EVENTS_PER_LOG - LOG_CAP_SLACK;
-  const overflowReady = shouldCompactOverflow(overflowNew);
-  const compactNow = overflowReady || (nearLogCap && overflowNew.length > 0);
-
-  if (!compactNow) return false;
+  if (!shouldCompactOverflow(overflowNew)) return false;
 
   inFlight.add(key);
-  const why = overflowReady ? 'overflow' : 'log-cap';
   try {
     let previous = blob?.compact ?? '';
     let count = blob?.count ?? rec?.count ?? 0;
     let lastCompactedSeq = lastSeq;
     let generatedWords = 0;
     let compactText = previous;
-    const total = rec?.userTurnsTotal ?? countUserEchoes(args.events);
-    const batchLimit = nearLogCap ? LOG_CAP_MAX_BATCHES : 1;
+    const total = rec?.userTurnsTotal ?? countUserEchoes(events);
 
-    for (let batch = 0; batch < batchLimit; batch++) {
+    for (let batch = 0; batch < 1; batch++) {
       overflowNew = overflow.filter((t) => t.seq > lastCompactedSeq);
       if (overflowNew.length === 0) break;
-      if (batch > 0 && !(nearLogCap && overflowNew.length > 0)) break;
       const overflowBatch = takeOverflowBatch(overflowNew);
       if (overflowBatch.length === 0) break;
       console.warn(
-        `[compaction] ${key}: ${overflowBatch.length} visible turns past the ${WINDOW_TURNS}-window (${overflowChars(overflowBatch)} chars, ${why}${batch ? ` batch ${batch + 1}` : ''}) — overwriting rolling compact`,
+        `[compaction] ${key}: ${overflowBatch.length} visible turns past the ${WINDOW_TURNS}-window (${overflowChars(overflowBatch)} chars, overflow) — overwriting rolling compact`,
       );
       const generated = await generateCompact(previous, overflowBatch);
       if (epochOf(key) !== epoch) {
@@ -504,10 +512,10 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
       await callMcp('memory', {
         action: 'save_memory',
         params: {
-          title: `Chat compact — ${chatId}`,
+          title: `Chat compact (${chatId})`,
           content: compactText,
           project: 'rivendell',
-          category: 'conversation-compact',
+          category: 'context',
           tags: [cli, chatId, 'rolling-compact'],
         },
       });
@@ -529,7 +537,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     await flushEventLog(key);
 
     const assembled = assembleForeverTurn({
-      events: args.events,
+      events,
       compact: compactText,
       lastCompactedSeq,
     });

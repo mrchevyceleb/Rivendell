@@ -549,6 +549,10 @@
 .switch-mark .compact-label {
   color: var(--r-accent, #c4a574);
 }
+.restart-mark .compact-label {
+  color: var(--r-rose, #d06565);
+  font-weight: 500;
+}
 
 /* jump pill */
 .bot-app .rc .jump {

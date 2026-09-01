@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
-import { registerChat } from './chat/register.ts';
+import { quiesceChat, registerChat } from './chat/register.ts';
 import { ensureAgents } from './chat/agents.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { teamRouter } from './routes/team.ts';
@@ -12,6 +12,7 @@ import { routinesRouter } from './routes/routines.ts';
 import { messagePinsRouter } from './routes/messagePins.ts';
 import { registerVoiceCalls } from './voice/grokCall.ts';
 import { voicePreviewRouter } from './voice/preview.ts';
+import { chatAttachmentsRouter } from './routes/chatAttachments.ts';
 import { startRoutineScheduler } from './chat/routines.ts';
 import { ensureXaiProxy, shutdownXaiProxy } from './chat/xai-proxy.ts';
 import { registerScribeSocket } from './worker/scribe.ts';
@@ -37,17 +38,28 @@ import { internalRouter } from './routes/internal.ts';
 import { xaiOauthRouter } from './routes/xai-oauth.ts';
 import { primeXaiOauthToken } from './chat/runner.ts';
 import { migrateAgentThreadLogs } from './chat/threadMigrate.ts';
+import { markBusyLanesRestarting, activeClaudeSessions } from './chat/runner.ts';
+import { flushAllEventChains } from './chat/event-log-store.ts';
+import { markBusyCodexLanesRestarting, activeCodexSessions } from './chat/codex-runner.ts';
+import { markBusyBananaLanesRestarting, activeBananaSessions } from './chat/banana-runner.ts';
 
 const app = express();
 app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: '25mb' }));
 
 app.get('/api/health', (_req, res) => {
+  const busyTurns =
+    activeClaudeSessions().filter((s) => s.busy).length +
+    activeCodexSessions().filter((s) => s.busy).length +
+    activeBananaSessions().filter((s) => s.busy).length;
   res.json({
     ok: true,
     app: 'rivendell',
     port: PORT,
     workerRunner: WORKER_RUNNER,
+    /** In-flight turns right now. A restart kills them mid-flight — deploys
+     *  MUST check this is 0 (or accept the tombstone) before bouncing. */
+    busyTurns,
     ts: Date.now(),
   });
 });
@@ -73,6 +85,7 @@ app.use('/api/routines', routinesRouter);
 app.use('/api/message-pins', messagePinsRouter);
 app.use('/api/jarvis', jarvisRouter);
 app.use('/api/voice-preview', voicePreviewRouter);
+app.use('/api/chat/attachments', chatAttachmentsRouter);
 // Localhost-only headless runner (cron agentic loop). Gated by MCP_AUTH_TOKEN.
 app.use('/internal', internalRouter);
 
@@ -131,14 +144,38 @@ server.listen(PORT, HOST, () => {
   console.log(`rivendell listening on http://${HOST}:${PORT}`);
 });
 
+let tearingDown = false;
 const tearDown = (signal: NodeJS.Signals) => {
+  if (tearingDown) return; // a second SIGTERM/SIGINT must not re-mark or re-launch shutdown
+  tearingDown = true;
   console.warn(`[rivendell] received ${signal}, shutting down (pid=${process.pid}, uptime=${Math.round(process.uptime())}s)`);
+  // Deadline now, not after the flush: a stuck write chain must not hang exit.
+  setTimeout(() => process.exit(0), 2500).unref();
+  // Quiesce first: no new turns after this point, so nothing starts after the
+  // busy lanes are tombstoned.
+  quiesceChat();
+  try {
+    const marked =
+      markBusyLanesRestarting(signal) +
+      markBusyCodexLanesRestarting(signal) +
+      markBusyBananaLanesRestarting(signal);
+    if (marked > 0) console.warn(`[rivendell] marked ${marked} busy lane(s) with the restart tombstone`);
+  } catch (err) {
+    console.warn('[rivendell] restart tombstone failed:', (err as Error).message);
+  }
+  // Stop all sessions NOW so no new events enqueue after the flush below.
   stopWorkerQueue();
   stopWorkspaceWatcher();
+  console.warn('[rivendell] shutdown: sessions stopping…');
   stopChat();
-  shutdownXaiProxy();
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 1500).unref();
+  console.warn('[rivendell] shutdown: sessions stopped, flushing logs');
+  void (async () => {
+    // Everything is quiesced and sessions are dead — the chains are final.
+    try { await flushAllEventChains(); } catch { /* best effort */ }
+    console.warn('[rivendell] shutdown: logs flushed, closing http');
+    shutdownXaiProxy();
+    server.close(() => process.exit(0));
+  })();
 };
 
 process.on('SIGINT', () => tearDown('SIGINT'));

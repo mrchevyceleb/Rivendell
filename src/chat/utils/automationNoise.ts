@@ -74,7 +74,7 @@ export function automationTurnInFlight(blocks: ChatBlock[]): boolean {
   for (let i = blocks.length - 1; i >= 0; i--) {
     const b = blocks[i];
     const k = b.kind;
-    if (k === 'user' || k === 'switch' || k === 'compact') return false;
+    if (k === 'user' || k === 'switch' || k === 'compact' || k === 'restart') return false;
     if (k === 'peer') {
       if (!isAutomationPeer(b)) return false;
       const rest = blocks.slice(i + 1);
@@ -104,7 +104,7 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
     const turn: ChatBlock[] = [];
     while (j < blocks.length) {
       const k = blocks[j].kind;
-      if (k === 'user' || k === 'peer' || k === 'switch' || k === 'compact') break;
+      if (k === 'user' || k === 'peer' || k === 'switch' || k === 'compact' || k === 'restart') break;
       turn.push(blocks[j]);
       j += 1;
     }

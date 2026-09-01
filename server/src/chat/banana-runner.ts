@@ -10,8 +10,9 @@ import type { Event, PermissionRequest, PermissionRuleset } from '@opencode-ai/s
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { adaptImagesForTextModel, getVisionMode } from './vision-adapter.ts';
-import { appendEventLog, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory } from './compaction.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
+import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -24,6 +25,7 @@ import {
   CLAUDE_COMMANDS_DIR,
 } from './config.ts';
 import { TEAM_MCP_SCRIPT } from '../config.ts';
+import { saveChatAttachments } from '../routes/chatAttachments.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -56,6 +58,8 @@ type BananaSendOptions = {
   hidden?: boolean;
   /** Team-bus delivery: sender-tagged peer_message echo, no compaction tick. */
   peerFrom?: string;
+  clientMsgId?: string;
+  skipAttachments?: boolean;
   peerFromRole?: string;
   /** Visible peer_message body. Full `text` still goes to the model. */
   peerText?: string;
@@ -2463,7 +2467,7 @@ export class BananaSession {
     } catch (err) {
       console.warn(`[chat banana] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
-    void compactEventLog(this.logKey);
+    void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
     // A different brain spoke last on this thread — mark the handover. The seed
     // below already covers context; opencode threads are never resumed across
     // engines anyway.
@@ -2513,6 +2517,12 @@ export class BananaSession {
         if (this.subscriberCount === 0) this.lastActivityAtMs = Date.now();
       }
     };
+  }
+
+  /** Reserve and return the next seq (tombstone writes race a dying session's
+   *  own emit path — never let two events share a seq). */
+  reserveSeq(): number {
+    return this.nextSeq++;
   }
 
   latestSeq(): number {
@@ -2678,7 +2688,7 @@ export class BananaSession {
     } else if (!opts.hidden) {
       this.emit({
         type: 'event',
-        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
+        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments: opts.skipAttachments ? [] : await saveChatAttachments(images), clientMsgId: opts.clientMsgId, ts: Date.now() },
       });
       noteUserTurn(this.logKey); // compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
@@ -2979,6 +2989,22 @@ export class BananaSession {
    *  turn so the UI shows an error instead of freezing. */
   onServerDeath(reason: string): void {
     if (this.busy && this.turn && !this.turn.done) {
+      // The serve process died under an in-flight turn. failTurn() emits error +
+      // result, but neither is an assistant turn, so the model window would come
+      // back blank and the next turn would report it did nothing. Leave a
+      // durable marker first. See crashTombstone.ts.
+      try {
+        const killed = /SIGKILL|code=137/.test(reason);
+        this.emit(crashTombstoneEvent(crashTombstoneText({
+          cli: 'banana',
+          cwd: this.cwd,
+          sessionId: this.threadId,
+          code: killed ? 137 : null,
+          signal: killed ? 'SIGKILL' : null,
+        })));
+      } catch (err) {
+        console.warn('[banana] tombstone emit failed:', (err as Error).message);
+      }
       this.failTurn(`banana server stopped: ${reason}`);
     }
   }
@@ -3848,6 +3874,25 @@ function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
 
 /** Manager keyed by cwd + chat id, matching the claude/codex session maps. */
 const bananaSessions = new Map<string, BananaSession>();
+
+/** See markBusyLanesRestarting in runner.ts. */
+export function markBusyBananaLanesRestarting(signal: string): number {
+  let marked = 0;
+  for (const s of bananaSessions.values()) {
+    if (!s.isBusy()) continue;
+    try {
+      const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string };
+      if (appendEventLogSync(session.logKey, {
+        seq: session.reserveSeq(),
+        ev: restartMarkerEvent(signal) as never,
+        eng: session.cli,
+      })) marked++;
+    } catch (err) {
+      console.warn(`[rivendell] restart tombstone failed for ${s.key}:`, (err as Error).message);
+    }
+  }
+  return marked;
+}
 
 /** True if any live BananaSession other than `except` has an in-flight turn.
  *  The `banana serve` process is shared by EVERY chat, so any teardown of it

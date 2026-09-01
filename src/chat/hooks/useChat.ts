@@ -98,6 +98,21 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
     }];
   }
 
+  // Service-restart marker (assistant-shaped so the agent reads it in seeds;
+  // rendered as a divider, not a bubble). Killed the in-flight turn, so close
+  // its open/running blocks too — otherwise a dead tool card ticks "working"
+  // forever after replay.
+  if ((ev.type === 'assistant' && ev._serviceRestart) || ev.type === '_service_restart') {
+    const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
+    const reason = typeof ev.reason === 'string' ? ev.reason : undefined;
+    const closed = blocks.map((b) => {
+      if (b.kind === 'text' && b.open) return { ...b, open: false };
+      if (b.kind === 'tool' && (b.open || b.running)) return { ...b, open: false, running: false };
+      return b;
+    });
+    return [...closed, { kind: 'restart', id: id(), ts, reason }];
+  }
+
   // Agent-to-agent delivery: a teammate's message landing in this thread.
   if (ev.type === 'peer_message' && typeof ev.text === 'string') {
     return [...blocks, {
@@ -113,15 +128,34 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
   // Server-injected echo of the user's prompt — keeps the user's message in
   // the visible thread when a client reconnects and replays the buffer.
   if (ev.type === '_user_echo' && typeof ev.text === 'string') {
-    // Dedupe: if the optimistic local user block was already added by send(),
-    // don't double up.
-    const lastUser = [...blocks].reverse().find((b) => b.kind === 'user');
-    if (lastUser && lastUser.kind === 'user' && lastUser.text === ev.text) {
+    const attachments: Array<{ id: string; mediaType: string }> = Array.isArray(ev.attachments) ? ev.attachments : [];
+    const echoImages = attachments.length
+      ? attachments.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` }))
+      : undefined;
+    // Dedupe: match the optimistic local user block by clientMsgId (stable
+    // across identical back-to-back prompts), falling back to the legacy
+    // text match for events that predate the id. A match is never doubled,
+    // but DO upgrade it with the server's attachment URLs — those survive
+    // storage (the optimistic data: URLs get stripped).
+    const cmid = typeof ev.clientMsgId === 'string' && ev.clientMsgId ? ev.clientMsgId : null;
+    const match = cmid
+      ? blocks.find((b) => b.kind === 'user' && b.clientMsgId === cmid)
+      : [...blocks].reverse().find((b) => b.kind === 'user' && b.text === ev.text);
+    if (match && match.kind === 'user' && (cmid || match.text === ev.text)) {
+      if (echoImages && !match.images?.some((i) => i.dataUrl.startsWith('/'))) {
+        return blocks.map((b) => (b.id === match.id ? { ...b, images: echoImages } : b));
+      }
+      if (imageCountFlag(ev) && Array.isArray(ev.attachments) && ev.attachments.length === 0 && !match.attachmentsLost) {
+        return blocks.map((b) => (b.id === match.id ? { ...b, attachmentsLost: true } : b));
+      }
       return blocks;
     }
     const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
     const imageCount = typeof ev.imageCount === 'number' && ev.imageCount > 0 ? ev.imageCount : undefined;
-    return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, ts }];
+    // Feature-present echo with zero kept attachments: every image failed to
+    // persist — say "not kept", not "attached".
+    const attachmentsLost = Boolean(imageCount && Array.isArray(ev.attachments) && ev.attachments.length === 0) || undefined;
+    return [...blocks, { kind: 'user', id: id(), text: ev.text, imageCount, images: echoImages, clientMsgId: cmid ?? undefined, attachmentsLost, ts }];
   }
 
   if (ev.type === 'message_start') {
@@ -242,6 +276,10 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
   return blocks;
 }
 
+function imageCountFlag(ev: any): boolean {
+  return typeof ev?.imageCount === 'number' && ev.imageCount > 0;
+}
+
 function prettifyJson(raw: string): string {
   if (!raw) return '';
   try {
@@ -316,7 +354,7 @@ function conversationKey(cli: CompanionId, repoPath: string, chatId = 'main'): s
 /** Outbound turns waiting for a live `ready` socket. Module-level so a click
  *  to another agent (unmount) does not drop a message the user already sent —
  *  coming back to the thread flushes it. */
-type QueuedOutbound = { text: string; images?: ChatSendImage[] };
+type QueuedOutbound = { text: string; images?: ChatSendImage[]; clientMsgId: string };
 const outboundQueue = new Map<string, QueuedOutbound[]>();
 
 function enqueueOutbound(key: string, item: QueuedOutbound): void {
@@ -369,8 +407,11 @@ function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
       if (block.kind === 'text' && block.open) return { ...block, open: false };
       if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
       if (block.kind === 'user' && block.images?.length) {
+        // URL-backed images (/api/chat/attachments/…) are cheap to keep —
+        // only bulky optimistic data: URLs get stripped from the snapshot.
+        const keepable = block.images.filter((img) => img.dataUrl.startsWith('/'));
         const { images: _images, ...rest } = block;
-        return { ...rest, imageCount: block.imageCount ?? block.images.length };
+        return { ...rest, images: keepable.length ? keepable : undefined, imageCount: block.imageCount ?? block.images.length };
       }
       return block;
     });
@@ -568,6 +609,7 @@ export function useChat(opts: {
       chatId,
       text: item.text,
       images: payloadImages(item.images),
+      clientMsgId: item.clientMsgId,
       model: modelRef.current,
       effort: effortRef.current,
     }));
@@ -703,6 +745,7 @@ export function useChat(opts: {
           sinceSeq: lastSeqRef.current,
           model: modelRef.current,
           effort: effortRef.current,
+          visible: document.visibilityState === 'visible',
         }));
       };
       ws.onmessage = (e) => {
@@ -740,15 +783,16 @@ export function useChat(opts: {
           if (pending && !initialSendInFlightRef.current && ws.readyState === WebSocket.OPEN) {
             setStatus(msg.busy ? 'streaming' : 'ready');
             initialSendInFlightRef.current = true;
+            const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
             setBlocks((prev) => {
               const lastUser = [...prev].reverse().find((b) => b.kind === 'user');
               if (lastUser && lastUser.kind === 'user' && lastUser.text === pending) return prev;
               return [
                 ...prev,
-                { kind: 'user', id: id(), text: pending, ts: Date.now() },
+                { kind: 'user', id: id(), text: pending, clientMsgId, ts: Date.now() },
               ];
             });
-            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, model: modelRef.current, effort: effortRef.current }));
+            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, clientMsgId, model: modelRef.current, effort: effortRef.current }));
           } else if (queued && queued.length > 0 && ws.readyState === WebSocket.OPEN) {
             setStatus('streaming');
             flushOutboundRef.current();
@@ -1024,6 +1068,7 @@ export function useChat(opts: {
             sinceSeq: lastSeqRef.current,
             model: modelRef.current,
             effort: effortRef.current,
+            visible: document.visibilityState === 'visible',
           }));
           return;
         } catch {
@@ -1054,6 +1099,12 @@ export function useChat(opts: {
       }, 150);
     };
     const onVisibility = () => {
+      // Tell the server whether this tab counts as watching (unread badges
+      // must not clear for backgrounded tabs, on any device).
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'watch', visible: document.visibilityState === 'visible' })); } catch { /* socket racing close */ }
+      }
       if (document.visibilityState === 'visible') reconcile();
     };
     document.addEventListener('visibilitychange', onVisibility);
@@ -1151,13 +1202,14 @@ export function useChat(opts: {
       setError('Sam is not on the line. Please wait a moment.');
       return;
     }
+    const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
     setBlocks((prev) => [
       ...prev,
-      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, ts: Date.now() },
+      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now() },
     ]);
     const key = conversationKey(cli, repo.path, chatId);
     const inFlight = pendingSendRef.current || statusRef.current === 'streaming';
-    enqueueOutbound(key, { text, images });
+    enqueueOutbound(key, { text, images, clientMsgId });
     pendingSendRef.current = true;
     setError(null);
     turnStartRef.current = Date.now();
@@ -1219,13 +1271,14 @@ export function useChat(opts: {
       send(text, images);
       return;
     }
+    const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
     setBlocks((prev) => [
       ...prev,
-      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, ts: Date.now() },
+      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now() },
     ]);
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), model: modelRef.current, effort: effortRef.current }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current }));
     turnStartRef.current = Date.now();
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;

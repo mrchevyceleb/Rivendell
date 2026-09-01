@@ -34,7 +34,7 @@ export const WINDOW_TURNS = 50;
 export const MAX_TURN_CHARS = 3000;
 /** Grok overwrite needs at least one aged-out turn. Raw overflow is already
  *  in the compact slot; this is only the generate-and-replace threshold. */
-export const MIN_OVERFLOW_TURNS = 1;
+export const MIN_OVERFLOW_TURNS = 3;
 /** Even terse overflow eventually folds (don't wait forever on "ok"s). */
 export const HARD_OVERFLOW_TURNS = 40;
 /** Don't bother Grok with a handful of short lines. Unmerged overflow still

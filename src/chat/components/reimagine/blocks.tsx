@@ -222,7 +222,7 @@ export function ToolCard({ block }: { block: Extract<ChatBlock, { kind: 'tool' }
   }, [block.running]);
 
   const { html, count } = toolLines(block);
-  const meta = block.running ? 'working…' : `${count} step${count === 1 ? '' : 's'} · done`;
+  const meta = block.running ? <RunningMeta since={block.ts} /> : `${count} step${count === 1 ? '' : 's'} · done`;
   return (
     <div className={`tool ${block.running ? 'running' : 'done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)}>
@@ -261,6 +261,16 @@ function CompactDivider({ block }: { block: Extract<ChatBlock, { kind: 'compact'
     <div className="compact-mark" title={`Auto-compaction #${block.count}: durable memory document (${block.words} words) generated from ${block.turns} turns${block.savedToRag ? ' and saved to the RAG vault' : ''}. The thread continues losslessly.`}>
       <span className="compact-line" />
       <span className="compact-label">Memory compacted · {words} words{block.savedToRag === false ? '' : ' · saved to RAG'}</span>
+      <span className="compact-line" />
+    </div>
+  );
+}
+
+function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart' }> }) {
+  return (
+    <div className="compact-mark restart-mark" title="Rivendell restarted while a turn was running — the in-flight tool call's output was lost with the process. Ask the agent to re-check the work.">
+      <span className="compact-line" />
+      <span className="compact-label">Service restarted mid-turn</span>
       <span className="compact-line" />
     </div>
   );
@@ -322,8 +332,43 @@ function StepsCard({ steps }: { steps: Array<Extract<ChatBlock, { kind: 'text' }
 }
 
 function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) {
+  const images = block.images ?? [];
+  const missing = Math.max(0, (block.imageCount ?? images.length) - images.length);
+  // data: URLs can't be top-level navigated to in Chrome — clone via blob.
+  // Open the tab synchronously (popup blockers kill async window.open once
+  // the click's transient activation expires), then navigate when ready.
+  const openImage = (e: React.MouseEvent, src: string) => {
+    if (!src.startsWith('data:')) return;
+    e.preventDefault();
+    const win = window.open('', '_blank');
+    if (!win) return;
+    void fetch(src)
+      .then((r) => r.blob())
+      .then((b) => {
+        const url = URL.createObjectURL(b);
+        win.location.href = url;
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      })
+      .catch(() => win.close());
+  };
   return (
     <div className="msg m-user">
+      {images.length ? (
+        <div className="uimg-row">
+          {images.map((img, i) => (
+            <a key={i} href={img.dataUrl} target="_blank" rel="noreferrer" className="uimg-link" onClick={(e) => openImage(e, img.dataUrl)}>
+              <img className="uimg" src={img.dataUrl} alt={`attachment ${i + 1}`} loading="lazy" />
+            </a>
+          ))}
+        </div>
+      ) : null}
+      {missing > 0 ? (
+        <span className="uimg-missing">
+          📎 {block.attachmentsLost || images.length
+            ? `${missing} image${missing === 1 ? '' : 's'} not kept`
+            : `${missing} image${missing === 1 ? '' : 's'} attached`}
+        </span>
+      ) : null}
       <div className="bubble">{block.text}</div>
       <span className="when">{timeLabel(block.ts)}</span>
     </div>
@@ -333,6 +378,28 @@ function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) 
 type AssistantBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>;
 type StepBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' }>;
 type ToolBlock = Extract<ChatBlock, { kind: 'tool' }>;
+
+/** Live "working · m:ss" heartbeat for running tool calls. Long subprocess
+ *  waits (codex reviews, big bashes) used to render a static "working…" for
+ *  minutes and read as a dead agent — a ticking counter proves it's alive. */
+function RunningMeta({ since }: { since: number }) {
+  // Wall clock for the initial elapsed (block.ts is Date.now-based), then
+  // advance monotonically — a system-clock adjustment must not jump or zero
+  // the counter mid-wait.
+  const [elapsed, setElapsed] = useState(() => Math.max(0, Date.now() - since));
+  useEffect(() => {
+    const base = { perf: performance.now(), elapsed: Math.max(0, Date.now() - since) };
+    setElapsed(base.elapsed);
+    const iv = window.setInterval(() => {
+      setElapsed(Math.max(0, base.elapsed + (performance.now() - base.perf)));
+    }, 1000);
+    return () => window.clearInterval(iv);
+  }, [since]);
+  const sec = Math.floor(elapsed / 1000);
+  const mm = Math.floor(sec / 60);
+  const ss = String(sec % 60).padStart(2, '0');
+  return <>working · {mm}:{ss}</>;
+}
 
 // ── Tools card (Grok anatomy) — a run of consecutive tool calls collapses
 //    into ONE expandable card instead of N stacked pods eating the feed.
@@ -344,12 +411,13 @@ function ToolsCard({ blocks }: { blocks: ToolBlock[] }) {
   const counts = new Map<string, number>();
   for (const b of blocks) counts.set(b.tool, (counts.get(b.tool) ?? 0) + 1);
   const summary = [...counts.entries()].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n)).join(' · ');
+  const oldestRunning = blocks.find((b) => b.running);
   return (
     <div className={`tool tools-run${running ? ' running' : ' done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <StarSigil className="tstar" />
         <span className="tool-title">{blocks.length} tool calls</span>
-        <span className="tool-meta">{running ? 'working…' : 'done'}</span>
+        <span className="tool-meta">{running && oldestRunning ? <RunningMeta since={oldestRunning.ts} /> : 'done'}</span>
         <ChevronDown className="tool-chev" />
       </button>
       {open ? null : <div className="tools-summary">{summary}</div>}
@@ -587,6 +655,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     | { type: 'user'; block: Extract<ChatBlock, { kind: 'user' }>; day: string }
     | { type: 'elrond'; blocks: Array<Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>>; day: string }
     | { type: 'compact'; block: Extract<ChatBlock, { kind: 'compact' }>; day: string }
+    | { type: 'restart'; block: Extract<ChatBlock, { kind: 'restart' }>; day: string }
     | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
     | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; day: string }
   > = [];
@@ -595,6 +664,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     const day = dayLabel(b.ts);
     if (b.kind === 'compact') {
       groups.push({ type: 'compact', block: b, day: lastDay || day });
+      continue;
+    }
+    if (b.kind === 'restart') {
+      groups.push({ type: 'restart', block: b, day: lastDay || day });
       continue;
     }
     if (b.kind === 'switch') {
@@ -636,7 +709,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       hideThinking = true;
       continue;
     }
-    if (g.type === 'user' || g.type === 'compact' || g.type === 'switch' || g.type === 'peer') {
+    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'switch' || g.type === 'peer') {
       pendingAutomation = false;
       hideThinking = false;
     }
@@ -676,6 +749,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<UserBubble key={g.block.id} block={g.block} />);
     } else if (g.type === 'compact') {
       nodes.push(<CompactDivider key={g.block.id} block={g.block} />);
+    } else if (g.type === 'restart') {
+      nodes.push(<RestartDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'peer') {

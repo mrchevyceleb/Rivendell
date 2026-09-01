@@ -17,5 +17,10 @@ fi
 export PORT="${PORT:-8091}"
 export HOST="${HOST:-0.0.0.0}"
 export RIVENDELL_BANANA_REMOTE_MCP="${RIVENDELL_BANANA_REMOTE_MCP:-1}"
+# Rivendell is an always-on headless daemon. Claude/Codex authentication must
+# fail visibly in chat/logs rather than launching OAuth tabs on Moria's dormant
+# desktop session. Override with RIVENDELL_CLI_BROWSER only for intentional,
+# attended maintenance.
+export BROWSER="${RIVENDELL_CLI_BROWSER:-/bin/false}"
 
 npm start

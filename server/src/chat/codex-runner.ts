@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { TEAM_MCP_SCRIPT } from '../config.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory } from './compaction.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
+import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -17,6 +18,7 @@ import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memor
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { resolveCodexSelection } from './codex-models.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
+import { saveChatAttachments } from '../routes/chatAttachments.ts';
 
 /**
  * Which codex binary to run.
@@ -311,7 +313,7 @@ export class CodexSession {
       this.recoverContextOnNextTurn = true;
       console.warn(`[chat codex] no saved thread id for ${this.logKey}; will recover context from event log on next turn`);
     }
-    void compactEventLog(this.logKey);
+    void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
   }
 
   subscribe(fn: Listener, sinceSeq = -1, countSubscriber = true): () => void {
@@ -332,6 +334,12 @@ export class CodexSession {
         if (this.subscriberCount === 0) this.lastActivityAtMs = Date.now();
       }
     };
+  }
+
+  /** Reserve and return the next seq (tombstone writes race a dying session's
+   *  own emit path — never let two events share a seq). */
+  reserveSeq(): number {
+    return this.nextSeq++;
   }
 
   latestSeq(): number {
@@ -405,7 +413,7 @@ export class CodexSession {
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
   }
 
-  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown; peerFrom?: string; peerFromRole?: string; peerText?: string } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown; peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
     if (this.busy) {
       this.emit({
         type: 'error',
@@ -432,7 +440,7 @@ export class CodexSession {
     } else {
       this.emit({
         type: 'event',
-        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, ts: Date.now() },
+        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments: opts.skipAttachments ? [] : await saveChatAttachments(images), clientMsgId: opts.clientMsgId, ts: Date.now() },
       });
       noteUserTurn(this.logKey); // compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
@@ -558,6 +566,7 @@ export class CodexSession {
     // Account-pinned lanes (chatId carries `__acct__<account>`) force that exact
     // login; everything else keeps the per-repo account-map resolution.
     const forcedAccount = accountFromChatId(this.chatId);
+    const turnStartedAtMs = Date.now();
     const child = spawn(CODEX_BIN, args, {
       cwd: this.cwd,
       env: forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd),
@@ -639,7 +648,7 @@ export class CodexSession {
       }
     });
 
-    child.on('exit', async (code) => {
+    child.on('exit', async (code, signal) => {
       console.log(
         `[chat codex] child exit cwd=${this.cwd} code=${code} threadId=${this.threadId ?? '-'}`,
       );
@@ -656,6 +665,24 @@ export class CodexSession {
         stderrChunks.length = 0;
       }
       this.closeDanglingToolBlocks(turnState, code, transientProjectConfigError ?? stderrText);
+      // Killed mid-turn (OOM SIGKILL / 137) with no reply delivered. An `error`
+      // event reaches the UI but NOT the model window — extractVisibleTurns only
+      // keeps user/assistant turns — so the next turn would see a blank window
+      // and report it did nothing. Leave an assistant-shaped marker instead.
+      if (!producedAgentMessage && (signal === 'SIGKILL' || code === 137)) {
+        try {
+          this.emit(crashTombstoneEvent(crashTombstoneText({
+            cli: 'codex',
+            cwd: this.cwd,
+            sessionId: this.threadId,
+            code: code ?? null,
+            signal: signal ?? null,
+            ranMs: Date.now() - turnStartedAtMs,
+          })));
+        } catch (err) {
+          console.warn('[chat codex] tombstone emit failed:', (err as Error).message);
+        }
+      }
       // Surface empty / hard-fail turns. Codex sometimes starts a task and then
       // completes with last_agent_message=null + exit 1 and no useful stderr.
       // Without an explicit error event the UI just drops out of "thinking".
@@ -943,6 +970,25 @@ function latestThreadIdFromEvents(events: SeqEvent[]): string | null {
 
 /** Manager keyed by cwd + chat id, matching the claude session map. */
 const codexSessions = new Map<string, CodexSession>();
+
+/** See markBusyLanesRestarting in runner.ts. */
+export function markBusyCodexLanesRestarting(signal: string): number {
+  let marked = 0;
+  for (const s of codexSessions.values()) {
+    if (!s.isBusy()) continue;
+    try {
+      const session = s as unknown as { logKey: string; reserveSeq(): number; cli: string };
+      if (appendEventLogSync(session.logKey, {
+        seq: session.reserveSeq(),
+        ev: restartMarkerEvent(signal) as never,
+        eng: session.cli,
+      })) marked++;
+    } catch (err) {
+      console.warn(`[rivendell] restart tombstone failed for ${s.key}:`, (err as Error).message);
+    }
+  }
+  return marked;
+}
 
 export function activeCodexSessions(): {
   cli: CliKind;

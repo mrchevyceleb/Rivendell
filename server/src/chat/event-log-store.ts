@@ -1,5 +1,5 @@
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import type { SessionEvent } from './runner.ts';
@@ -183,6 +183,35 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   return { events: trimmed.slice(), nextSeq };
 }
 
+/** Full durable HOT log for forever-thread assembly/compaction. Unlike
+ * loadEventLogSync this does not cap the result to the UI replay buffer: the
+ * turns that just aged out of the last-50 window must remain available until
+ * Grok has merged them into the rolling compact. compactEventLog below refuses
+ * to archive past that compacted seq, so the hot file is the complete source. */
+export function loadEventLogForCompactionSync(key: string): PersistedEvent[] {
+  let raw: string;
+  try {
+    raw = readFileSync(logPath(key), 'utf8');
+  } catch {
+    return [];
+  }
+  const events: PersistedEvent[] = [];
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed?.seq !== 'number' || !parsed?.ev || isPlumbingEvent(parsed.ev)) continue;
+      const event: PersistedEvent = { seq: parsed.seq, ev: parsed.ev as SessionEvent };
+      if (typeof parsed.eng === 'string' && parsed.eng) event.eng = parsed.eng;
+      if (typeof parsed.mdl === 'string' && parsed.mdl) event.mdl = parsed.mdl;
+      events.push(event);
+    } catch {
+      // Interrupted trailing append: ignore only the malformed line.
+    }
+  }
+  return events;
+}
+
 // Append-only writer keyed by sanitized session key. A per-key promise chain
 // preserves ordering when many emits land back-to-back during streaming. We
 // fire-and-forget at the call site (emit is sync); failures get logged but
@@ -195,6 +224,30 @@ const writeChains = new Map<string, Promise<void>>();
  *  can't race the append chain and miss it. */
 export function flushEventLog(key: string): Promise<void> {
   return writeChains.get(key) ?? Promise.resolve();
+}
+
+/** Flush EVERY pending write chain. Called on shutdown: restart tombstones
+ *  and trailing turn events are queued async, and a fast server.close() must
+ *  not let process.exit beat them to disk. */
+export function flushAllEventChains(): Promise<void> {
+  console.warn(`[event-log-store] flushing ${writeChains.size} pending chain(s) before exit`);
+  return Promise.all([...writeChains.values()]).then(() => undefined);
+}
+
+/** Synchronous append for shutdown tombstones: the queued async write path
+ *  races the dying process's exit, so restart markers write straight to disk
+ *  synchronously. No write-chain dedupe — written once at teardown by the
+ *  markBusy*LanesRestarting helpers only. */
+export function appendEventLogSync(key: string, persisted: PersistedEvent): boolean {
+  if (isPlumbingEvent(persisted.ev)) return true;
+  try {
+    mkdirSync(EVENT_LOG_DIR, { recursive: true });
+    appendFileSync(logPath(key), JSON.stringify(persisted) + '\n', 'utf8');
+    return true;
+  } catch (err) {
+    console.warn('[event-log-store] sync append failed', key, (err as Error).message);
+    return false;
+  }
 }
 
 export function appendEventLog(key: string, persisted: PersistedEvent): void {
@@ -250,10 +303,10 @@ export async function clearEventLog(key: string): Promise<void> {
 // The trimmed prefix is APPENDED to `<key>.archive.jsonl` before the rewrite,
 // not discarded. The cap is a bound on the hot window a session replays and
 // holds in memory, and it has to stay one — but merging an agent's per-engine
-// logs into a single thread log pushes long threads past 2000 events, and
+// logs into a single thread log pushes long threads past the event cap, and
 // deleting the oldest turns off disk to enforce a memory bound is not a trade
 // anyone agreed to. Archive first, then trim; nothing leaves the box.
-export async function compactEventLog(key: string): Promise<void> {
+export async function compactEventLog(key: string, compactedThroughSeq = 0): Promise<void> {
   const path = logPath(key);
   if (!existsSync(path)) return;
   let raw: string;
@@ -264,8 +317,30 @@ export async function compactEventLog(key: string): Promise<void> {
   }
   const lines = raw.split('\n').filter(Boolean);
   if (lines.length <= MAX_EVENTS_PER_LOG) return;
-  const dropped = lines.slice(0, lines.length - MAX_EVENTS_PER_LOG);
-  const kept = lines.slice(lines.length - MAX_EVENTS_PER_LOG).join('\n') + '\n';
+
+  // Only archive records the rolling compact already covers. The old cap-only
+  // trim could evict a tiny unmerged overflow batch before it reached the
+  // batching threshold, so a one-word reply either triggered a full compact or
+  // disappeared from model memory. Retaining a temporarily oversized hot file
+  // is the safe side of that trade; the next post-compact spawn trims it.
+  const desiredDrop = lines.length - MAX_EVENTS_PER_LOG;
+  let safeDrop = 0;
+  for (; safeDrop < desiredDrop; safeDrop += 1) {
+    try {
+      const parsed = JSON.parse(lines[safeDrop]);
+      if (typeof parsed?.seq !== 'number' || parsed.seq > compactedThroughSeq) break;
+    } catch {
+      break;
+    }
+  }
+  if (safeDrop === 0) {
+    console.log(
+      `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
+    );
+    return;
+  }
+  const dropped = lines.slice(0, safeDrop);
+  const kept = lines.slice(safeDrop).join('\n') + '\n';
   const tmp = `${path}.compact-${process.pid}`;
   try {
     // Archive must land BEFORE the rewrite. If the append fails we keep the

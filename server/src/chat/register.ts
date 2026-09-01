@@ -40,16 +40,18 @@ import {
 } from './banana-runner.ts';
 import { emitScribe } from '../worker/scribe.ts';
 import { listChatHistory } from './history.ts';
+import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 
-type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; model?: string; effort?: string };
+type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; model?: string; effort?: string; visible?: boolean };
+type ClientWatch = { type: 'watch'; visible?: boolean };
 // `model` / `effort` ride on send/steer. Banana and Codex apply them per turn.
 // Claude-family lanes (claude/assistant/zai/xai) apply them at spawn; a live
 // steer must reuse that spawn, not the Counsel picker's current id.
-type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string };
+type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string; clientMsgId?: string };
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string; model?: string; effort?: string };
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string };
-type ClientMsg = ClientHello | ClientSend | ClientFresh | ClientStop | ClientSteer;
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string; clientMsgId?: string };
+type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer;
 type ResumeWatchableSession = AnySession & {
   startedWithResume?: () => boolean;
   waitForInitOrExit?: (timeoutMs: number) => Promise<'initialized' | 'closed' | 'timeout'>;
@@ -155,6 +157,13 @@ function filterReplayEvents(events: DispatchSeqEvent[]): DispatchSeqEvent[] {
     if (!isBananaTaggedError(se)) return true;
     return se.seq === latestUnresolvedBananaErrorSeq;
   });
+}
+
+/** Set on service shutdown: new turns are rejected (existing sockets get a
+ *  clean error) so no work starts after the busy lanes were tombstoned. */
+let chatQuiesced = false;
+export function quiesceChat(): void {
+  chatQuiesced = true;
 }
 
 export async function registerChat(app: express.Express, server: Server): Promise<() => void> {
@@ -304,6 +313,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
     }
   });
 
+  // Lane-scoped operation generations: a stop/steer from ANY socket (any device) bumps the lane's operation generation; a stale
+  // steer awaiting its graceful interrupt must not write a turn after being superseded.
+  const laneGenerations = new Map<string, number>();
+  const laneGenKey = (cli: CliKind, repo: string, chatId: string) => `${cli}|${repo}|${chatId}`;
+  const bumpLaneGen = (cli: CliKind, repo: string, chatId: string): number => {
+    const k = laneGenKey(cli, repo, chatId);
+    const n = (laneGenerations.get(k) ?? 0) + 1;
+    laneGenerations.set(k, n);
+    return n;
+  };
+
   const wss = new WebSocketServer({ noServer: true });
   let wsCounter = 0;
   // Backstop for a client that leaks sockets: a long-lived tab whose orphaned
@@ -352,6 +372,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
     let cliKind: CliKind | null = null;
     let repoPath: string | null = null;
     let chatId = DEFAULT_CHAT_ID;
+    // The lane this socket is currently counted as watching (threadWatch registry).
+    let watchedLane: { repo: string; chatId: string } | null = null;
     let turnGeneration = 0;
     // Last model/effort actually used on this socket (hello/send/steer).
     // Steer must reuse these for Codex/Banana so a drifted Counsel picker
@@ -513,6 +535,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       images?: Array<{ mediaType: string; base64: string }>,
       model?: string,
       effort?: string,
+      clientMsgId?: string,
     ): Promise<boolean> => {
       if (!cliKind || !repoPath || cliKind === 'codex') return false;
       const watchable = session as ResumeWatchableSession;
@@ -532,7 +555,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // fire-and-forget, so guard the promise or a rejection escapes the outer
         // try/catch as an unhandled rejection.
         if ('send' in retrySession) {
-          void Promise.resolve((retrySession as any).send(text, images, { model })).catch((e: Error) => {
+          void Promise.resolve((retrySession as any).send(text, images, { model, clientMsgId, skipAttachments: true })).catch((e: Error) => {
             // Don't just log: a rejected retry-send would otherwise strand the
             // client with busy=true and no turnEnd. Clean up the turn like the
             // synchronous catch below.
@@ -570,12 +593,28 @@ export async function registerChat(app: express.Express, server: Server): Promis
           repoPath = msg.repo;
           chatId = normalizeChatId(msg.chatId);
           const sinceSeq = typeof msg.sinceSeq === 'number' ? msg.sinceSeq : -1;
+          // Same-lane re-hellos (focus/online/pageshow reconcile) refresh
+          // visibility even when the replay dedupe below swallows the rest —
+          // a lost or racing watch message must self-heal on the next hello.
+          if (watchedLane && watchedLane.repo === msg.repo && watchedLane.chatId === chatId) {
+            setWatchVisible(watchedLane.repo, watchedLane.chatId, wsId, msg.visible !== false);
+          }
           const helloSig = `${msg.cli}|${msg.repo}|${chatId}|${sinceSeq}`;
           const helloAt = Date.now();
           if (helloSig === lastHelloSig && helloAt - lastHelloAt < HELLO_DEDUPE_MS) return;
           lastHelloSig = helloSig;
           lastHelloAt = helloAt;
           console.log(`[chat ws#${wsId}] hello cli=${msg.cli} repo=${msg.repo} chatId=${chatId} sinceSeq=${sinceSeq}`);
+          if (watchedLane && (watchedLane.repo !== msg.repo || watchedLane.chatId !== chatId)) {
+            unwatchThread(watchedLane.repo, watchedLane.chatId, wsId);
+            watchedLane = null;
+          }
+          if (!watchedLane) {
+            // Client reports tab visibility in hello; a backgrounded tab must
+            // not suppress the badge on other devices.
+            watchThread(msg.repo, chatId, wsId, msg.visible !== false);
+            watchedLane = { repo: msg.repo, chatId };
+          }
           // A hello is a passive attach and must never start an engine process.
           // Warm lane -> attach to it. Cold lane -> serve the durable log and
           // wait; the first real turn spawns lazily in the `send` handler.
@@ -633,13 +672,24 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const stopCli = cliKind ?? msg.cli;
           const stopRepo = repoPath ?? msg.repo;
           console.warn(`[chat ws#${wsId}] stop from ${peer} cli=${stopCli} repo=${stopRepo} chatId=${chatId}`);
+          bumpLaneGen(stopCli, stopRepo, chatId);
           detachCurrentSession();
           await interruptSession({ cli: stopCli, repoPath: stopRepo, chatId });
           safeSend({ type: 'turnEnd' });
           return;
         }
 
+        if (msg.type === 'watch') {
+          if (watchedLane) setWatchVisible(watchedLane.repo, watchedLane.chatId, wsId, msg.visible !== false);
+          return;
+        }
+
         if (msg.type === 'steer') {
+          if (chatQuiesced) {
+            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'turnEnd' });
+            return;
+          }
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
           // Pin to the engine already bound on this socket. Counsel picker
@@ -668,29 +718,66 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
           }
           console.warn(`[chat ws#${wsId}] steer from ${peer} cli=${steerCli} repo=${steerRepo} chatId=${chatId}`);
-          detachCurrentSession();
-          await interruptSession({ cli: steerCli, repoPath: steerRepo, chatId });
-          const session = await bindSession(getOrCreateSession({
-            cli: steerCli,
-            repoPath: steerRepo,
-            chatId,
-            model: steerModel,
-            effort: steerEffort,
-          }));
+          // Lane-scoped supersession: a stop or steer from ANY socket/device
+          // bumps this lane's operation generation — recheck after every await
+          // so a superseded steer never writes a turn into whatever is live now.
+          const laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
+          const laneGenStale = () => laneGenerations.get(laneGenKey(steerCli, steerRepo, chatId)) !== laneGen;
+          // GRACEFUL steer for warm claude-family sessions: control-interrupt
+          // the live turn and send the steer text into the SAME process — no
+          // SIGTERM, no respawn, no MCP re-warm. An idle warm session needs no
+          // interrupt at all. Codex/banana and any graceful failure fall back
+          // to the hard kill + respawn below.
+          let session: AnySession | null = null;
+          const boundSession = bound ? await bound.catch(() => null) : null;
+          if (boundSession && isClaudeFamilyCli(steerCli) && typeof (boundSession as { interruptGracefully?: unknown }).interruptGracefully === 'function') {
+            const wasBusy = (boundSession as { isBusy?: () => boolean }).isBusy?.() === true;
+            const ok = await (boundSession as { interruptGracefully: (t?: number) => Promise<boolean> }).interruptGracefully(30_000);
+            if (laneGenStale()) return;
+            if (ok) {
+              session = boundSession;
+              console.warn(`[chat ws#${wsId}] steer graceful (${wasBusy ? 'turn interrupted, process kept' : 'idle warm session, direct send'})`);
+            } else {
+              console.warn(`[chat ws#${wsId}] steer graceful interrupt failed — falling back to hard kill`);
+            }
+          }
+          if (!session) {
+            detachCurrentSession();
+            await interruptSession({ cli: steerCli, repoPath: steerRepo, chatId });
+            if (laneGenStale()) return;
+            session = await bindSession(getOrCreateSession({
+              cli: steerCli,
+              repoPath: steerRepo,
+              chatId,
+              model: steerModel,
+              effort: steerEffort,
+            }));
+          }
+          if (laneGenStale()) return;
+          if (chatQuiesced) {
+            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'turnEnd' });
+            return;
+          }
           cliKind = steerCli;
           repoPath = steerRepo;
           busy = true;
           safeSend({ type: 'turnStart' });
           logChatTurn(wsId, 'steer', steerCli, steerRepo, chatId, msg.text);
           const generation = ++turnGeneration;
-          await (session as any).send(msg.text, msg.images, { model: steerModel, effort: steerEffort });
+          await (session as any).send(msg.text, msg.images, { model: steerModel, effort: steerEffort, clientMsgId: msg.clientMsgId });
           lastTurnModel = steerModel;
           lastTurnEffort = steerEffort;
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, steerModel, steerEffort);
+          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, steerModel, steerEffort, msg.clientMsgId);
           return;
         }
 
         if (msg.type === 'send') {
+          if (chatQuiesced) {
+            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'turnEnd' });
+            return;
+          }
           const requestedChatId = normalizeChatId(msg.chatId ?? chatId);
           if (requestedChatId !== chatId) {
             safeSend({ type: 'error', message: 'chat tab changed - reconnect before sending' });
@@ -751,11 +838,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
             session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
           }
           if (!session) throw new Error('session unavailable, please retry');
+          if (chatQuiesced) {
+            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'turnEnd' });
+            return;
+          }
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
-          await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort });
+          await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort, clientMsgId: msg.clientMsgId });
           lastTurnModel = msg.model;
           lastTurnEffort = msg.effort;
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort);
+          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort, msg.clientMsgId);
         }
       } catch (error) {
         busy = false;
@@ -783,6 +875,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (set) {
         set.delete(ws);
         if (set.size === 0) peerSockets.delete(peerKey);
+      }
+      if (watchedLane) {
+        unwatchThread(watchedLane.repo, watchedLane.chatId, wsId);
+        watchedLane = null;
       }
       console.log(`[chat ws#${wsId}] close`);
     });
