@@ -74,7 +74,7 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
             <span
               key={i}
               className="riv-call-bar"
-              style={{ animationDelay: `${i * 0.09}s`, animationPlayState: call.state === 'speaking' || call.state === 'listening' ? 'running' : 'paused', opacity: call.state === 'speaking' ? 0.55 + call.level * 0.45 : 0.25 }}
+              style={{ animationDelay: `${i * 0.09}s`, animationPlayState: call.state === 'speaking' || call.state === 'listening' ? 'running' : 'paused', opacity: call.state === 'speaking' ? 0.55 + call.level * 0.45 : 0.25 + call.micLevel * 0.75 }}
             />
           ))}
         </div>

@@ -30,6 +30,7 @@ export function useGrokCall() {
   const [durationSec, setDurationSec] = useState(0);
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);
+  const [micLevel, setMicLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -155,11 +156,22 @@ export function useGrokCall() {
     const worklet = new AudioWorkletNode(ctx, 'riv-call-mic');
     workletRef.current = worklet;
     worklet.port.onmessage = ({ data }) => {
+      // The meter never moves while muted — a bouncing wave during mute reads
+      // as "still transmitting".
+      if (typeof data?.level === 'number' && !mutedRef.current) setMicLevel(data.level);
       if (data?.pcmData && wsRef.current?.readyState === WebSocket.OPEN && !mutedRef.current) {
         wsRef.current.send(JSON.stringify({ type: 'audio', b64: int16ArrayToBase64(new Int16Array(data.pcmData)) }));
       }
     };
     ctx.createMediaStreamSource(stream).connect(worklet);
+    // An AudioWorkletNode with no output is NOT guaranteed to have process()
+    // called — some platforms never pull the graph (the Windows dead-mic
+    // bug). Route through a zero-gain sink to the destination so the node is
+    // always driven, with no audible feedback.
+    const micSink = ctx.createGain();
+    micSink.gain.value = 0;
+    worklet.connect(micSink);
+    micSink.connect(ctx.destination);
 
     if (!alive()) return;
     // duration clock + waveform level
@@ -181,12 +193,16 @@ export function useGrokCall() {
   }, [teardown]);
 
   const toggleMute = useCallback(() => {
-    setMuted((m) => { mutedRef.current = !m; return !m; });
+    setMuted((m) => {
+      mutedRef.current = !m;
+      if (!m) setMicLevel(0); // muting: meter flatlines, never hints at live audio
+      return !m;
+    });
   }, []);
 
   const setVoice = useCallback((voice: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'setVoice', voice }));
   }, []);
 
-  return { state, turns, liveUser, durationSec, muted, level, error, start, end, toggleMute, setVoice };
+  return { state, turns, liveUser, durationSec, muted, level, micLevel, error, start, end, toggleMute, setVoice };
 }

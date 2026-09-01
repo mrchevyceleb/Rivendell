@@ -146,9 +146,20 @@ class GrokCall {
     });
   }
 
+  private micChunks = 0;
+  private micDropped = 0;
+
   sendMic(base64: string): void {
     if (!this.ws || this.ws.readyState !== WsClient.OPEN) return;
-    if (this.greetingPhase === 'pending' || this.greetingPhase === 'playing') return;
+    if (this.greetingPhase === 'pending' || this.greetingPhase === 'playing') {
+      this.micDropped += 1;
+      if (this.micDropped === 50) console.log('[voice] 50 mic chunks dropped during greeting phase');
+      return;
+    }
+    this.micChunks += 1;
+    if (this.micChunks === 1 || this.micChunks % 50 === 0) {
+      console.log(`[voice] mic chunk #${this.micChunks} received (${base64.length} b64 chars)`);
+    }
     this.ws.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: upsamplePcm16kTo24k(base64) }));
   }
 

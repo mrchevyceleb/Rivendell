@@ -37,13 +37,16 @@ class MicProcessor extends AudioWorkletProcessor {
     const input = inputs[0]
     if (!input || !input[0]) return true
     const samples = input[0]
+    let sum = 0
     for (let i = 0; i < samples.length; i++) {
       const s = Math.max(-1, Math.min(1, samples[i]))
+      sum += s * s
       this.buffer.push(s < 0 ? s * 0x8000 : s * 0x7fff)
     }
+    const level = samples.length ? Math.min(1, Math.sqrt(sum / samples.length) * 4) : 0
     if (this.buffer.length >= this.bufferSize) {
       const chunk = new Int16Array(this.buffer.slice(0, this.bufferSize))
-      this.port.postMessage({ pcmData: chunk.buffer }, [chunk.buffer])
+      this.port.postMessage({ pcmData: chunk.buffer, level }, [chunk.buffer])
       this.buffer = this.buffer.slice(this.bufferSize)
     }
     return true
