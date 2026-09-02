@@ -209,7 +209,7 @@
 .rc .freshbtn:hover { color: var(--gold); border-color: var(--border-gold); background: var(--gold-soft-mix); }
 .rc .freshbtn:active { transform: scale(.9); }
 
-.rc .send { margin-left: auto; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+.rc .send { margin-left: auto; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; touch-action: manipulation;
   border: 1px solid var(--border-strong); color: var(--faint); transition: all .22s var(--spring); flex: none; }
 .rc .send svg { width: 17px; height: 17px; transition: transform .22s var(--spring); }
 .rc .send .ic-stop { display: none; }

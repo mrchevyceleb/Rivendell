@@ -68,6 +68,8 @@ export function Composer(props: ComposerProps) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const sendRef = useRef<HTMLButtonElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const touchSubmitRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const touchSubmittedAtRef = useRef(0);
   const cap = mobile ? 128 : 148;
   const [popSel, setPopSel] = useState(0);
   const [popDismissed, setPopDismissed] = useState(false);
@@ -213,9 +215,41 @@ export function Composer(props: ComposerProps) {
       ref={sendRef}
       type="button"
       className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${props.busy && !canSteer ? ' streaming' : ''} ${extraClass}`}
-      aria-label={canSteer ? 'Steer the current turn' : props.busy ? 'Stop generating' : 'Send'}
-      title={canSteer ? 'Steer the current turn' : props.busy ? 'Stop generating' : 'Send'}
-      onClick={submit}
+      aria-label={canSteer ? 'Steer at the next safe point' : props.busy ? 'Stop generating' : 'Send'}
+      title={canSteer ? 'Steer at the next safe point' : props.busy ? 'Stop generating' : 'Send'}
+      onPointerDown={(e) => {
+        if (e.pointerType !== 'touch') return;
+        // iOS/Android blur the textarea first; the keyboard viewport resize can
+        // move/unmount this button before `click`, so the first tap only hides
+        // the keyboard. Prevent that blur, then submit on pointer-up so a drag
+        // or canceled touch cannot accidentally send.
+        e.preventDefault();
+        touchSubmitRef.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+      }}
+      onPointerMove={(e) => {
+        const touch = touchSubmitRef.current;
+        if (!touch || touch.pointerId !== e.pointerId) return;
+        if (Math.hypot(e.clientX - touch.x, e.clientY - touch.y) > 12) touchSubmitRef.current = null;
+      }}
+      onPointerUp={(e) => {
+        const touch = touchSubmitRef.current;
+        touchSubmitRef.current = null;
+        if (e.pointerType !== 'touch' || !touch || touch.pointerId !== e.pointerId) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const stayedPut = Math.hypot(e.clientX - touch.x, e.clientY - touch.y) <= 12;
+        const inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+        if (!stayedPut || !inside) return;
+        e.preventDefault();
+        touchSubmittedAtRef.current = Date.now();
+        submit();
+      }}
+      onPointerCancel={(e) => {
+        if (touchSubmitRef.current?.pointerId === e.pointerId) touchSubmitRef.current = null;
+      }}
+      onClick={() => {
+        if (Date.now() - touchSubmittedAtRef.current < 1000) return;
+        submit();
+      }}
     >
       <ArrowUp className="ic-send" />
       <svg className="ic-steer" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -235,7 +269,7 @@ export function Composer(props: ComposerProps) {
       {mobile && (props.modelChip || props.busy) ? (
         <div className="dock-meta">
           {props.modelChip}
-          {props.busy ? <span className="steer-cue">Steer the current turn ↪</span> : null}
+          {props.busy ? <span className="steer-cue">Steer at the next safe point ↪</span> : null}
         </div>
       ) : null}
       {popOpen ? (
@@ -268,7 +302,7 @@ export function Composer(props: ComposerProps) {
           ref={taRef}
           rows={1}
           value={props.value}
-          placeholder={props.busy ? 'Steer the current turn…' : props.placeholder ?? phrases?.[phIdx] ?? 'Speak, friend…'}
+          placeholder={props.busy ? 'Steer at the next safe point…' : props.placeholder ?? phrases?.[phIdx] ?? 'Speak, friend…'}
           aria-label="Message Elrond"
           onChange={(e) => {
             setPopDismissed(false);
@@ -320,7 +354,7 @@ export function Composer(props: ComposerProps) {
             ) : null}
             {props.modelChip}
             {props.busy ? (
-              <span className="hint steer-cue">Steer the current turn ↪</span>
+              <span className="hint steer-cue">Steer at the next safe point ↪</span>
             ) : (
               props.hint ?? (
                 <span className="hint">

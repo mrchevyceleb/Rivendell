@@ -116,6 +116,9 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !editorOpen && !callAgent) {
+        // The drawer's own Escape handler owns mobile navigation. Letting this
+        // desktop shortcut run too persists railCollapsed=true underneath it.
+        if (isMobile || drawerOpen) return;
         const tag = (document.activeElement?.tagName ?? '').toLowerCase();
         if (tag === 'input' || tag === 'textarea' || (document.activeElement as HTMLElement | null)?.isContentEditable) return;
         setRailCollapsed(true);
@@ -123,7 +126,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editorOpen, callAgent]);
+  }, [editorOpen, callAgent, isMobile, drawerOpen]);
   useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
 
   // Land on the first agent (Chief of Staff) once the list loads, if the
@@ -133,16 +136,27 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     setView({ kind: 'chat', chatId: agents[0].home, lane: agents[0].engine });
   }, [view, agents]);
 
-  // Esc closes the mobile drawer; focus moves in on open and back on close.
+  // Esc closes the mobile drawer. Never focus its search input automatically:
+  // on phones that summons the keyboard over the agent list. Blur the composer
+  // and move accessibility focus to the non-text close button instead; do not
+  // restore textarea focus on close (that would reopen the keyboard).
   useEffect(() => {
     if (!drawerOpen) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrawerOpen(false); };
     window.addEventListener('keydown', onKey);
-    const prev = document.activeElement as HTMLElement | null;
-    document.querySelector<HTMLElement>('.bt-rail .bt-search-box input')?.focus();
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    const raf = window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('.bt-rail [aria-label="Close sidebar"]')?.focus({ preventScroll: true });
+    });
     return () => {
+      window.cancelAnimationFrame(raf);
       window.removeEventListener('keydown', onKey);
-      prev?.focus?.();
+      // The close button is removed with the drawer. On the next frame, put
+      // keyboard/AT focus on the newly rendered non-text hamburger — never the
+      // composer textarea, so the soft keyboard stays closed.
+      window.requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>('.bt-menubtn[aria-label="Open sidebar"]')?.focus({ preventScroll: true });
+      });
     };
   }, [drawerOpen]);
 
@@ -236,7 +250,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
             <button
               className="bt-menubtn"
               style={{ position: 'absolute', top: 10, left: 10, zIndex: 26 }}
-              onClick={() => (railCollapsed ? setRailCollapsed(false) : setDrawerOpen(true))}
+              onClick={() => {
+                (document.activeElement as HTMLElement | null)?.blur?.();
+                if (isMobile) setDrawerOpen(true);
+                else setRailCollapsed(false);
+              }}
               aria-label="Open sidebar"
               title="Open sidebar"
             >
