@@ -127,10 +127,11 @@ export const XAI_MODELS: { id: string; label: string }[] = [
   { id: 'grok-4.6', label: 'Grok 4.6' },
   { id: 'grok-4.5', label: 'Grok 4.5' },
 ];
-// xAI's Anthropic endpoint maps Claude Code's effort onto Grok's thinking
-// budget. Exposing the full range would mostly duplicate the same behavior;
-// offer the two meaningful levels, matching the GLM picker.
-export const XAI_EFFORTS = ['high', 'max'];
+// xAI's Anthropic endpoint accepts Claude Code's complete effort range and
+// maps it onto Grok's thinking budget. Keep every selectable tier visible;
+// collapsing this to High/Max made Low, Medium, and XHigh unreachable even
+// though the server already validates and forwards them.
+export const XAI_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function normalizeXaiModel(model: string): string {
   return XAI_MODELS.some((entry) => entry.id === model) ? model : DEFAULT_XAI_MODEL;
