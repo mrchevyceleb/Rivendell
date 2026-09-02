@@ -8,9 +8,9 @@
 #   powershell -ExecutionPolicy Bypass -File .\install-rivendell-handler.ps1 -Uninstall
 #
 # Registers `rivendell://` under HKCU (no admin / UAC needed) and writes a
-# sibling handler script that resolves `rivendell://open?winpath=...` to a
-# Start-Process call against the OneDrive-synced ASSISTANT-HUB folder for the
-# current user.
+# sibling handler script. `rivendell://open?winpath=...` opens workspace files
+# in their native apps; `rivendell://open?url=...` opens agent web links through
+# Windows' default browser association.
 
 [CmdletBinding()]
 param(
@@ -37,8 +37,9 @@ if (-not (Test-Path $installDir)) {
 
 # Handler script — receives the full `rivendell://open?...` URI as its only
 # argument and turns it into a Start-Process call. Path safety is enforced
-# server-side here (not in the browser) because anyone on the tailnet could
-# craft a malicious URI; we only honor paths under the user's ASSISTANT-HUB.
+# here (not in the browser) because anyone on the tailnet could craft a
+# malicious URI: web targets must be HTTP(S), and file targets must remain
+# under the user's ASSISTANT-HUB.
 $handlerSource = @'
 [CmdletBinding()]
 param([string]$Uri)
@@ -76,11 +77,13 @@ foreach ($segment in $queryString.Split('&')) {
 
 if ($pairs.ContainsKey('url')) {
     $target = $pairs['url']
-    if ($target -notmatch '^https?://') {
-        Write-Error "rivendell url= parameter must be http or https"
+    [Uri]$parsedTarget = $null
+    $validTarget = [Uri]::TryCreate($target, [UriKind]::Absolute, [ref]$parsedTarget)
+    if (-not $validTarget -or @('http', 'https') -notcontains $parsedTarget.Scheme.ToLowerInvariant()) {
+        Write-Error "rivendell url= parameter must be an absolute HTTP(S) URL"
         exit 1
     }
-    Start-Process -FilePath $target
+    Start-Process -FilePath $parsedTarget.AbsoluteUri
     return
 }
 
@@ -155,5 +158,5 @@ Write-Host ""
 Write-Host "Test from a browser address bar:"
 Write-Host "  $testUri"
 Write-Host ""
-Write-Host "If File Explorer opens to ASSISTANT-HUB, you're done. Future link"
-Write-Host "clicks in Rivendell's Hall will open files in their native app."
+Write-Host "If File Explorer opens to ASSISTANT-HUB, you're done. Future workspace"
+Write-Host "links open in native apps and agent web links use your default browser."

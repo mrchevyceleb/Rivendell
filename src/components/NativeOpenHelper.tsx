@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Download, ExternalLink, X } from 'lucide-react';
+import { NATIVE_OPEN_STORAGE_KEY } from '../chat/utils/proxyLinks';
 
 // Tiny on-demand panel that explains the one-time install needed for the
-// `rivendell://` URL scheme to launch files natively on a Windows PC. Linked
-// from the sidebar footer; only the trigger renders for non-Windows clients
-// (the installer is Windows-only). Dismissal is per-PC via localStorage so
-// the user isn't nagged after install.
-const STORAGE_KEY = 'rivendell.native-open.installed';
+// `rivendell://` URL scheme to launch files and web URLs through Windows'
+// default-app associations. Linked from the sidebar footer; only the trigger
+// renders on Windows (the installer is Windows-only). Dismissal is per-PC.
 
 function isWindows(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -17,7 +16,7 @@ export function NativeOpenHelper() {
   const [open, setOpen] = useState(false);
   const [acknowledged, setAcknowledged] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    return window.localStorage.getItem(STORAGE_KEY) === '1';
+    return window.localStorage.getItem(NATIVE_OPEN_STORAGE_KEY) === '1';
   });
 
   useEffect(() => {
@@ -37,13 +36,13 @@ export function NativeOpenHelper() {
         type="button"
         className="native-open-trigger"
         onClick={() => setOpen(true)}
-        title="Set up native file opening on this Windows PC"
+        title="Open files in native apps and web links in your default Windows browser"
       >
         <Download size={13} />
-        <span>{acknowledged ? 'Native open' : 'Set up native open'}</span>
+        <span>{acknowledged ? 'Default apps' : 'Set up default apps'}</span>
       </button>
       {open ? (
-        <div className="native-open-overlay" role="dialog" aria-label="Set up native file opening">
+        <div className="native-open-overlay" role="dialog" aria-label="Set up Windows default apps">
           <div className="native-open-panel">
             <button
               type="button"
@@ -54,10 +53,11 @@ export function NativeOpenHelper() {
             >
               <X size={16} />
             </button>
-            <h3>Open files natively on Windows</h3>
+            <h3>Open with your Windows defaults</h3>
             <p>
-              One-time setup per Windows PC. After this, every file link in Rivendell opens in
-              its default Windows app (Word, Excel, Explorer, etc.) instead of the in-app preview.
+              One-time setup per Windows PC. Agent web links open in your default browser, and
+              workspace files open in their default apps (Word, Excel, Explorer, etc.). If you
+              installed an older helper, rerun the latest installer to update or repair it.
             </p>
             <ol>
               <li>
@@ -74,19 +74,19 @@ export function NativeOpenHelper() {
                 <pre className="native-open-cmd">{'powershell -ExecutionPolicy Bypass -File .\\install-rivendell-handler.ps1'}</pre>
               </li>
               <li>
-                Refresh Rivendell. Click any file link in Hall — it should open in its native app.
-                The first click in each browser may show a one-time confirmation dialog.
+                Reopen Rivendell. Agent web links now use your default browser; workspace links
+                use their default apps. The first click may show a one-time confirmation dialog.
               </li>
             </ol>
             <p className="native-open-hint">
-              <ExternalLink size={12} /> Browser fallback (the small icon next to each link card) keeps
-              working without the installer; it streams the file over Tailscale.
+              <ExternalLink size={12} /> If the helper stops responding, Rivendell resets this setting
+              and opens that click normally so links never become dead ends.
             </p>
             <button
               type="button"
               className="native-open-ack"
               onClick={() => {
-                window.localStorage.setItem(STORAGE_KEY, '1');
+                window.localStorage.setItem(NATIVE_OPEN_STORAGE_KEY, '1');
                 setAcknowledged(true);
                 setOpen(false);
               }}

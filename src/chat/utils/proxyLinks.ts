@@ -9,6 +9,7 @@
 
 const LABEL = 'ASSISTANT-HUB';
 export const WIN_WORKSPACE_PREFIX = String.raw`C:\ASSISTANT-HUB`;
+export const NATIVE_OPEN_STORAGE_KEY = 'rivendell.native-open.installed.v2';
 const UNIX_WORKSPACE_PREFIXES = [
   '/home/mrchevyceleb/ASSISTANT-HUB',
   '/Users/mjohnst/ASSISTANT-HUB',
@@ -52,6 +53,90 @@ export function fireNativeScheme(url: string): void {
 export function isWindowsPlatform(): boolean {
   if (typeof navigator === 'undefined') return false;
   return /Windows/i.test(navigator.userAgent);
+}
+
+function isAndroidChrome(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  return /Android/i.test(ua)
+    && /Chrome\//i.test(ua)
+    && !/(?:EdgA|OPR|SamsungBrowser|Firefox|FxiOS)\//i.test(ua);
+}
+
+function isStandalonePwa(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.matchMedia?.('(display-mode: standalone)').matches === true
+    || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+}
+
+function androidViewIntent(url: URL): string {
+  const scheme = url.protocol.slice(0, -1);
+  const data = `${url.host}${url.pathname}${url.search}`;
+  return `intent://${data}#Intent;scheme=${scheme};action=android.intent.action.VIEW;end`;
+}
+
+function openWindowsDefaultBrowser(url: URL): void {
+  let handedOff = false;
+  const markHandedOff = () => { handedOff = true; };
+  const onVisibility = () => { if (document.visibilityState === 'hidden') markHandedOff(); };
+  window.addEventListener('blur', markHandedOff, { once: true });
+  document.addEventListener('visibilitychange', onVisibility);
+  fireNativeScheme(`rivendell://open?url=${encodeURIComponent(url.href)}`);
+
+  window.setTimeout(() => {
+    window.removeEventListener('blur', markHandedOff);
+    document.removeEventListener('visibilitychange', onVisibility);
+    if (handedOff || document.visibilityState === 'hidden') return;
+    // The acknowledged handler no longer responded. Make this click recoverable
+    // and let future links use their ordinary target=_blank path until setup is
+    // confirmed again. Top-level navigation is the only popup-safe async fallback.
+    try { window.localStorage.removeItem(NATIVE_OPEN_STORAGE_KEY); } catch { /* best effort */ }
+    window.location.assign(url.href);
+  }, 3000);
+}
+
+/** Open an agent-supplied external HTTP(S) link outside an installed PWA.
+ *  Returns true when the normal anchor navigation has been replaced.
+ *
+ *  Web platform APIs cannot choose the OS default browser directly. Windows
+ *  uses Rivendell's one-time native scheme handler (Start-Process honors the
+ *  default browser); Android hands the URL to ACTION_VIEW. Ordinary browser
+ *  tabs and same-origin links retain normal target=_blank behavior. */
+export function openExternalHttpLink(href: string): boolean {
+  if (!isStandalonePwa() || typeof window === 'undefined') return false;
+  let url: URL;
+  try {
+    url = new URL(href, window.location.href);
+  } catch {
+    return false;
+  }
+  if (!/^https?:$/.test(url.protocol) || url.origin === window.location.origin) return false;
+
+  if (isWindowsPlatform()) {
+    try {
+      if (window.localStorage.getItem(NATIVE_OPEN_STORAGE_KEY) !== '1') return false;
+    } catch {
+      return false;
+    }
+    openWindowsDefaultBrowser(url);
+    return true;
+  }
+
+  // Chrome's documented intent:// path is reliable on Android. Other Android
+  // PWA runtimes differ (and may replace the PWA with the fallback URL), so
+  // leave their ordinary target=_blank behavior untouched. Intent fragments
+  // reserve `#Intent`; links with fragments/credentials also keep the normal,
+  // lossless anchor path.
+  if (isAndroidChrome() && !url.hash && !url.username && !url.password) {
+    try {
+      window.location.assign(androidViewIntent(url));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }
 
 // Single entry point for "open this workspace path the right way for this

@@ -39,6 +39,7 @@ import { BotMark } from './GrokLogo';
 import { agentMark, agentColor, agentAvatarUrl, sameChatId, type Agent } from './agents';
 import { useLive } from '../chat/hooks/useLive';
 import type { HistoryItem } from './history';
+import { NativeOpenHelper } from '../components/NativeOpenHelper';
 
 export type RoomEntry = { key: string; label: string; icon: React.ReactNode };
 
@@ -381,6 +382,7 @@ export function BotRail(props: BotRailProps) {
             <button className="bt-plug-row" onClick={() => { props.onToggleTheme(); setPluginsOpen(false); }}>
               {props.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {props.theme === 'dark' ? 'Light mode' : 'Dark mode'}
             </button>
+            <NativeOpenHelper />
           </div>
         ) : null}
         <button className="bt-foot-row" onClick={() => setPluginsOpen((o) => !o)} aria-haspopup="menu" aria-expanded={pluginsOpen}>

@@ -3,6 +3,7 @@ import remarkGfm from 'remark-gfm';
 import { memo, useCallback, useContext, type MouseEvent, type ReactNode } from 'react';
 import {
   annotateWorkspaceMentions,
+  openExternalHttpLink,
   openWorkspaceLink,
   parseProxyHref,
   parseWorkspaceMentionText,
@@ -147,11 +148,20 @@ function MarkdownAnchor({ href, children }: { href?: string; children?: ReactNod
     );
   }
 
+  const onExternalClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    // Preserve modifier/middle-click semantics. A normal primary tap in an
+    // installed PWA escapes through the OS default-browser bridge when the
+    // platform supports it.
+    if (!href || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (openExternalHttpLink(href)) event.preventDefault();
+  };
+
   return (
     <a
       href={href}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={onExternalClick}
       style={{
         color: 'var(--r-elf-glow)',
         textDecoration: 'underline',
