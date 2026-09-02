@@ -99,7 +99,7 @@ export async function runRoutine(id: string): Promise<{ ran: boolean; reason?: s
   const agent = listAgents().find((a) => a.id === routine.agentId);
   if (!agent) return { ran: false, reason: 'agent was deleted' };
   const stamp = Date.now();
-  const text = `[routine: ${routine.name}]\n${routine.prompt}\n\n(Scheduled automation. Do the work. If nothing happened, produce ZERO chat: no reply, no NO_UPDATE, no "I checked," no watermark recap. End the turn with an empty message. Only post in the thread when something shipped, failed, or needs Matt.)`;
+  const text = `[routine: ${routine.name}]\n${routine.prompt}\n\n(Scheduled automation. Do the work. If nothing happened, reply with exactly NO_UPDATE and nothing else; Rivendell suppresses that protocol token from chat. Never emit a provider end-of-sequence marker, an empty-message marker, "I checked," or a watermark recap. Only post in the thread when something shipped, failed, or needs Matt.)`;
   const result = await sendToAgentHome(agent, text, {
     peerFrom: `⚙︎ ${routine.name}`,
     peerFromRole: 'automation',

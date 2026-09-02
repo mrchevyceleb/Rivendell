@@ -34,6 +34,24 @@ export type PersistedEvent = {
 export const EVENT_LOG_DIR = join(STATE_DIR, 'event-logs');
 export const MAX_EVENTS_PER_LOG = 2000;
 
+// Cheap process-local invalidation for the sidebar history result cache. Bump
+// only after a durable write/clear/trim succeeds; derived per-file entries still
+// validate with mtime+size.
+let revision = 0;
+export function eventLogRevision(): number {
+  return revision;
+}
+function bumpEventLogRevision(ev?: SessionEvent): void {
+  if (ev) {
+    const inner = ev.type === 'event' ? ev.event : ev;
+    const type = (inner as { type?: string } | undefined)?.type;
+    // One invalidation at semantic message/turn boundaries, not per streamed
+    // token. Otherwise an active agent forces a full directory scan every poll.
+    if (!['_user_echo', 'peer_message', 'assistant', 'result', 'turnEnd', 'compacted'].includes(type ?? '')) return;
+  }
+  revision += 1;
+}
+
 export function sanitizeKey(key: string): string {
   return key.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200);
 }
@@ -243,6 +261,7 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
   try {
     mkdirSync(EVENT_LOG_DIR, { recursive: true });
     appendFileSync(logPath(key), JSON.stringify(persisted) + '\n', 'utf8');
+    bumpEventLogRevision(persisted.ev);
     return true;
   } catch (err) {
     console.warn('[event-log-store] sync append failed', key, (err as Error).message);
@@ -260,6 +279,7 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
       try {
         await mkdir(EVENT_LOG_DIR, { recursive: true });
         await appendFile(path, line, 'utf8');
+        bumpEventLogRevision(persisted.ev);
       } catch (err) {
         console.warn('[event-log-store] append failed', key, (err as Error).message);
       }
@@ -283,6 +303,7 @@ export async function clearEventLog(key: string): Promise<void> {
         // A fresh start resets the whole thread, so the overflow archive goes
         // too — otherwise the next trim would splice pre-reset turns back in.
         await rm(archivePath(key), { force: true });
+        bumpEventLogRevision();
       } catch (err) {
         console.warn('[event-log-store] clear failed', key, (err as Error).message);
       }
@@ -356,6 +377,7 @@ export async function compactEventLog(key: string, compactedThroughSeq = 0): Pro
   try {
     await writeFile(tmp, kept, 'utf8');
     await rename(tmp, path);
+    bumpEventLogRevision();
     console.log(`[event-log-store] trimmed ${key}: archived ${dropped.length} event(s)`);
   } catch (err) {
     console.warn('[event-log-store] compact failed', key, (err as Error).message);

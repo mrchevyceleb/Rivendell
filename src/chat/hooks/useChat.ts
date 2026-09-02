@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 import { contextWindowForCodexModel } from '../codexModels';
-import { automationTurnInFlight, filterAutomationNoise } from '../utils/automationNoise';
+import { automationTurnInFlight, automationTurnPending, filterAutomationNoise } from '../utils/automationNoise';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
@@ -372,32 +372,60 @@ function shiftOutbound(key: string): QueuedOutbound | undefined {
   return item;
 }
 
+const CHAT_CACHE_VERSION = 'v5';
+
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
-  return `rivendell:chat-blocks:${conversationKey(cli, repoPath, chatId)}`;
+  // v5 preserves only completed routine deliverables as labeled boundaries. The
+  // durable server log rebuilds each thread once; future snapshots contain
+  // only what the user could actually see.
+  return `rivendell:chat-blocks:${CHAT_CACHE_VERSION}:${conversationKey(cli, repoPath, chatId)}`;
+}
+
+type StoredChatSnapshot = {
+  version: typeof CHAT_CACHE_VERSION;
+  blocks: ChatBlock[];
+  seq: number;
+};
+
+function parseStoredSnapshot(raw: string | null): StoredChatSnapshot | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<StoredChatSnapshot>;
+    if (parsed.version !== CHAT_CACHE_VERSION || !Array.isArray(parsed.blocks)) return null;
+    if (typeof parsed.seq !== 'number' || !Number.isFinite(parsed.seq) || parsed.seq < 0) return null;
+    // A persisted snapshot is settled: normalize stale streaming flags from
+    // interrupted legacy turns so they cannot suppress the typing indicator.
+    const blocks = parsed.blocks.map((block) => {
+      if (block.kind === 'text' && block.open) return { ...block, open: false };
+      if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
+      return block;
+    });
+    return { version: CHAT_CACHE_VERSION, blocks, seq: parsed.seq };
+  } catch {
+    return null;
+  }
+}
+
+function readStoredSnapshot(cli: CompanionId, repoPath: string, chatId = 'main'): StoredChatSnapshot | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return parseStoredSnapshot(localStorage.getItem(blocksStorageKey(cli, repoPath, chatId)));
+  } catch {
+    return null;
+  }
 }
 
 function readStoredBlocks(cli: CompanionId, repoPath: string, chatId = 'main'): ChatBlock[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(blocksStorageKey(cli, repoPath, chatId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    // Snapshots from before the close-on-interrupt fix can carry stale
-    // open/running flags from killed turns — normalize on read too, or they
-    // suppress the typing bubble until the next message_start.
-    if (Array.isArray(parsed)) {
-      return (parsed as ChatBlock[]).map((block) => {
-        if (block.kind === 'text' && block.open) return { ...block, open: false };
-        if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
-        return block;
-      });
-    }
-  } catch {}
-  return [];
+  return readStoredSnapshot(cli, repoPath, chatId)?.blocks ?? [];
 }
 
 function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
-  return blocks
+  // Never persist raw automation internals. A quiet routine is suppressed only
+  // after its terminal NO_UPDATE/EOS arrives; storing the raw mid-turn list let
+  // a tab switch restore an orphaned "Checking…" block without the automation
+  // trigger/terminal boundary that hides it. Real routine deliverables survive
+  // filterAutomationNoise as ordinary text.
+  return filterAutomationNoise(blocks)
     .filter((block) => !(block.kind === 'text' && isLegacyCompactionSummaryText(block.text)))
     .slice(-200)
     .map((block) => {
@@ -420,29 +448,21 @@ function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
 function writeStoredState(cli: CompanionId, repoPath: string, chatId: string, blocks: ChatBlock[], seq: number): void {
   if (typeof window === 'undefined') return;
   const key = blocksStorageKey(cli, repoPath, chatId);
+  const snapshot: StoredChatSnapshot = {
+    version: CHAT_CACHE_VERSION,
+    blocks: blocksForStorage(blocks),
+    seq: Math.max(0, seq),
+  };
   try {
-    localStorage.setItem(key, JSON.stringify(blocksForStorage(blocks)));
-    localStorage.setItem(`${key}:seq`, String(seq));
+    // One atomic localStorage value: another tab can never observe filtered
+    // blocks paired with a cursor from a different replay state.
+    localStorage.setItem(key, JSON.stringify(snapshot));
   } catch (err) {
     // A transient write failure (quota, serialization) must NEVER destroy the
-    // existing cache — deleting it strands the user with a permanently blank
-    // chat (the server only replays events newer than the persisted seq). Keep
-    // whatever was last stored; the server log is the durable backstop and a
-    // reconnect with an empty cache rehydrates via a full replay.
+    // existing cache. Keep whatever was last stored; a missing snapshot asks
+    // the durable server log for a full replay.
     console.warn('[chat] persist failed, keeping prior cache:', (err as Error).message);
   }
-}
-
-function readStoredSeq(cli: CompanionId, repoPath: string, chatId = 'main'): number {
-  if (typeof window === 'undefined') return 0;
-  try {
-    const raw = localStorage.getItem(blocksStorageKey(cli, repoPath, chatId) + ':seq');
-    if (raw) {
-      const n = Number(raw);
-      if (Number.isFinite(n)) return n;
-    }
-  } catch {}
-  return 0;
 }
 
 function restoreBlocksWithUniqueIds(blocks: ChatBlock[]): ChatBlock[] {
@@ -537,11 +557,18 @@ export function useChat(opts: {
   const effortRef = useRef<string | undefined>(effort);
   effortRef.current = effort;
   const [blocks, setBlocks] = useState<ChatBlock[]>(() => initialStoredBlocks(enabled, repo, cli, chatId));
+  /** True between a user send/steer and the next turnStart/turnEnd/error. */
+  const pendingSendRef = useRef(false);
+  /** Guidance waiting behind a natural turnEnd. Keep the UI streaming across
+   * that preceding turnEnd until the server accepts/rejects the queued steer. */
+  const queuedSteerRef = useRef<string | null>(null);
   // `chatId` already carries `__acct__<account>` when the lane is pinned.
   const restoreKey = enabled && repo ? conversationKey(cli, repo.path, chatId) : '';
   const restoreKeyRef = useRef(restoreKey);
   if (restoreKeyRef.current !== restoreKey) {
     restoreKeyRef.current = restoreKey;
+    queuedSteerRef.current = null;
+    pendingSendRef.current = false;
     setBlocks(initialStoredBlocks(enabled, repo, cli, chatId));
   }
   const [status, setStatus] = useState<Status>('idle');
@@ -549,11 +576,6 @@ export function useChat(opts: {
   // without depending on render closure (used by error-suppression logic).
   const statusRef = useRef<Status>('idle');
   statusRef.current = status;
-  /** True between a user send/steer and the next turnStart/turnEnd/error.
-   *  Lets us surface errors that happen during the brief window after
-   *  send() before the server flips us to 'streaming' (e.g. respawn
-   *  failures after an idle CLI close). */
-  const pendingSendRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   // Window size for the active CLI. Seeded from the per-CLI default and
@@ -669,8 +691,13 @@ export function useChat(opts: {
     if (!repo) return;
     const key = conversationKey(cli, repo.path, chatId);
     if (restoredKeyRef.current !== key) return;
+    // Keep the previous settled envelope while a routine is active or replaying.
+    // In gaps between content blocks no text/tool flag may be open; only ready
+    // proves the terminal turnEnd/ready boundary landed. Advancing sooner would
+    // strand its eventual deliverable without the automation boundary.
+    if (status !== 'ready' && automationTurnPending(blocks)) return;
     writeStoredState(cli, repo.path, chatId, blocks, lastSeqRef.current);
-  }, [blocks, repo?.path, cli, chatId]);
+  }, [blocks, status, repo?.path, cli, chatId]);
 
   useEffect(() => {
     if (!enabled || !repo) return;
@@ -684,17 +711,15 @@ export function useChat(opts: {
     setUsage(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
-    const stored = restoreBlocksWithUniqueIds(readStoredBlocks(cli, repo.path, chatId));
+    const snapshot = readStoredSnapshot(cli, repo.path, chatId);
+    const stored = restoreBlocksWithUniqueIds(snapshot?.blocks ?? []);
     setBlocks(stored);
     turnIdRef.current = '';
     reconnectAttemptRef.current = 0;
-    // Decide replay start from whether we actually have cached blocks, NOT from
-    // the persisted seq alone. If the cache is empty (wiped, quota error, a
-    // brand-new browser, or a different device), ask the server for a FULL
-    // replay (sinceSeq=0 → every event, seq starts at 1) so the entire
-    // conversation rehydrates from the durable event log. Trusting a stale
-    // persisted seq here is exactly what stranded users with a blank chat.
-    lastSeqRef.current = stored.length > 0 ? readStoredSeq(cli, repo.path, chatId) : 0;
+    // The atomic envelope distinguishes a valid, fully-filtered empty thread
+    // from a missing/corrupt cache. Missing v5 state asks for a full replay;
+    // an intentionally empty settled snapshot safely resumes at its cursor.
+    lastSeqRef.current = snapshot?.seq ?? 0;
     // Mark this conversation as restored so the persistence-write effect can
     // safely begin saving updates back to storage.
     restoredKeyRef.current = conversationKey(cli, repo.path, chatId);
@@ -754,8 +779,12 @@ export function useChat(opts: {
         let msg: any;
         try { msg = JSON.parse(String(e.data)); }
         catch { return; }
-        // Track every server event's sequence so reconnect can resume.
-        if (typeof msg.seq === 'number' && msg.seq > lastSeqRef.current) {
+        // Track every server event's sequence so reconnect can resume. A
+        // cross-tab snapshot may jump this cursor ahead while this socket still
+        // drains an older replay queue; discard those covered events instead of
+        // reducing them twice into duplicate blocks.
+        if (typeof msg.seq === 'number') {
+          if (msg.seq <= lastSeqRef.current) return;
           lastSeqRef.current = msg.seq;
         }
         if (typeof msg.latestSeq === 'number' && msg.latestSeq > lastSeqRef.current) {
@@ -810,6 +839,7 @@ export function useChat(opts: {
         }
         else if (msg.type === 'turnStart') {
           if (!socketReady) return; // replayed control message from the hello buffer
+          if (msg.clientMsgId && queuedSteerRef.current === msg.clientMsgId) queuedSteerRef.current = null;
           if (initialSendInFlightRef.current) {
             initialSendInFlightRef.current = false;
             initialMessageRef.current = null;
@@ -823,8 +853,15 @@ export function useChat(opts: {
         }
         else if (msg.type === 'turnEnd') {
           if (!socketReady) return; // replayed control message from the hello buffer
-          pendingSendRef.current = false;
+          window.dispatchEvent(new Event('rivendell:history-changed'));
           compactingRef.current = false;
+          if (queuedSteerRef.current !== null) {
+            // This closes the PRECEDING turn. The server still owns queued
+            // guidance and will send a correlated turnStart or rejection.
+            setStatus('streaming');
+            return;
+          }
+          pendingSendRef.current = false;
           const leftover = outboundQueue.get(conversationKey(cli, repo.path, chatId));
           if (leftover && leftover.length > 0) {
             flushOutboundRef.current();
@@ -850,6 +887,7 @@ export function useChat(opts: {
           });
         }
         else if (msg.type === 'freshStarted') {
+          queuedSteerRef.current = null;
           setBlocks([]);
           setUsage(null);
           setError(null);
@@ -861,6 +899,7 @@ export function useChat(opts: {
           }
         }
         else if (msg.type === 'sessionClosed') {
+          queuedSteerRef.current = null;
           // The CLI idle-closed (or exited mid-turn). Don't strand the user on
           // a dead-looking "asleep" banner — re-bind transparently, exactly
           // like samwise-2. bindSession replies with a fresh ready/streaming.
@@ -880,6 +919,10 @@ export function useChat(opts: {
           // flag NEVER cleared and "compacting context" stuck for the whole turn.
           const ev = msg.event;
           const evType = ev?.type;
+          if (evType === '_user_echo' && ev?.clientMsgId && queuedSteerRef.current === ev.clientMsgId) {
+            queuedSteerRef.current = null;
+            pendingSendRef.current = false;
+          }
           const innerType = evType === 'stream_event' ? ev?.event?.type : evType;
           if (evType === 'system' && ev?.subtype === 'status' && ev?.status === 'compacting') {
             compactingRef.current = true;
@@ -969,6 +1012,14 @@ export function useChat(opts: {
             });
           }
         }
+        else if (msg.type === 'steerRejected') {
+          if (typeof msg.clientMsgId === 'string' && queuedSteerRef.current === msg.clientMsgId) {
+            queuedSteerRef.current = null;
+            pendingSendRef.current = false;
+            setError(msg.message || 'Queued guidance was not delivered.');
+            setStatus(msg.busy ? 'streaming' : 'ready');
+          }
+        }
         else if (msg.type === 'error') {
           // Claude Code writes this once per unknown model id per process.
           // xAI/Z.ai ids are off its registry by design; the turn still runs.
@@ -986,6 +1037,7 @@ export function useChat(opts: {
             statusRef.current === 'connecting' ||
             pendingSendRef.current;
           if (inFlight) {
+            if (msg.code === 'STEER_REJECTED' && (!msg.clientMsgId || queuedSteerRef.current === msg.clientMsgId)) queuedSteerRef.current = null;
             pendingSendRef.current = false;
             setError(msg.message);
           } else {
@@ -999,6 +1051,11 @@ export function useChat(opts: {
         // orphan closing later must not open yet another connection.
         if (wsRef.current && wsRef.current !== ws) return;
         if (initialSendInFlightRef.current) initialSendInFlightRef.current = false;
+        if (queuedSteerRef.current !== null) {
+          queuedSteerRef.current = null;
+          pendingSendRef.current = false;
+          setError('Queued guidance was canceled by the connection change — send it again.');
+        }
         const keepStreaming =
           (statusRef.current === 'streaming' || pendingSendRef.current) &&
           reconnectAttemptRef.current < 3;
@@ -1112,22 +1169,19 @@ export function useChat(opts: {
     window.addEventListener('online', reconcile);
     window.addEventListener('pageshow', reconcile);
 
-    // Cross-browser-tab sync: when ANOTHER tab on the same conversation writes
-    // newer state, adopt it here instead of letting this (possibly stale) tab
-    // later overwrite the shared cache with older blocks. We key off the `:seq`
-    // companion entry because writeStoredState writes blocks first, then seq —
-    // so by the time seq fires, the blocks value is already current. Skip while
-    // this tab has a turn in flight so we don't clobber a live stream.
-    const seqStorageKey = blocksStorageKey(cli, repo.path, chatId) + ':seq';
+    // Cross-browser-tab sync: blocks + cursor are one atomic envelope, so a
+    // tab can adopt another tab's settled snapshot without mixing replay states.
+    // Any older events still queued on this socket are discarded by the seq
+    // guard in onmessage above.
+    const snapshotStorageKey = blocksStorageKey(cli, repo.path, chatId);
     const onStorage = (e: StorageEvent) => {
       if (!isCurrentConnection()) return;
-      if (e.key !== seqStorageKey || e.newValue == null) return;
-      const incoming = Number(e.newValue);
-      if (!Number.isFinite(incoming) || incoming <= lastSeqRef.current) return;
+      if (e.key !== snapshotStorageKey || e.newValue == null) return;
+      const snapshot = parseStoredSnapshot(e.newValue);
+      if (!snapshot || snapshot.seq <= lastSeqRef.current) return;
       if (statusRef.current === 'streaming' || pendingSendRef.current) return;
-      const fresh = restoreBlocksWithUniqueIds(readStoredBlocks(cli, repo.path, chatId));
-      setBlocks(fresh);
-      lastSeqRef.current = incoming;
+      setBlocks(restoreBlocksWithUniqueIds(snapshot.blocks));
+      lastSeqRef.current = snapshot.seq;
     };
     window.addEventListener('storage', onStorage);
 
@@ -1172,6 +1226,8 @@ export function useChat(opts: {
 
     return () => {
       teardownRef.current = true;
+      queuedSteerRef.current = null;
+      pendingSendRef.current = false;
       forceReconnectRef.current = () => {};
       window.clearInterval(watchdog);
       if (reconcileTimer !== null) {
@@ -1249,14 +1305,15 @@ export function useChat(opts: {
 
   const stop = () => {
     if (!repo) return;
+    queuedSteerRef.current = null;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: 'stop', cli, repo: repo.path, chatId }));
   };
 
-  /** Stop the current turn and immediately fire a new prompt. The model sees
-   *  it as a fresh turn that resumes the saved session_id, so the
-   *  conversation continues but Sam stops doing whatever he was doing. */
+  /** Queue guidance through the server's non-destructive steer path. Claude-
+   *  family engines use native streamed steering after the current tool/safe
+   *  point; Codex/Banana receive it after the current turn. Only Stop kills. */
   const steer = (
     text: string,
     images?: ChatSendImage[],
@@ -1272,10 +1329,10 @@ export function useChat(opts: {
       return;
     }
     const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
-    setBlocks((prev) => [
-      ...prev,
-      { kind: 'user', id: id(), text, images: imagePreviews(images), imageCount: images?.length, clientMsgId, ts: Date.now() },
-    ]);
+    // Do not render guidance as delivered until the server actually writes it
+    // after the current turn. If the wait is superseded/closed/times out there
+    // is no ghost user bubble claiming the agent saw text it never received.
+    queuedSteerRef.current = clientMsgId;
     pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current }));
@@ -1288,7 +1345,7 @@ export function useChat(opts: {
   const reconnect = () => forceReconnectRef.current();
 
   // Automation turns (routines) stay silent unless the turn produced a real
-  // deliverable message. Raw blocks still persist untouched to storage.
+  // deliverable message. Persistence stores this same visible projection.
   const visibleBlocks = useMemo(() => filterAutomationNoise(blocks), [blocks]);
   const automationBusy = useMemo(() => automationTurnInFlight(blocks), [blocks]);
 

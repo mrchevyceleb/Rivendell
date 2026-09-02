@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import {
   isAutomationPeerEvent,
   isExactNoUpdate,
+  isModelEosToken,
   isQuietRoutineReply,
   isRoutinePromptText,
 } from './routineNoise.ts';
@@ -32,14 +33,11 @@ import {
 export const WINDOW_TURNS = 50;
 /** Clip a single visible turn so one essay cannot blow the window. */
 export const MAX_TURN_CHARS = 3000;
-/** Grok overwrite needs at least one aged-out turn. Raw overflow is already
- *  in the compact slot; this is only the generate-and-replace threshold. */
-export const MIN_OVERFLOW_TURNS = 3;
-/** Even terse overflow eventually folds (don't wait forever on "ok"s). */
-export const HARD_OVERFLOW_TURNS = 40;
-/** Don't bother Grok with a handful of short lines. Unmerged overflow still
- *  sits in the compact slot so history − last50 is never dropped. */
-export const MIN_OVERFLOW_CHARS = 2000;
+/** Fold aged-out conversation in predictable 50-message batches. The last
+ *  50 remain the working window; the next 50 accumulate visibly behind that
+ *  window before one rolling-compact overwrite. Never compact merely because
+ *  a single answer was long or the raw event log is busy. */
+export const COMPACT_BATCH_TURNS = 50;
 /** Skip --resume of a jsonl that is already a tool-novel dump. Spawn-time only. */
 export const JSONL_RESUME_SKIP_BYTES = 64 * 1024;
 /** Raw unmerged overflow in the compact slot is bounded so a restart cannot
@@ -101,6 +99,9 @@ function flushPending(
 ): boolean {
   const body = pending.trim();
   if (!body) return afterAutomation;
+  // Provider wire protocol never enters the model-visible conversation,
+  // regardless of whether the originating turn was scheduled automation.
+  if (isModelEosToken(body)) return false;
   if (afterAutomation && (isQuietRoutineReply(body) || isExactNoUpdate(body))) return false;
   turns.push({ role: 'assistant', text: clipTurn(body), seq });
   return false;
@@ -232,9 +233,7 @@ export function overflowChars(turns: VisibleTurn[]): number {
 }
 
 export function shouldCompactOverflow(overflow: VisibleTurn[]): boolean {
-  if (overflow.length >= HARD_OVERFLOW_TURNS) return true;
-  if (overflow.length >= MIN_OVERFLOW_TURNS && overflowChars(overflow) >= MIN_OVERFLOW_CHARS) return true;
-  return false;
+  return overflow.length >= COMPACT_BATCH_TURNS;
 }
 
 /** Aged-out turns for the compact slot (history − last 50). Never the tail. */

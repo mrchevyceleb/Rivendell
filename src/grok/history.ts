@@ -3,7 +3,7 @@
 // event logs) and groups items Grok-style: Today / Yesterday / Previous 7
 // days / Older. Polls lightly so a title appears after a first message lands.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiJson } from '../data/api';
 
 export type HistoryItem = {
@@ -47,17 +47,34 @@ export function groupHistory(items: HistoryItem[]): HistoryGroup[] {
 
 export function useChatHistory(): { items: HistoryItem[]; groups: HistoryGroup[]; reload: () => void } {
   const [items, setItems] = useState<HistoryItem[]>([]);
+  const requestSeq = useRef(0);
 
   const reload = useCallback(() => {
+    const request = ++requestSeq.current;
     apiJson<{ items: HistoryItem[] }>('/api/chat/history')
-      .then((r) => setItems(r.items ?? []))
+      .then((r) => { if (request === requestSeq.current) setItems(r.items ?? []); })
       .catch(() => { /* history is best-effort */ });
   }, []);
 
   useEffect(() => {
     reload();
+    let settleTimer: number | null = null;
+    const onChanged = () => {
+      reload();
+      // Event-log appends are queued just behind the live WS event. Recheck once
+      // after the disk write lands; result-cache revision prevents stale reuse.
+      if (settleTimer !== null) window.clearTimeout(settleTimer);
+      settleTimer = window.setTimeout(reload, 350);
+    };
+    window.addEventListener('rivendell:history-changed', onChanged);
+    // Semantic writes invalidate the server cache and active turns signal us
+    // above. This slower poll only catches out-of-process filesystem changes.
     const iv = window.setInterval(reload, 15_000);
-    return () => window.clearInterval(iv);
+    return () => {
+      window.clearInterval(iv);
+      if (settleTimer !== null) window.clearTimeout(settleTimer);
+      window.removeEventListener('rivendell:history-changed', onChanged);
+    };
   }, [reload]);
 
   const groups = useMemo(() => groupHistory(items), [items]);

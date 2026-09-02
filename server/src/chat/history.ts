@@ -7,9 +7,9 @@
 
 import { readdir, stat, open } from 'node:fs/promises';
 import { join } from 'node:path';
-import { EVENT_LOG_DIR } from './event-log-store.ts';
+import { EVENT_LOG_DIR, eventLogRevision } from './event-log-store.ts';
 import { discoverRepos } from './repos.ts';
-import { eventText, eventType, isAutomationPeerEvent, isQuietRoutineReply, isRoutinePromptText } from './routineNoise.ts';
+import { eventTexts, hasFailureSignal, isAutomationPeerEvent, isQuietRoutineReply, isRoutinePromptText } from './routineNoise.ts';
 
 export type ChatHistoryItem = {
   chatId: string;
@@ -84,39 +84,90 @@ function extractTitle(raw: string): string | null {
   return null;
 }
 
-// Pull the LAST user-or-assistant text out of a log tail — the conversation
-// preview line. Same tolerant shapes as extractTitle.
+// Pull the final visible text BLOCK out of a log tail. A conversation-window
+// extractor intentionally concatenates progress + final prose; the sidebar must
+// instead show the conclusion. This handles Claude full messages and
+// Codex/Banana stream-only content blocks.
 function extractPreview(rawTail: string): string | undefined {
-  const lines = rawTail.split('\n');
-  let skipQuietTurn = false;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line || !line.includes('"text"')) continue;
+  let latest = '';
+  let afterAutomation = false;
+  let automationTexts: string[] = [];
+  const openText = new Map<number, string>();
+
+  const accept = (text: unknown) => {
+    if (typeof text !== 'string') return;
+    const trimmed = text.trim();
+    if (!trimmed || isRoutinePromptText(trimmed)) return;
+    if (afterAutomation) automationTexts.push(trimmed);
+    else latest = trimmed;
+  };
+  const finishAutomation = () => {
+    if (!afterAutomation) return;
+    const final = automationTexts.at(-1) ?? '';
+    if (final && !isQuietRoutineReply(final)) {
+      latest = final;
+    } else {
+      // A quiet sign-off must not bury a real failure/delivery reported one
+      // block earlier. This mirrors the live client automation filter.
+      const actionable = [...automationTexts].slice(0, -1).reverse().find(hasFailureSignal);
+      if (actionable) latest = actionable;
+    }
+    automationTexts = [];
+    afterAutomation = false;
+  };
+
+  for (const line of rawTail.split('\n')) {
+    if (!line) continue;
     try {
       const parsed = JSON.parse(line);
-      const t = eventType(parsed);
-      if (t === 'peer_message' && isAutomationPeerEvent(parsed)) {
-        skipQuietTurn = false;
+      const outer = parsed?.ev ?? parsed;
+      const inner = outer?.event ?? outer;
+      const type = inner?.type;
+      if (type === '_user_echo') {
+        finishAutomation();
+        openText.clear();
+        accept(inner.text);
         continue;
       }
-      if (t === '_user_echo' || t === 'user') skipQuietTurn = false;
-      const text = eventText(parsed);
-      if (!text) continue;
-      if (isRoutinePromptText(text) || isQuietRoutineReply(text)) {
-        skipQuietTurn = true;
+      if (type === 'peer_message') {
+        finishAutomation();
+        openText.clear();
+        if (isAutomationPeerEvent(parsed)) {
+          afterAutomation = true;
+          continue;
+        }
+        accept(inner.text);
         continue;
       }
-      if (skipQuietTurn) continue;
-      const clean = stripMarkdown(text);
-      // Slice by code points, not UTF-16 units — a mid-emoji cut renders as
-      // the replacement glyph in the rail.
-      if (clean) {
-        const chars = [...clean];
-        return chars.length <= 110 ? clean : `${chars.slice(0, 110).join('').replace(/\s+\S*$/, '')}…`;
+      if (type === 'assistant') {
+        openText.clear();
+        for (const text of eventTexts(parsed)) accept(text);
+        continue;
       }
-    } catch { /* keep scanning */ }
+      if (type === 'stream_event') {
+        const stream = inner.event;
+        if (stream?.type === 'message_start') openText.clear();
+        else if (stream?.type === 'content_block_start' && stream.content_block?.type === 'text' && typeof stream.index === 'number') {
+          openText.set(stream.index, typeof stream.content_block.text === 'string' ? stream.content_block.text : '');
+        } else if (stream?.type === 'content_block_delta' && stream.delta?.type === 'text_delta' && typeof stream.index === 'number' && openText.has(stream.index)) {
+          openText.set(stream.index, (openText.get(stream.index) ?? '') + String(stream.delta.text ?? ''));
+        } else if (stream?.type === 'content_block_stop' && typeof stream.index === 'number') {
+          const text = openText.get(stream.index);
+          openText.delete(stream.index);
+          accept(text);
+        }
+        continue;
+      }
+      if (type === 'result' || type === 'turnEnd') finishAutomation();
+    } catch { /* partial first/trailing line — keep scanning */ }
   }
-  return undefined;
+  // Do NOT flush an unfinished automation at EOF. A history scan can land
+  // mid-turn; keep the prior settled preview until result/turnEnd or a later
+  // conversation boundary proves the routine completed.
+  const clean = stripMarkdown(latest);
+  if (!clean) return undefined;
+  const chars = [...clean];
+  return chars.length <= 110 ? clean : `${chars.slice(0, 110).join('').replace(/\s+\S*$/, '')}…`;
 }
 
 /** Preview text is one plain line — drop markdown syntax so the rail never
@@ -174,23 +225,31 @@ const CACHE_MAX = 400;
 
 // The sidebar polls every 15s and several callers can land at once; one
 // directory walk per few seconds is plenty for a conversation list.
-const RESULT_TTL_MS = 5_000;
-let resultCache: { at: number; items: ChatHistoryItem[] } | null = null;
-let inFlight: Promise<ChatHistoryItem[]> | null = null;
+const RESULT_TTL_MS = 15_000;
+let resultCache: { at: number; revision: number; items: ChatHistoryItem[] } | null = null;
+let inFlight: { revision: number; promise: Promise<ChatHistoryItem[]> } | null = null;
 
 export async function listChatHistory(): Promise<ChatHistoryItem[]> {
   const now = Date.now();
-  if (resultCache && now - resultCache.at < RESULT_TTL_MS) return resultCache.items;
-  if (inFlight) return inFlight;
-  inFlight = scanChatHistory()
+  const revision = eventLogRevision();
+  if (resultCache && resultCache.revision === revision && now - resultCache.at < RESULT_TTL_MS) return resultCache.items;
+  if (inFlight) {
+    if (inFlight.revision === revision) return inFlight.promise;
+    // A semantic append landed during the older scan. Let that scan release
+    // its file handles, then immediately run/join one for the new revision.
+    return inFlight.promise.then(() => listChatHistory());
+  }
+  const scanRevision = revision;
+  const promise = scanChatHistory()
     .then((items) => {
-      resultCache = { at: Date.now(), items };
+      resultCache = { at: Date.now(), revision: scanRevision, items };
       return items;
     })
     .finally(() => {
-      inFlight = null;
+      if (inFlight?.promise === promise) inFlight = null;
     });
-  return inFlight;
+  inFlight = { revision: scanRevision, promise };
+  return promise;
 }
 
 async function scanChatHistory(): Promise<ChatHistoryItem[]> {
@@ -292,7 +351,9 @@ async function scanChatHistory(): Promise<ChatHistoryItem[]> {
           const head = Buffer.alloc(headSize);
           await fh.read(head, 0, headSize, 0);
           title = extractTitle(head.toString('utf8'));
-          const tailSize = Math.min(c.size, 48 * 1024);
+          // 512 KB covers the largest configured model answer in practice and
+          // keeps a stream-only final delta + its content_block_start together.
+          const tailSize = Math.min(c.size, 512 * 1024);
           const tail = Buffer.alloc(tailSize);
           await fh.read(tail, 0, tailSize, Math.max(0, c.size - tailSize));
           const tailText = tail.toString('utf8');

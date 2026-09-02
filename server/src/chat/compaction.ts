@@ -23,6 +23,7 @@ import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { flushEventLog, loadEventLogForCompactionSync } from './event-log-store.ts';
 import {
+  COMPACT_BATCH_TURNS,
   WINDOW_TURNS,
   assembleForeverTurn,
   extractVisibleTurns,
@@ -450,7 +451,10 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
     for (let batch = 0; batch < 1; batch++) {
       overflowNew = overflow.filter((t) => t.seq > lastCompactedSeq);
       if (overflowNew.length === 0) break;
-      const overflowBatch = takeOverflowBatch(overflowNew);
+      // One overwrite consumes exactly one 50-message batch. Catch-up overflow
+      // remains durable and is folded by later batches rather than silently
+      // changing cadence after downtime.
+      const overflowBatch = takeOverflowBatch(overflowNew.slice(0, COMPACT_BATCH_TURNS));
       if (overflowBatch.length === 0) break;
       console.warn(
         `[compaction] ${key}: ${overflowBatch.length} visible turns past the ${WINDOW_TURNS}-window (${overflowChars(overflowBatch)} chars, overflow) — overwriting rolling compact`,

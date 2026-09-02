@@ -241,14 +241,15 @@ export function ToolCard({ block }: { block: Extract<ChatBlock, { kind: 'tool' }
 // ── compaction marker — the forever-thread's "context rotated" line ────
 function PeerBubble({ block }: { block: Extract<ChatBlock, { kind: 'peer' }> }) {
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
+  const routineResult = block.fromRole === 'automation-result';
   // Strip the team-bus envelope line so the bubble shows just the words.
   const text = block.text.replace(/^\[message from teammate[^\]]*\]\n?/, '');
   return (
-    <div className="bt-peer">
+    <div className={`bt-peer${routineResult ? ' routine-result' : ''}`}>
       <span className="bt-peer-head">
         <span className="bt-peer-disc">{initial}</span>
         <span className="bt-peer-name">{block.from}</span>
-        {block.fromRole ? <span className="bt-peer-role">→ to you</span> : <span className="bt-peer-role">→ to you</span>}
+        <span className="bt-peer-role">{routineResult ? 'routine update' : '→ to you'}</span>
       </span>
       <div className="bt-peer-body">{text}</div>
     </div>

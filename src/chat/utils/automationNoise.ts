@@ -5,6 +5,7 @@
 // rendered blocks (live stream, replay, and the localStorage cache alike).
 
 import type { ChatBlock } from '../data/types';
+import { isModelEosToken } from './routineNoise';
 
 const GEAR = '⚙';
 
@@ -26,6 +27,9 @@ function isExactNoUpdate(text: string): boolean {
  *  errors"): the negator must sit within 3 words of the failure word —
  *  "No updates because the API failed" is NOT negated. */
 const NEGATED_FAILURE = /\b(?:no|nothing|never|zero|without)\s+(?:[\w-]+\s+){0,3}(?:failed|failures?|errors?|broken|timed out|timeouts?)\b/;
+const STATUS_QUERY = /\b(?:check(?:ing)?|looking|searching|querying|verifying|inspecting|pulling|finding)\b[^.;:!\n]{0,100}(?:(?:\b(?:whether|if|for|any)\b[^.;:!\n]{0,100}\b(?:failed|failures?|errors?|broken|timed out|timeouts?|posted|shipped|deployed|sent|published|refreshed)\b)|(?:\b(?:failed|failures?|errors?|broken|timeouts?|posted|shipped|deployed|sent|published|refreshed)\s+(?:rows?|items?|jobs?|records?|updates?)\b))/;
+const ROUTINE_PROGRESS = /(?:^|[.!?]\s+)(?:i(?:'|’)ll|i will|i(?:'|’)m|i am)?\s*(?:check(?:ing)?|pulling|looking|searching|querying|verifying|inspecting|finding|hunting|posting|sending|updating|bumping)\b/;
+const NEGATED_DELIVERY = /\b(?:no|nothing|zero|without|not|never|previously)\b[^.;!\n]{0,40}\b(?:posted|shipped|deployed|sent|published|refreshed)\b/;
 
 /** Failure/delivery signals that always beat a quiet pattern. Negation- and
  *  context-aware: "no jobs failed" and "previously posted items are
@@ -33,11 +37,17 @@ const NEGATED_FAILURE = /\b(?:no|nothing|never|zero|without)\s+(?:[\w-]+\s+){0,3
 function hasFailureSignal(text: string): boolean {
   const lower = normalizeReply(text);
   if (/\b(needs you|needs matt|needs attention|action needed)\b/.test(lower)) return true;
-  if (/\b(failed|failures?|errors?|broken|timed out|timeouts?)\b/.test(lower) && !NEGATED_FAILURE.test(lower)) return true;
-  if (/\b(posted|shipped|deployed|sent|published|refreshed)\b/.test(lower)
-    && !/\b(previously|not|never)\b[^.;!\n]{0,20}\b(posted|shipped|deployed|sent|published|refreshed)\b/.test(lower)
-    && !/\b(posted|shipped|deployed|sent|published|refreshed)\b[^.;!\n]{0,30}\bunchanged\b/.test(lower)) return true;
-  return false;
+  const clauses = lower.split(/[.;!?\n]+/).map((part) => part.trim()).filter(Boolean);
+  return clauses.some((clause) => {
+    const statusQuery = STATUS_QUERY.test(clause);
+    if (/\b(failed|failures?|errors?|broken|timed out|timeouts?)\b/.test(clause)
+      && !NEGATED_FAILURE.test(clause)
+      && !statusQuery) return true;
+    return /\b(posted|shipped|deployed|sent|published|refreshed)\b/.test(clause)
+      && !NEGATED_DELIVERY.test(clause)
+      && !statusQuery
+      && !/\b(posted|shipped|deployed|sent|published|refreshed)\b[^\n]{0,30}\bunchanged\b/.test(clause);
+  });
 }
 
 /** No-op automation replies: hide these, keep real ship/fail/needs-Matt text. */
@@ -48,7 +58,8 @@ export function isQuietRoutineReply(text: string): boolean {
   // Failure/delivery signals always win over the quiet patterns below —
   // "Stayed silent because of an API error" must surface, not vanish.
   if (hasFailureSignal(t)) return false;
-  if (isExactNoUpdate(t)) return true;
+  if (isExactNoUpdate(t) || isModelEosToken(t)) return true;
+  if (ROUTINE_PROGRESS.test(lower) && lower.length < 600) return true;
   if (/^quiet\b/.test(lower)) return true;
   if (/\bstayed silent\b/.test(lower)) return true;
   if (/\bno new shipped rows\b/.test(lower)) return true;
@@ -59,11 +70,31 @@ export function isQuietRoutineReply(text: string): boolean {
   return false;
 }
 
-function isAutomationPeer(block: ChatBlock): boolean {
+function isAutomationPeer(block: ChatBlock): block is Extract<ChatBlock, { kind: 'peer' }> {
   if (block.kind !== 'peer') return false;
-  if ((block.fromRole ?? '').trim().toLowerCase() === 'automation') return true;
+  const role = (block.fromRole ?? '').trim().toLowerCase();
+  // A completed routine deliverable is a visible provenance boundary, not a
+  // new trigger to suppress on the next filter/storage pass.
+  if (role === 'automation-result') return false;
+  if (role === 'automation') return true;
   if (block.from.trim().startsWith(GEAR)) return true;
   return isRoutinePromptText(block.text);
+}
+
+function tailAutomationStart(blocks: ChatBlock[]): number {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i];
+    const k = b.kind;
+    if (k === 'user' || k === 'switch' || k === 'compact' || k === 'restart') return -1;
+    if (k === 'peer') return isAutomationPeer(b) ? i : -1;
+  }
+  return -1;
+}
+
+/** The current raw turn belongs to a routine, regardless of whether a tool is
+ *  between content blocks and temporarily has no open/running flag. */
+export function automationTurnPending(blocks: ChatBlock[]): boolean {
+  return tailAutomationStart(blocks) >= 0;
 }
 
 /** True when the tail of the RAW block list is an automation turn that is
@@ -71,20 +102,13 @@ function isAutomationPeer(block: ChatBlock): boolean {
  *  during routine work — the pod filter alone leaves ChatThread thinking the
  *  thread is idle-but-streaming, which would flash the bubble all run long. */
 export function automationTurnInFlight(blocks: ChatBlock[]): boolean {
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const b = blocks[i];
-    const k = b.kind;
-    if (k === 'user' || k === 'switch' || k === 'compact' || k === 'restart') return false;
-    if (k === 'peer') {
-      if (!isAutomationPeer(b)) return false;
-      const rest = blocks.slice(i + 1);
-      if (rest.length === 0) return true; // trigger just fired, no blocks yet
-      return rest.some(
-        (t) => (t.kind === 'text' && t.open) || (t.kind === 'tool' && (t.open || t.running)),
-      );
-    }
-  }
-  return false;
+  const start = tailAutomationStart(blocks);
+  if (start < 0) return false;
+  const rest = blocks.slice(start + 1);
+  if (rest.length === 0) return true; // trigger just fired, no blocks yet
+  return rest.some(
+    (t) => (t.kind === 'text' && t.open) || (t.kind === 'tool' && (t.open || t.running)),
+  );
 }
 
 /** Drop automation turns (the ⚙ trigger card + every tool/thought pod) unless
@@ -131,8 +155,17 @@ export function filterAutomationNoise(blocks: ChatBlock[]): ChatBlock[] {
       deliverable = [...nonEmpty].slice(0, -1).reverse().find((t) => hasFailureSignal(t.text));
     }
     if (deliverable && (!inFlight || hasFailureSignal(deliverable.text))) {
-      // Failures surface immediately, even mid-flight.
-      out.push(deliverable);
+      // Preserve provenance as a peer boundary instead of returning bare text.
+      // Otherwise ChatThread merges this later routine result into the previous
+      // human turn and promotes it over that turn's actual answer.
+      out.push({
+        kind: 'peer',
+        id: deliverable.id,
+        from: b.from,
+        fromRole: 'automation-result',
+        text: deliverable.text,
+        ts: deliverable.ts,
+      });
     }
     i = j;
   }
