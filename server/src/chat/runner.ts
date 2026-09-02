@@ -22,6 +22,7 @@ import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
 import { isVoiceChatId, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
+import { isThreadWatched } from './threadWatch.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
@@ -450,6 +451,9 @@ class ClaudeSession {
   /** Text-block seqs for the current Claude stream. A later synthetic marker
    * lets us surgically remove only its protocol prose from durable storage. */
   private streamTextBlocks = new Map<number, { text: string; seqs: number[] }>();
+  /** True only while the active turn came from a scheduled routine. Human
+   * input must wait for this turn's boundary instead of steering its mission. */
+  private automationTurn = false;
   private initSeen = false;
   private exitedBeforeInit = false;
   /** Set by shutdown(): once an intentional teardown begins, stop appending to
@@ -641,6 +645,7 @@ class ClaudeSession {
       }
       // A dead process is never busy, however it got there.
       this.turnStartedAt = null;
+      this.automationTurn = false;
       this.emit({ type: 'closed', code, signal });
     });
 
@@ -700,10 +705,23 @@ class ClaudeSession {
       this.emit({ type: 'error', message: 'session has exited' });
       return;
     }
-    this.turnStartedAt = Date.now();
-    this.terminalNoticeEmitted = false;
-    this.syntheticApiErrorSeen = false;
-    this.streamTextBlocks.clear();
+    const startsNewTurn = this.turnStartedAt === null;
+    const automationRequest = opts.peerFromRole === 'automation';
+    if (automationRequest && (!startsNewTurn || isThreadWatched(this.cwd, this.chatId))) {
+      throw new Error('routine deferred because this thread is active');
+    }
+    if (!startsNewTurn && this.automationTurn) {
+      // Register normally waits for the routine boundary. Keep this admission
+      // guard here too so a race can reject, but never hijack, that mission.
+      throw new Error('human message is waiting for the automation turn to finish');
+    }
+    if (startsNewTurn) {
+      this.turnStartedAt = Date.now();
+      this.automationTurn = automationRequest;
+      this.terminalNoticeEmitted = false;
+      this.syntheticApiErrorSeen = false;
+      this.streamTextBlocks.clear();
+    }
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
     const wantSeed = this.seedWindowOnNextTurn;
@@ -856,6 +874,16 @@ class ClaudeSession {
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
     return this.turnStartedAt !== null;
+  }
+
+  /** Scheduled turns yield to human messages at their natural boundary. */
+  isAutomationTurn(): boolean {
+    return this.turnStartedAt !== null && this.automationTurn;
+  }
+
+  /** One synchronous admission snapshot for register's native-steer decision. */
+  canAcceptNativeHumanSteer(): boolean {
+    return this.turnStartedAt !== null && !this.automationTurn;
   }
 
   sessionId(): string | null {
@@ -1143,8 +1171,11 @@ class ClaudeSession {
 
     // turn end = `result` event from the CLI
     if (ev?.type === 'result') {
-      this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+      // Clear the completed state before notifying synchronous subscribers; a
+      // subscriber may immediately admit the next queued human turn.
       this.turnStartedAt = null;
+      this.automationTurn = false;
+      this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       const seeded = this.pendingSeedAck;
       const failed = seeded && (ev.is_error === true || typeof ev.api_error_status === 'number');
       if (seeded) this.pendingSeedAck = false;

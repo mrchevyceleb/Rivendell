@@ -9,6 +9,7 @@ import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { listAgents, type Agent } from './agents.ts';
 import { logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
+import { isThreadWatched } from './threadWatch.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
@@ -81,8 +82,15 @@ export async function sendToAgentHome(
   text: string,
   opts: { peerFrom: string; peerFromRole?: string; peerText?: string },
 ): Promise<{ delivered: boolean; reason?: string }> {
-  const runner = await getRunner();
   const { cli, chatKey } = agentLogKey(agent);
+  const watchedByHuman = () => opts.peerFromRole === 'automation'
+    && isThreadWatched(ELROND_WORKSPACE_PATH, chatKey);
+  // Human conversation always owns a visible home thread. Do not even spawn a
+  // routine engine while Matt is there; the next scheduled cycle can retry.
+  if (watchedByHuman()) {
+    return { delivered: false, reason: 'agent thread is actively watched — routine deferred' };
+  }
+  const runner = await getRunner();
   let session: SessionLike;
   try {
     session = await runner.getOrCreateSession({ cli, repoPath: ELROND_WORKSPACE_PATH, chatId: chatKey });
@@ -91,6 +99,11 @@ export async function sendToAgentHome(
   }
   if (session.isBusy?.() === true) {
     return { delivered: false, reason: 'agent is mid-turn — routine skipped this cycle' };
+  }
+  // Recheck after the async bind: the user may have opened the thread while a
+  // cold engine was starting.
+  if (watchedByHuman()) {
+    return { delivered: false, reason: 'agent thread became active — routine deferred' };
   }
   try {
     await session.send(text, undefined, {

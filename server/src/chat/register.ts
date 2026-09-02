@@ -795,12 +795,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // Claude Code's native stream-json input queues guidance inside the
           // active turn and applies it immediately after the current tool. This
           // is the same behavior as interactive Claude Code and requires no
-          // control interrupt. Codex/Banana reject concurrent input, so only
-          // those lanes wait for natural turn completion below.
+          // control interrupt. Exception: a scheduled automation never absorbs
+          // human input as mission guidance; it finishes naturally, then the
+          // human message starts its own turn. Codex/Banana already wait because
+          // they reject concurrent input.
           const nativeClaudeSteer = Boolean(
             session
             && isClaudeFamilyCli(steerCli)
-            && (session as { isBusy?: () => boolean }).isBusy?.() === true,
+            && (session as { canAcceptNativeHumanSteer?: () => boolean })
+              .canAcceptNativeHumanSteer?.() === true,
           );
           const steerDeadline = Date.now() + 30 * 60_000;
           while (!nativeClaudeSteer && session && (session as { isBusy?: () => boolean }).isBusy?.() === true) {
