@@ -59,6 +59,7 @@ export function GrokChat(props: GrokChatProps) {
     model: picker.model,
     contextWindowTokens: picker.isLocal ? picker.localContextWindow : undefined,
     effort: picker.effort,
+    selectionRevision: picker.selectionRevision,
   });
 
   // Esc stops a streaming turn.

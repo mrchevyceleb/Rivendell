@@ -577,6 +577,9 @@ export function useChat(opts: {
   contextWindowTokens?: number | null;
   /** Reasoning/thinking effort for engines that expose one. */
   effort?: string;
+  /** Process-local counter advanced only by an explicit picker action. Device
+   * defaults never advance it, so a new computer cannot recycle a warm lane. */
+  selectionRevision?: number;
   /** Account-pinned login for this lane ('kim'), or undefined for the
    *  repo-resolved default. Rides inside the chatId so the server spawns the
    *  CLI under that account. Personal Claude/Codex lanes are gone. */
@@ -591,6 +594,7 @@ export function useChat(opts: {
     model,
     contextWindowTokens,
     effort,
+    selectionRevision,
   } = opts;
   // Encode the account into the chatId (same `__acct__` separator the server
   // parses in accountResolver.ts). Every WS message + storage key then keys off
@@ -603,6 +607,19 @@ export function useChat(opts: {
   modelRef.current = model;
   const effortRef = useRef<string | undefined>(effort);
   effortRef.current = effort;
+  const selectionRevisionRef = useRef(selectionRevision ?? 0);
+  selectionRevisionRef.current = selectionRevision ?? 0;
+  const appliedSelectionRevisionRef = useRef(selectionRevision ?? 0);
+  const selectionLane = `${cli}|${repo?.path ?? ''}|${chatId}`;
+  const selectionLaneRef = useRef(selectionLane);
+  if (selectionLaneRef.current !== selectionLane) {
+    selectionLaneRef.current = selectionLane;
+    appliedSelectionRevisionRef.current = selectionRevisionRef.current;
+  }
+  const selectionIntent = () => ({
+    selectionRevision: selectionRevisionRef.current,
+    reconfigure: selectionRevisionRef.current !== appliedSelectionRevisionRef.current,
+  });
   const [blocks, setBlocks] = useState<ChatBlock[]>(() => initialStoredBlocks(enabled, repo, cli, chatId));
   /** True between a user send/steer and the next turnStart/turnEnd/error. */
   const pendingSendRef = useRef(false);
@@ -681,6 +698,7 @@ export function useChat(opts: {
       clientMsgId: item.clientMsgId,
       model: modelRef.current,
       effort: effortRef.current,
+      ...selectionIntent(),
     }));
   };
   flushOutboundRef.current = flushOutbound;
@@ -723,7 +741,7 @@ export function useChat(opts: {
             { kind: 'user', id: id(), text: initialMessage, ts: Date.now() },
           ];
         });
-        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage, model: modelRef.current, effort: effortRef.current }));
+        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
       }
     } else if (!initialSendInFlightRef.current) {
       initialMessageRef.current = null;
@@ -817,6 +835,7 @@ export function useChat(opts: {
           sinceSeq: lastSeqRef.current,
           model: modelRef.current,
           effort: effortRef.current,
+          ...selectionIntent(),
           visible: document.visibilityState === 'visible',
         }));
       };
@@ -868,7 +887,7 @@ export function useChat(opts: {
                 { kind: 'user', id: id(), text: pending, clientMsgId, ts: Date.now() },
               ];
             });
-            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, clientMsgId, model: modelRef.current, effort: effortRef.current }));
+            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, clientMsgId, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
           } else if (queued && queued.length > 0 && ws.readyState === WebSocket.OPEN) {
             setStatus('streaming');
             flushOutboundRef.current();
@@ -878,6 +897,11 @@ export function useChat(opts: {
               pendingSendRef.current = false;
               compactingRef.current = false;
             }
+          }
+        }
+        else if (msg.type === 'selectionApplied') {
+          if (Number.isSafeInteger(msg.selectionRevision) && msg.selectionRevision >= 0) {
+            appliedSelectionRevisionRef.current = msg.selectionRevision;
           }
         }
         else if (msg.type === 'sessionRebound') {
@@ -1173,6 +1197,7 @@ export function useChat(opts: {
             sinceSeq: lastSeqRef.current,
             model: modelRef.current,
             effort: effortRef.current,
+            ...selectionIntent(),
             visible: document.visibilityState === 'visible',
           }));
           return;
@@ -1348,6 +1373,7 @@ export function useChat(opts: {
       chatId,
       model: modelRef.current,
       effort: effortRef.current,
+      ...selectionIntent(),
     }));
   };
 
@@ -1383,7 +1409,7 @@ export function useChat(opts: {
     queuedSteerRef.current = clientMsgId;
     pendingSendRef.current = true;
     setError(null);
-    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current }));
+    ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
     turnStartRef.current = Date.now();
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;

@@ -203,17 +203,29 @@ export function useCompanionPicker(storageKey: string) {
   const [localModel, setLocalModelState] = useState(() => readLS('rivendell:local-model', ''));
   const [localContextWindow, setLocalContextWindow] = useState<number | null>(null);
   const [localSupportsThinking, setLocalSupportsThinking] = useState(false);
+  // Process-local, intentionally not persisted. A new device starts at zero,
+  // while every actual picker click advances only that lane's revision—even if
+  // the clicked value matches what that device already displayed.
+  const [selectionRevisions, setSelectionRevisions] = useState<Record<string, number>>({});
+  const markSelectionChanged = (lane: string) => {
+    setSelectionRevisions((revisions) => ({
+      ...revisions,
+      [lane]: (revisions[lane] ?? 0) + 1,
+    }));
+  };
 
-  const persist = (key: string, set: (v: string) => void) => (v: string) => {
+  const persist = (key: string, set: (v: string) => void, lane?: string) => (v: string) => {
+    if (lane) markSelectionChanged(lane);
     set(v);
     if (typeof window !== 'undefined') localStorage.setItem(key, v);
   };
   const setClaudeModel = (value: string) => {
+    markSelectionChanged('claude-kim');
     const model = normalizeClaudeModel(value);
     setClaudeModelState(model);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:claude-model', model);
   };
-  const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState);
+  const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState, 'claude-kim');
   const setCodexModel = (value: string) => {
     const model = normalizeCodexModel(value);
     const effort = normalizeCodexEffort(model, codexEffort);
@@ -232,21 +244,25 @@ export function useCompanionPicker(storageKey: string) {
     }
   };
   const setZaiModel = (v: string) => {
+    markSelectionChanged('zai');
     const model = normalizeZaiModel(v);
     setZaiModelState(model);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-model', model);
   };
   const setZaiEffort = (v: string) => {
+    markSelectionChanged('zai');
     const effort = normalizeZaiEffort(v);
     setZaiEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:zai-effort', effort);
   };
   const setXaiModel = (v: string) => {
+    markSelectionChanged('xai');
     const model = normalizeXaiModel(v);
     setXaiModelState(model);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:xai-model', model);
   };
   const setXaiEffort = (v: string) => {
+    markSelectionChanged('xai');
     const effort = normalizeXaiEffort(v);
     setXaiEffortState(effort);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:xai-effort', effort);
@@ -282,7 +298,7 @@ export function useCompanionPicker(storageKey: string) {
 
   return {
     companion, setCompanion,
-    cli, account, model, effort,
+    cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
     isClaude, isCodex, isLocal, isOpenRouter, isFireworks, isZai, isXai,
     bananaModel,
     fireworksModel,

@@ -40,6 +40,7 @@ export function ChatTab({
     model: picker.model,
     contextWindowTokens: picker.isLocal ? picker.localContextWindow : undefined,
     effort: picker.effort,
+    selectionRevision: picker.selectionRevision,
   });
 
   // Publish this tab's send() so the shell (file "Ask Elrond", tree) can reach it.

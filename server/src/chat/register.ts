@@ -42,15 +42,23 @@ import { emitScribe } from '../worker/scribe.ts';
 import { listChatHistory } from './history.ts';
 import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
 
-type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; model?: string; effort?: string; visible?: boolean };
+type ClientSelection = {
+  model?: string;
+  effort?: string;
+  /** Process-local picker revision plus explicit dirty bit. Device defaults
+   * report reconfigure=false, so they can never recycle a warm process. */
+  selectionRevision?: number;
+  reconfigure?: boolean;
+};
+type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; visible?: boolean } & ClientSelection;
 type ClientWatch = { type: 'watch'; visible?: boolean };
 // `model` / `effort` ride on send/steer. Banana and Codex apply them per turn.
 // Claude-family lanes (claude/assistant/zai/xai) apply them at spawn; a live
 // steer must reuse that spawn, not the Counsel picker's current id.
-type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string; clientMsgId?: string };
-type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string; model?: string; effort?: string };
+type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string } & ClientSelection;
+type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string } & ClientSelection;
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; model?: string; effort?: string; clientMsgId?: string };
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string } & ClientSelection;
 type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer;
 type ResumeWatchableSession = AnySession & {
   startedWithResume?: () => boolean;
@@ -148,6 +156,10 @@ function normalizeChatId(value: unknown): string {
   if (!trimmed) return DEFAULT_CHAT_ID;
   const safe = trimmed.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
   return safe || DEFAULT_CHAT_ID;
+}
+
+function selectionRevisionOf(value: unknown): number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : 0;
 }
 
 function sessionCli(session: AnySession | null | undefined): CliKind | null {
@@ -703,6 +715,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           cliKind = msg.cli;
           repoPath = msg.repo;
           busy = false;
+          safeSend({ type: 'selectionApplied', selectionRevision: selectionRevisionOf(msg.selectionRevision) });
           safeSend({ type: 'freshStarted', cli: msg.cli, repo: msg.repo, chatId, latestSeq: session.latestSeq() });
           return;
         }
@@ -933,6 +946,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           const wasBusy = busy;
+          // Model/effort values are device-local. Only the explicit dirty bit
+          // advanced by a real picker click may recycle a warm Claude-family
+          // process. Defaults/hydration/reconnects always send false.
+          const selectionChangeRequested = msg.reconfigure === true;
+          const requestedSelectionRevision = selectionRevisionOf(msg.selectionRevision);
+          let selectionApplied = false;
           const generation = ++turnGeneration;
           if (!busy) {
             busy = true;
@@ -943,9 +962,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // with the current pick before an idle turn. getOrCreateSession recycles
           // an IDLE session whose model/effort differ (busy sessions left intact),
           // preserving session_id so the replacement --resumes the conversation.
-          if (!wasBusy && isClaudeFamilyCli(cliKind) && repoPath) {
+          if (!wasBusy && selectionChangeRequested && isClaudeFamilyCli(cliKind) && repoPath) {
             const reconciled = await getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort, recycleOnMismatch: true });
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
+            selectionApplied = true;
+          } else if (!wasBusy && !selectionChangeRequested && isClaudeFamilyCli(cliKind)) {
+            const spawned = claudeSpawnOf(session);
+            if (spawned && (spawned.model !== msg.model || spawned.effort !== msg.effort)) {
+              console.log(
+                `[chat ws#${wsId}] preserving warm ${cliKind} session across device-local model/effort mismatch`,
+              );
+            }
           } else if (!session && cliKind && repoPath) {
             // sessionPromise resolved to a dead/null session — rebind a fresh
             // one rather than crashing on `null.send`.
@@ -959,6 +986,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
           await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort, clientMsgId: msg.clientMsgId });
+          if (selectionApplied) {
+            safeSend({ type: 'selectionApplied', selectionRevision: requestedSelectionRevision });
+          }
           lastTurnModel = msg.model;
           lastTurnEffort = msg.effort;
           void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort, msg.clientMsgId);
