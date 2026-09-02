@@ -57,6 +57,42 @@ type ResumeWatchableSession = AnySession & {
   waitForInitOrExit?: (timeoutMs: number) => Promise<'initialized' | 'closed' | 'timeout'>;
 };
 
+type SteerBoundary = 'turn-complete' | 'closed' | 'timeout' | 'aborted';
+
+/** Every engine finishes its current turn naturally before guidance is sent.
+ * This is the only steering policy that can guarantee no tool/process abort. */
+function waitForNaturalTurnEnd(session: AnySession, signal: AbortSignal, timeoutMs = 30 * 60_000): Promise<SteerBoundary> {
+  if (signal.aborted) return Promise.resolve('aborted');
+  if ((session as { isBusy?: () => boolean }).isBusy?.() !== true) return Promise.resolve('turn-complete');
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsubscribe: () => void = () => {};
+    const onAbort = () => done('aborted');
+    const done = (result: SteerBoundary) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      unsubscribe();
+      resolve(result);
+    };
+    const timer = setTimeout(() => done('timeout'), timeoutMs);
+    timer.unref?.();
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) { done('aborted'); return; }
+    try {
+      unsubscribe = (session as unknown as {
+        subscribe: (fn: (se: { ev?: { type?: string } }) => void, since?: number, count?: boolean) => () => void;
+      }).subscribe((se) => {
+        if (se.ev?.type === 'turnEnd') done('turn-complete');
+        else if (se.ev?.type === 'closed') done('closed');
+      }, -1, false);
+    } catch {
+      done('timeout');
+    }
+  });
+}
+
 // Personas stay warm all day: measured cost is ~0.5GB per warm session
 // (claude CLI + MCP stack) on a 128GB box, so the 30-minute prune was pure
 // cold-start tax. 24h still self-heals stale processes overnight (old CLI
@@ -314,11 +350,14 @@ export async function registerChat(app: express.Express, server: Server): Promis
   });
 
   // Lane-scoped operation generations: a stop/steer from ANY socket (any device) bumps the lane's operation generation; a stale
-  // steer awaiting its graceful interrupt must not write a turn after being superseded.
+  // steer awaiting natural turn completion must not write after being superseded.
   const laneGenerations = new Map<string, number>();
+  const laneWaiters = new Map<string, AbortController>();
   const laneGenKey = (cli: CliKind, repo: string, chatId: string) => `${cli}|${repo}|${chatId}`;
   const bumpLaneGen = (cli: CliKind, repo: string, chatId: string): number => {
     const k = laneGenKey(cli, repo, chatId);
+    laneWaiters.get(k)?.abort();
+    laneWaiters.delete(k);
     const n = (laneGenerations.get(k) ?? 0) + 1;
     laneGenerations.set(k, n);
     return n;
@@ -375,6 +414,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     // The lane this socket is currently counted as watching (threadWatch registry).
     let watchedLane: { repo: string; chatId: string } | null = null;
     let turnGeneration = 0;
+    const ownedSteerWaiters = new Set<AbortController>();
     // Last model/effort actually used on this socket (hello/send/steer).
     // Steer must reuse these for Codex/Banana so a drifted Counsel picker
     // cannot feed grok-4.6 into a live Codex turn (Claude-family uses spawnModel).
@@ -652,6 +692,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'freshStart') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          bumpLaneGen(cliKind ?? msg.cli, repoPath ?? msg.repo, chatId);
           console.warn(`[chat ws#${wsId}] freshStart from ${peer} cli=${msg.cli} repo=${msg.repo} chatId=${chatId}`);
           detachCurrentSession();
           const session = await bindSession(
@@ -686,12 +727,24 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
         if (msg.type === 'steer') {
           if (chatQuiesced) {
-            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'error', code: 'STEER_REJECTED', clientMsgId: msg.clientMsgId, message: 'Rivendell is restarting — try again in a few seconds.' });
             safeSend({ type: 'turnEnd' });
             return;
           }
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          // Own cancellation from the very first await through the final stdin
+          // write. Socket close, Stop, Fresh, or a newer steer aborts this path.
+          const steerAborter = new AbortController();
+          ownedSteerWaiters.add(steerAborter);
+          let waitKey: string | null = null;
+          const releaseSteer = () => {
+            ownedSteerWaiters.delete(steerAborter);
+            if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+          };
+          const rejectSteer = (message = 'Queued guidance was superseded or canceled before delivery.') => {
+            safeSend({ type: 'steerRejected', clientMsgId: msg.clientMsgId, message, busy });
+          };
           // Pin to the engine already bound on this socket. Counsel picker
           // drift (Grok 4.6 while a Claude turn is live, or vice versa) must
           // not respawn the wrong runner with a model it cannot accept.
@@ -700,9 +753,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
           let steerModel = msg.model;
           let steerEffort = msg.effort;
           const bound = sessionPromise;
+          // Register on the socket's current lane BEFORE awaiting its bind. A
+          // Stop/Fresh/new steer during a cold bind can now abort this operation.
+          waitKey = laneGenKey(steerCli, steerRepo, chatId);
+          let laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
+          laneWaiters.set(waitKey, steerAborter);
           if (bound) {
             try {
               const current = await bound;
+              if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
               const live = sessionCli(current);
               if (live) steerCli = live;
               const spawned = isClaudeFamilyCli(steerCli) ? claudeSpawnOf(current) : null;
@@ -717,58 +776,110 @@ export async function registerChat(app: express.Express, server: Server): Promis
               // Dead bind — fall through with hello/picker values.
             }
           }
+          if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
+          const resolvedKey = laneGenKey(steerCli, steerRepo, chatId);
+          if (resolvedKey !== waitKey) {
+            if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+            laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
+            waitKey = resolvedKey;
+            laneWaiters.set(waitKey, steerAborter);
+          }
           console.warn(`[chat ws#${wsId}] steer from ${peer} cli=${steerCli} repo=${steerRepo} chatId=${chatId}`);
-          // Lane-scoped supersession: a stop or steer from ANY socket/device
-          // bumps this lane's operation generation — recheck after every await
-          // so a superseded steer never writes a turn into whatever is live now.
-          const laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
-          const laneGenStale = () => laneGenerations.get(laneGenKey(steerCli, steerRepo, chatId)) !== laneGen;
-          // GRACEFUL steer for warm claude-family sessions: control-interrupt
-          // the live turn and send the steer text into the SAME process — no
-          // SIGTERM, no respawn, no MCP re-warm. An idle warm session needs no
-          // interrupt at all. Codex/banana and any graceful failure fall back
-          // to the hard kill + respawn below.
-          let session: AnySession | null = null;
-          const boundSession = bound ? await bound.catch(() => null) : null;
-          if (boundSession && isClaudeFamilyCli(steerCli) && typeof (boundSession as { interruptGracefully?: unknown }).interruptGracefully === 'function') {
-            const wasBusy = (boundSession as { isBusy?: () => boolean }).isBusy?.() === true;
-            const ok = await (boundSession as { interruptGracefully: (t?: number) => Promise<boolean> }).interruptGracefully(30_000);
-            if (laneGenStale()) return;
-            if (ok) {
-              session = boundSession;
-              console.warn(`[chat ws#${wsId}] steer graceful (${wasBusy ? 'turn interrupted, process kept' : 'idle warm session, direct send'})`);
-            } else {
-              console.warn(`[chat ws#${wsId}] steer graceful interrupt failed — falling back to hard kill`);
+          // Lane-scoped supersession: recheck after every await so a stopped,
+          // reset, disconnected, or superseded steer never writes later.
+          const laneGenStale = () => !waitKey || laneGenerations.get(waitKey) !== laneGen;
+          // STRICTLY NON-DESTRUCTIVE steer: every engine finishes its current
+          // turn naturally. No control interrupt and no process signal occurs.
+          let session: AnySession | null = bound ? await bound.catch(() => null) : null;
+          if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+          // Claude Code's native stream-json input queues guidance inside the
+          // active turn and applies it immediately after the current tool. This
+          // is the same behavior as interactive Claude Code and requires no
+          // control interrupt. Codex/Banana reject concurrent input, so only
+          // those lanes wait for natural turn completion below.
+          const nativeClaudeSteer = Boolean(
+            session
+            && isClaudeFamilyCli(steerCli)
+            && (session as { isBusy?: () => boolean }).isBusy?.() === true,
+          );
+          const steerDeadline = Date.now() + 30 * 60_000;
+          while (!nativeClaudeSteer && session && (session as { isBusy?: () => boolean }).isBusy?.() === true) {
+            const remaining = Math.max(1, steerDeadline - Date.now());
+            const boundary = await waitForNaturalTurnEnd(session, steerAborter.signal, remaining);
+            if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
+            if (boundary === 'closed') { session = null; break; }
+            if (boundary === 'timeout') {
+              rejectSteer('Guidance is still waiting for the current turn to finish. The running agent was not interrupted; try again later or use Stop.');
+              releaseSteer();
+              return;
+            }
+            // Some engines immediately start an internal continuation after
+            // turnEnd. Loop until the session is genuinely idle.
+          }
+          if (session) {
+            console.warn(`[chat ws#${wsId}] guidance ${nativeClaudeSteer ? 'queued natively in active Claude turn' : 'queued after natural turn completion'}`);
+          }
+          if (session && (session as { isAlive?: () => boolean }).isAlive?.() === false) session = null;
+          if (!session) {
+            // The old process is already gone; starting its normal replacement
+            // is recovery, not an interrupt. Never call interruptSession here.
+            detachCurrentSession();
+            try {
+              const replacement = await getOrCreateSession({
+                cli: steerCli,
+                repoPath: steerRepo,
+                chatId,
+                model: steerModel,
+                effort: steerEffort,
+              });
+              if (steerAborter.signal.aborted || laneGenStale()) {
+                rejectSteer();
+                releaseSteer();
+                return;
+              }
+              session = await bindSession(Promise.resolve(replacement));
+              if (steerAborter.signal.aborted || laneGenStale()) {
+                detachCurrentSession(); // unsubscribe the bind created after close/cancel
+                rejectSteer();
+                releaseSteer();
+                return;
+              }
+            } catch (error) {
+              rejectSteer(`Guidance could not bind safely: ${(error as Error).message}`);
+              releaseSteer();
+              safeSend({ type: 'turnEnd' });
+              return;
             }
           }
-          if (!session) {
-            detachCurrentSession();
-            await interruptSession({ cli: steerCli, repoPath: steerRepo, chatId });
-            if (laneGenStale()) return;
-            session = await bindSession(getOrCreateSession({
-              cli: steerCli,
-              repoPath: steerRepo,
-              chatId,
-              model: steerModel,
-              effort: steerEffort,
-            }));
+          if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+          if ((session as { isAlive?: () => boolean }).isAlive?.() === false) {
+            rejectSteer('Guidance target closed before delivery — try again.');
+            releaseSteer();
+            safeSend({ type: 'turnEnd' });
+            return;
           }
-          if (laneGenStale()) return;
           if (chatQuiesced) {
-            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            rejectSteer('Rivendell is restarting — try again in a few seconds.');
+            releaseSteer();
             safeSend({ type: 'turnEnd' });
             return;
           }
           cliKind = steerCli;
           repoPath = steerRepo;
           busy = true;
-          safeSend({ type: 'turnStart' });
+          // This is the commit point: all cancellation/generation checks passed.
+          // An idle/after-turn delivery starts a new turn. Native Claude steer
+          // remains inside the already-running turn; its _user_echo carries the
+          // clientMsgId that clears the client's queued state.
+          if (!nativeClaudeSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
           logChatTurn(wsId, 'steer', steerCli, steerRepo, chatId, msg.text);
-          const generation = ++turnGeneration;
+          ++turnGeneration;
+          releaseSteer();
           await (session as any).send(msg.text, msg.images, { model: steerModel, effort: steerEffort, clientMsgId: msg.clientMsgId });
           lastTurnModel = steerModel;
           lastTurnEffort = steerEffort;
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, steerModel, steerEffort, msg.clientMsgId);
+          // Guidance is never auto-resubmitted after acceptance: a cross-device
+          // Stop/Fresh must not be undone by the stale-resume retry helper.
           return;
         }
 
@@ -869,6 +980,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
     ws.on('close', () => {
       clearInterval(heartbeat);
       clearInterval(keepalive);
+      for (const waiter of ownedSteerWaiters) waiter.abort();
+      ownedSteerWaiters.clear();
       unsubscribe?.();
       unsubscribe = null;
       const set = peerSockets.get(peerKey);

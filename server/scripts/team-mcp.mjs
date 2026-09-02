@@ -65,9 +65,10 @@ const TOOLS = [
   },
 ];
 
-async function api(path, init) {
+async function api(path, init, signal) {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
+    signal,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });
   const text = await res.text();
@@ -80,9 +81,9 @@ async function api(path, init) {
   return body;
 }
 
-async function callTool(name, args) {
+async function callTool(name, args, signal) {
   if (name === 'team_list') {
-    const { agents } = await api('/api/team');
+    const { agents } = await api('/api/team', undefined, signal);
     return `Teammates (${agents.length}):\n` + agents
       .map((a) => `- ${a.name} (${a.id}) — ${a.role} [${a.engine}]`)
       .join('\n');
@@ -97,14 +98,16 @@ async function callTool(name, args) {
         hop: args.hop,
         wait: args.wait,
       }),
-    });
+    }, signal);
     if (!result.delivered) return `NOT DELIVERED: ${result.reason}`;
     return result.reply
       ? `Delivered to ${result.to}. Their reply:\n\n${result.reply}`
-      : `Delivered to ${result.to}.`;
+      : result.reason
+        ? `Delivered to ${result.to}. ${result.reason}`
+        : `Delivered to ${result.to}.`;
   }
   if (name === 'team_recent') {
-    const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`);
+    const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);
     if (!messages?.length) return `No recent messages for ${args.name}.`;
     return messages.map((m) => `${m.who === 'agent' ? args.name : m.who === 'peer' ? '→ teammate msg' : 'user'}: ${m.text}`).join('\n');
   }
@@ -114,6 +117,7 @@ async function callTool(name, args) {
 // --- stdio JSON-RPC (MCP) ----------------------------------------------------
 
 const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
+const activeCalls = new Map();
 
 const rl = createInterface({ input: process.stdin });
 rl.on('line', async (line) => {
@@ -123,15 +127,29 @@ rl.on('line', async (line) => {
   try {
     if (method === 'initialize') {
       send({ jsonrpc: '2.0', id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'rivendell-team', version: '1.0.0' } } });
-    } else if (method === 'notifications/initialized' || method === 'notifications/cancelled') {
+    } else if (method === 'notifications/initialized') {
       // no-op
+    } else if (method === 'notifications/cancelled') {
+      const requestId = params?.requestId;
+      activeCalls.get(requestId)?.abort();
+      activeCalls.delete(requestId);
     } else if (method === 'ping') {
       send({ jsonrpc: '2.0', id, result: {} });
     } else if (method === 'tools/list') {
       send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
     } else if (method === 'tools/call') {
-      const out = await callTool(params.name, params.arguments ?? {});
-      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: String(out) }] } });
+      const controller = new AbortController();
+      activeCalls.set(id, controller);
+      try {
+        const out = await callTool(params.name, params.arguments ?? {}, controller.signal);
+        if (!controller.signal.aborted) {
+          send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: String(out) }] } });
+        }
+      } catch (e) {
+        if (!controller.signal.aborted) throw e;
+      } finally {
+        activeCalls.delete(id);
+      }
     } else if (method && id !== undefined) {
       // Requests get a proper error; notifications (no id) get silence.
       send({ jsonrpc: '2.0', id, error: { code: -32601, message: `method not found: ${method}` } });

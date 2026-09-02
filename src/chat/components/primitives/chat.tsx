@@ -872,7 +872,7 @@ export function ChatInput({
           className="sw-btn sw-btn-primary"
           style={{ fontSize: 14, padding: '8px 18px' }}
           onClick={submit}
-          title={busy ? 'stop the current turn and redirect Sam with this prompt' : undefined}
+          title={busy ? 'steer at the next safe point' : undefined}
         >
           {busy && onSteer ? 'Steer ↪' : 'Send'}
         </button>

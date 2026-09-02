@@ -652,7 +652,9 @@ export class CodexSession {
       console.log(
         `[chat codex] child exit cwd=${this.cwd} code=${code} threadId=${this.threadId ?? '-'}`,
       );
-      this.busy = false;
+      // Keep busy=true until the matching turnEnd is ready to emit. Clearing it
+      // here allowed team delivery to start during the persistence awaits below;
+      // this old turn's delayed turnEnd then completed the NEW delivery waiter.
       this.currentChild = null;
       cleanupImages();
       // Intentional kill (shutdown driven by steer/stop): the WS register
@@ -736,6 +738,7 @@ export class CodexSession {
         if (seed) await this.ackWindowSeed();
         await this.persistThreadId(this.threadId);
       }
+      this.busy = false;
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
       // Forever-thread housekeeping: compact after successful turns only —
       // error/interrupt paths retry on the next clean turn end.

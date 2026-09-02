@@ -679,11 +679,6 @@ class ClaudeSession {
 
   /** Most recent turn start (ms) — used for telegram-ping duration. */
   private turnStartedAt: number | null = null;
-  /** Set while a graceful (control-channel) interrupt is outstanding: the
-   *  interrupted turn ends with an error-shaped result, which must NOT be
-   *  surfaced as an API failure — Matt asked for the stop. */
-  private gracefulInterruptPending = false;
-
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
@@ -805,51 +800,6 @@ class ClaudeSession {
   interrupt(reason = 'interrupt'): void {
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
     this.shutdown(reason);
-  }
-
-  /** GRACEFUL interrupt (steer): ask the CLI over the stream-json control
-   *  channel to end the current turn at the next safe point. The process,
-   *  MCP stack, and session all stay alive — the turn ends with a normal
-   *  `result` (which already maps to turnEnd and clears busy), and the next
-   *  send() continues the SAME warm session. No SIGTERM, no respawn, no
-   *  30-70s MCP re-warm. Resolves true when the turn actually ended; false
-   *  on timeout/death so the caller can fall back to a hard kill. */
-  interruptGracefully(timeoutMs = 30_000): Promise<boolean> {
-    if (this.disposed || this.child.exitCode !== null) return Promise.resolve(false);
-    if (this.turnStartedAt === null) return Promise.resolve(true); // idle: nothing to interrupt
-    const requestId = `interrupt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    return new Promise<boolean>((resolve) => {
-      let settled = false;
-      const done = (ok: boolean) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        unsubscribe();
-        resolve(ok);
-      };
-      const timer = setTimeout(() => done(false), timeoutMs);
-      timer.unref?.();
-      // countSubscriber=false: a transient watcher must not skew listenerCount
-      // (idle-prune and the thread-watch registry read it).
-      const unsubscribe = this.subscribe((se) => {
-        const outer = se.ev;
-        if (outer?.type === 'closed' || outer?.type === 'error') { done(false); return; }
-        const ev = outer?.type === 'event' ? outer.event : outer;
-        if (ev?.type === 'result') done(true);
-        else if (ev?.type === 'control_response' && ev.response?.subtype === 'error') done(false);
-      }, -1, false);
-      try {
-        this.gracefulInterruptPending = true;
-        this.child.stdin.write(JSON.stringify({
-          type: 'control_request',
-          request_id: requestId,
-          request: { subtype: 'interrupt' },
-        }) + '\n');
-      } catch {
-        this.gracefulInterruptPending = false;
-        done(false);
-      }
-    });
   }
 
   isAlive(): boolean {
@@ -1064,10 +1014,7 @@ class ClaudeSession {
 
     this.emit({ type: 'event', event: ev });
 
-    // A graceful interrupt's result is error-shaped by design, not a failure.
-    if (ev?.type === 'result' && this.gracefulInterruptPending) {
-      this.gracefulInterruptPending = false;
-    } else if (ev?.type === 'result' && (ev.is_error === true || typeof ev.api_error_status === 'number')) {
+    if (ev?.type === 'result' && (ev.is_error === true || typeof ev.api_error_status === 'number')) {
       const status = typeof ev.api_error_status === 'number' ? ` (${ev.api_error_status})` : '';
       const reason = typeof ev.result === 'string' && ev.result.trim()
         ? ev.result.trim()

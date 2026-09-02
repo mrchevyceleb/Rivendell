@@ -16,7 +16,18 @@ teamRouter.post('/message', asyncHandler(async (req, res) => {
     res.status(400).json({ error: 'from, to and text are required' });
     return;
   }
-  const result = await deliverTeamMessage({ from, to, text, hop, wait });
+  const aborter = new AbortController();
+  const abortWait = () => aborter.abort();
+  req.once('aborted', abortWait);
+  res.once('close', abortWait);
+  let result;
+  try {
+    result = await deliverTeamMessage({ from, to, text, hop, wait, signal: aborter.signal });
+  } finally {
+    req.off('aborted', abortWait);
+    res.off('close', abortWait);
+  }
+  if (res.destroyed || res.writableEnded) return;
   res.status(result.delivered ? 200 : 422).json(result);
 }));
 

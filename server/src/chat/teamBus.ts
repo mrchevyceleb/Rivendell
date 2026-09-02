@@ -5,17 +5,19 @@
 // recipient's engine for a real turn. Guards: hop limit, rate limits, text cap,
 // busy-recipient reporting — free conversation, no runaway loops.
 
-import { join } from 'node:path';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { listAgents, type Agent } from './agents.ts';
-import { eventText, isAutomationPeerEvent, isQuietRoutineReply, isRoutinePromptText } from './routineNoise.ts';
+import { logKeyFor } from './threadKey.ts';
+import { extractVisibleTurns } from './threadWindow.ts';
 
 // Late import to dodge a require cycle (runner imports nothing from here, but
 // both sides touch shared graph modules — keeping this lazy is cheap insurance).
 type SessionLike = {
   send: (text: string, images?: unknown, opts?: Record<string, unknown>) => Promise<void>;
   isBusy?: () => boolean;
+  latestSeq: () => number;
   key: string;
+  logKey: string;
 };
 
 async function getRunner() {
@@ -117,6 +119,7 @@ export async function deliverTeamMessage(input: {
   text: string;
   hop?: number;
   wait?: boolean;
+  signal?: AbortSignal;
 }): Promise<TeamMessageResult> {
   const hop = Math.max(1, Math.floor(input.hop ?? 1));
   const text = (input.text ?? '').trim().slice(0, MAX_TEXT);
@@ -151,37 +154,55 @@ export async function deliverTeamMessage(input: {
   if (session.isBusy?.() === true) {
     return { delivered: false, reason: `${to.name} is mid-turn — retry team_message in a little while` };
   }
+  if (input.signal?.aborted) return { delivered: false, reason: 'sender stopped before delivery' };
 
+  const waitForReply = input.wait !== false;
+  const replyInstruction = waitForReply
+    ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}. Do NOT call team_message back — ${from.name} is busy waiting for this turn and a direct reply would bounce.)`
+    : `(Reply inline for the thread, or use team_message(to: "${from.name}", text: ..., hop: ${hop + 1}) to answer ${from.name} directly.)`;
   const prompt = [
     `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — hop ${hop}/${HOP_LIMIT}]`,
     text,
     '',
-    `(Reply inline for the thread, or use team_message(to: "${from.name}", text: ..., hop: ${hop + 1}) to answer ${from.name} directly.)`,
+    replyInstruction,
   ].join('\n');
 
   // send() resolves once the prompt is WRITTEN, not when the turn ends —
   // subscribe first and wait for this turn's turnEnd before reading a reply.
   // Reply extraction is floored at this turn's starting seq so a failed turn
   // never returns the PREVIOUS reply as if it were the answer.
-  let startSeq = 0;
-  try {
-    const { nextSeq } = loadEventLogSync(`${cli}|${ELROND_WORKSPACE_PATH}|${chatKey}`);
-    startSeq = nextSeq;
-  } catch { /* no log yet */ }
-  let turnDone: () => void;
-  const turnDoneP = new Promise<void>((resolve) => { turnDone = resolve; });
-  const REPLY_WAIT_MS = 150_000;
-  const timer = setTimeout(turnDone!, REPLY_WAIT_MS);
+  // The live session owns the authoritative engine-free durable key and seq
+  // allocator. Building `${cli}|...` here reads an obsolete per-engine file
+  // after a rebrain and makes both wait=true and team_recent miss the reply.
+  const replyLogKey = session.logKey;
+  const startSeq = session.latestSeq() + 1;
+  type WaitOutcome = { kind: 'completed'; endSeq: number } | { kind: 'timeout' } | { kind: 'aborted' };
+  let settled = false;
+  let finishWait!: (outcome: WaitOutcome) => void;
+  const turnDoneP = new Promise<WaitOutcome>((resolve) => {
+    finishWait = (outcome) => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+    };
+  });
+  // Delegated checks routinely take several minutes. The prior 150s timeout
+  // expired while Kip was still working, then encouraged polling/retries that
+  // collided with the original sender's busy turn.
+  const REPLY_WAIT_MS = 8 * 60_000;
+  const timer = setTimeout(() => finishWait({ kind: 'timeout' }), REPLY_WAIT_MS);
   timer.unref?.();
+  const onAbort = () => finishWait({ kind: 'aborted' });
+  input.signal?.addEventListener('abort', onAbort, { once: true });
   let unsubscribe: (() => void) | null = null;
   try {
     const sub = (session as unknown as {
-      subscribe: (fn: (se: { ev?: { type?: string } }) => void) => () => void;
+      subscribe: (fn: (se: { seq?: number; ev?: { type?: string } }) => void) => () => void;
     }).subscribe((se) => {
-      if (se?.ev?.type === 'turnEnd') {
+      if (se?.ev?.type === 'turnEnd' && (se.seq ?? 0) >= startSeq) {
         unsubscribe?.();
         clearTimeout(timer);
-        turnDone();
+        finishWait({ kind: 'completed', endSeq: se.seq ?? session.latestSeq() });
       }
     });
     unsubscribe = sub;
@@ -194,67 +215,51 @@ export async function deliverTeamMessage(input: {
   } catch (e) {
     unsubscribe?.();
     clearTimeout(timer);
+    input.signal?.removeEventListener('abort', onAbort);
     return { delivered: false, reason: `delivery failed: ${(e as Error).message}` };
   }
 
   const result: TeamMessageResult = { delivered: true, to: to.name, hop };
-  if (input.wait !== false) {
-    await turnDoneP;
-    // The log flushes lazily — flush, and retry once: the reply text usually
-    // lands within a second or two of turnEnd.
-    result.reply = await readLastReply(cli, repoPath, chatKey, startSeq).catch(() => undefined);
-    if (!result.reply) {
-      await new Promise((r) => setTimeout(r, 1500));
-      result.reply = await readLastReply(cli, repoPath, chatKey, startSeq).catch(() => undefined);
+  try {
+    if (waitForReply) {
+      const outcome = await turnDoneP;
+      if (outcome.kind === 'completed') {
+        // Bound extraction to this exact turn. A rebrain or follow-up can append
+        // another assistant message before disk flush/retry and must not replace
+        // the recipient's actual reply.
+        result.reply = await readLastReply(replyLogKey, startSeq, outcome.endSeq).catch(() => undefined);
+        if (!result.reply) {
+          await new Promise((r) => setTimeout(r, 1500));
+          result.reply = await readLastReply(replyLogKey, startSeq, outcome.endSeq).catch(() => undefined);
+        }
+        if (!result.reply) result.reason = 'reply not captured (check the thread) — delivered';
+      } else if (outcome.kind === 'timeout') {
+        result.reason = `${to.name} is still working after ${Math.round(REPLY_WAIT_MS / 60_000)} minutes — delivery remains in their thread`;
+      } else {
+        result.reason = `sender stopped waiting — delivery remains in ${to.name}'s thread`;
+      }
     }
-    if (!result.reply) result.reason = 'reply not captured (check the thread) — delivered';
+    return result;
+  } finally {
+    unsubscribe?.();
+    clearTimeout(timer);
+    input.signal?.removeEventListener('abort', onAbort);
   }
-  unsubscribe?.();
-  clearTimeout(timer);
-  return result;
 }
 
 // ---- reply extraction ---------------------------------------------------------
 
-import { readFileSync } from 'node:fs';
-import { EVENT_LOG_DIR, flushEventLog, loadEventLogSync } from './event-log-store.ts';
+import { flushEventLog, loadEventLogSync } from './event-log-store.ts';
 
-function sanitizeKey(key: string): string {
-  return key.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200);
-}
-
-/** Read the recipient's log tail for the last assistant-authored text. */
-async function readLastReply(cli: string, repoPath: string, chatId: string, minSeq = 0): Promise<string | undefined> {
-  const { readFile } = await import('node:fs/promises');
-  try { await flushEventLog(`${cli}|${repoPath}|${chatId}`); } catch { /* best-effort */ }
-  const file = join(EVENT_LOG_DIR, `${sanitizeKey(`${cli}|${repoPath}|${chatId}`)}.jsonl`);
-  let raw: string;
-  try {
-    raw = await readFile(file, 'utf8');
-  } catch {
-    return undefined;
-  }
-  const lines = raw.split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
-    if (!line || !line.includes('"assistant"')) continue;
-    try {
-      const parsed = JSON.parse(line);
-      const ev = parsed?.ev ?? parsed;
-      if (typeof ev?.seq === 'number' && ev.seq < minSeq) break; // older than this turn
-      const inner = ev?.event ?? ev;
-      if (inner?.type !== 'assistant') continue;
-      const content = inner?.message?.content;
-      const texts: string[] = [];
-      if (typeof content === 'string') texts.push(content);
-      else if (Array.isArray(content)) {
-        for (const c of content) if (c?.type === 'text' && typeof c.text === 'string') texts.push(c.text);
-      }
-      const joined = texts.join('\n').trim();
-      if (joined) return joined.slice(0, 4000);
-    } catch { /* keep scanning */ }
-  }
-  return undefined;
+/** Read the recipient's authoritative shared-thread tail for this exact turn. */
+async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIVE_INFINITY): Promise<string | undefined> {
+  try { await flushEventLog(logKey); } catch { /* best-effort */ }
+  const { events } = loadEventLogSync(logKey);
+  const bounded = events.filter((event) => event.seq >= minSeq && event.seq <= maxSeq);
+  // One shared transcript extractor handles Claude's full assistant messages
+  // plus Codex/Banana stream-only content blocks, while excluding tool results.
+  const reply = [...extractVisibleTurns(bounded)].reverse().find((turn) => turn.role === 'assistant');
+  return reply?.text.trim() || undefined;
 }
 
 // ---- introspection ------------------------------------------------------------
@@ -263,52 +268,21 @@ export function teamRoster() {
   return listAgents().map((a) => ({ id: a.id, name: a.name, role: a.role, engine: a.engine }));
 }
 
-/** Recent visible texts from an agent's home thread (for team_recent). */
+/** Recent visible texts from an agent's authoritative shared home thread. */
 export async function teamRecent(name: string, limit = 8): Promise<Array<{ who: 'agent' | 'user' | 'peer'; text: string }>> {
-  const a = findAgent(name);
-  if (!a) return [];
-  const { readFile } = await import('node:fs/promises');
-  const cli = cliForEngine(a.engine);
-  const account = a.engine === 'claude-kim' || a.engine === 'codex-kim' ? '__acct__kim' : '';
-  const file = join(EVENT_LOG_DIR, `${sanitizeKey(`${cli}|${ELROND_WORKSPACE_PATH}|${a.home}${account}`)}.jsonl`);
-  let raw: string;
-  try {
-    raw = await readFile(file, 'utf8');
-  } catch {
-    return [];
-  }
-  const out: Array<{ who: 'agent' | 'user' | 'peer'; text: string }> = [];
-  let afterAutomation = false;
-  for (const line of raw.split('\n')) {
-    if (!line || !line.includes('"text"')) continue;
-    try {
-      const parsed = JSON.parse(line);
-      const ev = parsed?.ev ?? parsed;
-      const inner = ev?.event ?? ev;
-      let who: 'agent' | 'user' | 'peer' | null = null;
-      let text: string | null = null;
-      if (inner?.type === '_user_echo') {
-        afterAutomation = false;
-        who = 'user'; text = inner.text;
-      } else if (inner?.type === 'peer_message') {
-        if (isAutomationPeerEvent(parsed) || isRoutinePromptText(typeof inner.text === 'string' ? inner.text : '')) {
-          afterAutomation = true;
-          continue;
-        }
-        afterAutomation = false;
-        who = 'peer'; text = inner.text;
-      } else if (inner?.type === 'assistant') {
-        who = 'agent';
-        text = eventText(parsed) || null;
-        if (text && afterAutomation && isQuietRoutineReply(text)) continue;
-      }
-      if (who && typeof text === 'string' && text.trim()) {
-        out.push({ who, text: text.replace(/\s+/g, ' ').trim().slice(0, 400) });
-      }
-    } catch { /* skip */ }
-  }
-  return out.slice(-limit);
+  const agent = findAgent(name);
+  if (!agent) return [];
+  const { cli, chatKey } = agentLogKey(agent);
+  const logKey = logKeyFor(cli, ELROND_WORKSPACE_PATH, chatKey);
+  // Polls commonly happen immediately after delivery/turnEnd; wait for the
+  // append chain so team_recent never reports an empty stale disk tail.
+  try { await flushEventLog(logKey); } catch { /* best-effort */ }
+  const { events } = loadEventLogSync(logKey);
+  return extractVisibleTurns(events).slice(-limit).map((turn) => {
+    const peer = turn.role === 'user' ? /^\[([^\]]+)]\s+([\s\S]*)$/.exec(turn.text) : null;
+    return {
+      who: turn.role === 'assistant' ? 'agent' as const : peer ? 'peer' as const : 'user' as const,
+      text: (peer?.[2] ?? turn.text).replace(/\s+/g, ' ').trim().slice(0, 400),
+    };
+  });
 }
-
-// Keep the unused-import lint quiet if readFileSync ends up shadowed later.
-void readFileSync;
