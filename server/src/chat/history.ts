@@ -383,11 +383,12 @@ async function scanChatHistory(): Promise<ChatHistoryItem[]> {
       }
     }
 
-    // Automation runs often leave logs with no user-authored message at all.
-    // Keep untitled logs visible for 30 minutes (a live composer session
-    // reads as 'New chat'), then drop them so the sidebar stays a real
-    // conversation list instead of an automation log dir.
-    if (!title && Date.now() - c.mtimeMs > 30 * 60 * 1000) continue;
+    // Automation/scratch logs with no user-authored message expire from the
+    // sidebar, but an agent home thread NEVER does. Its first title-bearing
+    // user event can age into the archive while the hot log still contains the
+    // current preview; dropping the row then leaves the agent on "No work yet."
+    const agentHome = /^bot-[a-z0-9][a-z0-9-]*(?:__acct__[a-z0-9-]+)?$/i.test(c.chatId);
+    if (!title && !agentHome && Date.now() - c.mtimeMs > 30 * 60 * 1000) continue;
 
     out.push({
       chatId: c.chatId,
