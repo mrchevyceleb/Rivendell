@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import { STATE_DIR } from './config.ts';
 import { callMcp } from '../lib/mcp.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
+import { redactSecrets } from './secretRedaction.ts';
 import { flushEventLog, loadEventLogForCompactionSync } from './event-log-store.ts';
 import {
   COMPACT_BATCH_TURNS,
@@ -107,8 +108,26 @@ function compactPath(key: string): string {
 export function loadCompactBlob(key: string): CompactBlob | null {
   try {
     const raw = JSON.parse(readFileSync(compactPath(key), 'utf8')) as CompactBlob;
-    if (raw && typeof raw.compact === 'string' && raw.compact.trim()) return raw;
-    return null;
+    if (!raw || typeof raw.compact !== 'string' || !raw.compact.trim()) return null;
+    const compact = redactSecrets(raw.compact);
+    if (compact === raw.compact) return raw;
+
+    // Upgrade old compacts in place before they can seed another model turn.
+    // Never log the matched value (or even a surrounding excerpt).
+    const scrubbed: CompactBlob = {
+      ...raw,
+      compact,
+      words: compact.trim().split(/\s+/).filter(Boolean).length,
+    };
+    try {
+      writeCompactBlob(key, scrubbed);
+      console.warn(`[compaction] ${key}: redacted credential material from the rolling compact`);
+    } catch (err) {
+      // The safe in-memory copy is still usable even if a read-only/full disk
+      // prevents the opportunistic upgrade from landing.
+      console.warn(`[compaction] ${key}: could not rewrite redacted rolling compact:`, (err as Error).message);
+    }
+    return scrubbed;
   } catch {
     return null;
   }
@@ -123,7 +142,13 @@ function writeCompactBlob(key: string, blob: CompactBlob, epoch?: number): boole
   mkdirSync(COMPACTS_DIR, { recursive: true });
   const path = compactPath(key);
   const tmp = epoch != null ? `${path}.${epoch}.${process.pid}.tmp` : `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(blob, null, 2));
+  const compact = redactSecrets(blob.compact);
+  const safeBlob: CompactBlob = {
+    ...blob,
+    compact,
+    words: compact.trim().split(/\s+/).filter(Boolean).length,
+  };
+  writeFileSync(tmp, JSON.stringify(safeBlob, null, 2));
   if (epoch != null && epochOf(key) !== epoch) {
     try { unlinkSync(tmp); } catch { /* stale tmp only */ }
     return false;
@@ -180,15 +205,25 @@ export function adoptCompaction(fromKeys: string[], toKey: string): { blob: bool
   return { blob: tookBlob, state: tookState };
 }
 
-/** Wipe rolling memory + cadence when the user fresh-starts a thread. */
-export async function clearThreadMemory(key: string): Promise<void> {
+/** Wipe rolling memory + cadence when the user fresh-starts a thread.
+ * Remote deletion is staged first; callers clear the visible event log only
+ * after this succeeds, so an MCP outage cannot leave a half-cleared thread. */
+export async function clearThreadMemory(key: string, chatId: string): Promise<void> {
   bumpCompactEpoch(key);
+  // Queue behind an in-flight replacement. The epoch bump makes that writer
+  // discard its result; the lock then guarantees this deletion is last.
+  try {
+    await clearCompactMemoryMirror(key, chatId);
+  } catch (err) {
+    throw new Error(`thread was not cleared because its RAG compact could not be deleted: ${(err as Error).message}`);
+  }
+
   try {
     unlinkSync(compactPath(key));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
-      console.warn(`[compaction] ${key}: compact blob unlink failed:`, (err as Error).message);
+      throw new Error(`thread was not cleared because its local compact could not be deleted: ${(err as Error).message}`);
     }
   }
   await mutateState((state) => {
@@ -286,6 +321,31 @@ export function peekEnginePrimer(key: string, events?: Array<{ seq?: number; ev:
   }).primer;
 }
 
+/** Build a seed from the COMPLETE durable hot log as it existed before the
+ * current user echo. Runners keep only 2,000 replay events in memory, which can
+ * be less than one tool-heavy turn; using that tail here caused fresh engines
+ * to forget the rest of an agent's conversation. */
+export async function peekEnginePrimerThroughSeq(
+  key: string,
+  throughSeq: number,
+  fallbackEvents: Array<{ seq?: number; ev: any }> = [],
+): Promise<string> {
+  await flushEventLog(key);
+  const durable = loadEventLogForCompactionSync(key).filter((event) => event.seq <= throughSeq);
+  // Durable appends deliberately fail soft so a disk hiccup cannot crash a
+  // live answer. Merge the runner's pre-send buffer back in by seq, otherwise
+  // that same hiccup would make a forced fresh engine forget recent turns.
+  const seen = new Set(durable.map((event) => event.seq));
+  const merged: Array<{ seq?: number; ev: any }> = [...durable];
+  for (const event of fallbackEvents) {
+    if (typeof event.seq !== 'number' || event.seq > throughSeq || seen.has(event.seq)) continue;
+    seen.add(event.seq);
+    merged.push(event);
+  }
+  merged.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  return peekEnginePrimer(key, merged);
+}
+
 export async function takeRotation(key: string): Promise<string | null> {
   if (!recIsOwed(loadState()[key])) return null;
   await mutateState((state) => {
@@ -325,6 +385,7 @@ Rules for the document you produce:
 - Capture: every decision made (and why), every open task and its state, every fact about people/projects/systems mentioned, every commitment or promise, every preference expressed, every technical detail that mattered (paths, models, endpoints, prices, IDs), and the current state of play.
 - Organize with clear headings (## ...) so it can be indexed: Overview / People & Projects / Decisions / Open Work / Facts & References / Preferences & Style / Current State.
 - Write in third person, past tense, no fluff, no meta commentary. Never invent content that is not in the previous document or the aged-out turns.
+- SECURITY: never retain passwords, passcodes, OTPs, API keys, access/auth tokens, cookies, private keys, or other credential values. Replace every value with [redacted secret]. Keep only the fact that a credential exists and where Matt intentionally stored it (for example, a vault service/account name).
 - The last ~50 visible turns stay in the live working window and are NOT your job — only merge what just aged out of that window.`;
 
 const inFlight = new Set<string>();
@@ -352,10 +413,149 @@ export type AutoCompactArgs = {
   rotate: (primer: string) => Promise<boolean | void> | boolean | void;
 };
 
+type MemorySearchResponse = {
+  memories?: Array<{
+    id?: unknown;
+    title?: unknown;
+    project?: unknown;
+    tags?: unknown;
+  }>;
+};
+
+type MemorySaveResponse = {
+  memory?: { id?: unknown };
+};
+
+const ragChains = new Map<string, Promise<void>>();
+
+async function withRagLock(key: string, operation: () => Promise<void>): Promise<void> {
+  const prior = ragChains.get(key) ?? Promise.resolve();
+  const next = prior.catch(() => {}).then(operation);
+  ragChains.set(key, next);
+  try {
+    await next;
+  } finally {
+    if (ragChains.get(key) === next) ragChains.delete(key);
+  }
+}
+
+type CompactMemoryIdentity = { title: string; threadTag: string };
+
+function compactMemoryIdentity(key: string, chatId: string): CompactMemoryIdentity {
+  // `chatId=main` exists in every repo and agent ids can also repeat across
+  // workspaces. Hash the complete durable log key so replacement/reset can
+  // never touch another thread that happens to share the display id. Account
+  // suffixes are live-engine aliases, not part of an agent's durable identity.
+  const threadHash = createHash('sha256').update(key).digest('hex').slice(0, 16);
+  const canonicalChatId = key.startsWith('thread|')
+    ? key.slice(key.lastIndexOf('|') + 1)
+    : (chatId || 'main').replace(/__acct__[a-z0-9-]+$/i, '');
+  return {
+    title: `Chat compact (${canonicalChatId}; ${threadHash})`,
+    threadTag: `rivendell-thread:${threadHash}`,
+  };
+}
+
+async function compactMemoryIds(key: string, chatId: string): Promise<string[]> {
+  const identity = compactMemoryIdentity(key, chatId);
+  const found = await callMcp<MemorySearchResponse & { error?: unknown }>('memory', {
+    action: 'search_memory',
+    params: {
+      // Keep the server-side query free of chat-id punctuation because the
+      // current assistant-mcp search tool interpolates it into a PostgREST
+      // `.or(...)` expression. Exact identity is enforced locally below.
+      query: 'Chat compact',
+      project: 'rivendell',
+      category: 'context',
+      tags: [identity.threadTag, 'rolling-compact'],
+      limit: 2000,
+    },
+  });
+  if (!found || typeof found !== 'object' || found.error !== undefined || !Array.isArray(found.memories)) {
+    throw new Error('RAG search returned a malformed or failed response');
+  }
+  return [...new Set(found.memories
+    // The hashed tag is the sole durable identity. Display titles may evolve
+    // and account aliases may vary without orphaning the prior memory row.
+    .filter((memory) => memory?.project === 'rivendell')
+    .filter((memory) => Array.isArray(memory.tags)
+      && memory.tags.includes(identity.threadTag)
+      && memory.tags.includes('rolling-compact'))
+    .map((memory) => memory.id)
+    .filter((memoryId): memoryId is string => typeof memoryId === 'string' && memoryId.length > 0))];
+}
+
+async function deleteCompactMemoryIds(memoryIds: string[]): Promise<void> {
+  await Promise.all(memoryIds.map(async (memoryId) => {
+    const result = await callMcp<{ message?: unknown; error?: unknown }>('memory', {
+      action: 'delete_memory',
+      params: { id: memoryId },
+    });
+    if (!result || typeof result !== 'object' || result.error !== undefined
+      || result.message !== 'Memory deleted successfully') {
+      throw new Error(`RAG delete was not acknowledged for memory ${memoryId}`);
+    }
+  }));
+}
+
+async function clearCompactMemoryMirror(key: string, chatId: string): Promise<void> {
+  await withRagLock(key, async () => {
+    await deleteCompactMemoryIds(await compactMemoryIds(key, chatId));
+  });
+}
+
+/** Keep the RAG mirror overwriteable just like the local rolling blob. The
+ * assistant-mcp save API inserts, so save the replacement first and then
+ * remove every exact prior row. The per-thread lock also serializes fresh-start
+ * deletion behind any in-flight save, preventing stale context resurrection. */
+async function saveCompactToMemory(
+  key: string,
+  epoch: number,
+  cli: string,
+  chatId: string,
+  compact: string,
+): Promise<void> {
+  await withRagLock(key, async () => {
+    if (epochOf(key) !== epoch) throw new Error('thread was fresh-started before RAG save');
+    const identity = compactMemoryIdentity(key, chatId);
+    const priorIds = await compactMemoryIds(key, chatId);
+    if (epochOf(key) !== epoch) throw new Error('thread was fresh-started before RAG save');
+
+    const saved = await callMcp<MemorySaveResponse>('memory', {
+      action: 'save_memory',
+      params: {
+        title: identity.title,
+        content: redactSecrets(compact),
+        project: 'rivendell',
+        category: 'context',
+        tags: [cli, chatId, identity.threadTag, 'rolling-compact'],
+      },
+    });
+    const savedId = saved.memory?.id;
+    if (typeof savedId !== 'string' || !savedId) {
+      throw new Error('RAG save returned no memory id');
+    }
+
+    if (epochOf(key) !== epoch) {
+      await deleteCompactMemoryIds([savedId]);
+      throw new Error('thread was fresh-started during RAG save');
+    }
+    await deleteCompactMemoryIds(priorIds.filter((memoryId) => memoryId !== savedId));
+    if (epochOf(key) !== epoch) {
+      await deleteCompactMemoryIds([savedId]);
+      throw new Error('thread was fresh-started during RAG cleanup');
+    }
+  });
+}
+
 async function generateCompact(previous: string, overflow: VisibleTurn[]): Promise<{ compact: string; words: number }> {
-  const overflowText = formatTurnsForCompact(overflow);
-  const userContent = previous.trim()
-    ? `Previous rolling memory document (REPLACE this entirely with an updated version — do not stack primers):\n\n${previous}\n\n---\n\nAged-out turns that just left the last-${WINDOW_TURNS} working window. Merge them in:\n\n${overflowText}`
+  // Redact BEFORE sending the prompt to the compaction provider, then redact
+  // the generated document again before it touches local disk or RAG.
+  const safePrevious = redactSecrets(previous);
+  const safeOverflow = overflow.map((turn) => ({ ...turn, text: redactSecrets(turn.text) }));
+  const overflowText = formatTurnsForCompact(safeOverflow);
+  const userContent = safePrevious.trim()
+    ? `Previous rolling memory document (REPLACE this entirely with an updated version — do not stack primers):\n\n${safePrevious}\n\n---\n\nAged-out turns that just left the last-${WINDOW_TURNS} working window. Merge them in:\n\n${overflowText}`
     : `Turns older than the last-${WINDOW_TURNS} working window. Write the first rolling memory document:\n\n${overflowText}`;
 
   await ensureXaiProxy();
@@ -374,10 +574,11 @@ async function generateCompact(previous: string, overflow: VisibleTurn[]): Promi
   });
   if (!res.ok) throw new Error(`compact generation failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
   const body = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
-  const compact = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
+  const generated = (body.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n').trim();
+  const compact = redactSecrets(generated);
   const words = compact ? compact.split(/\s+/).length : 0;
-  const prevWords = previous.trim() ? previous.trim().split(/\s+/).length : 0;
-  const overflowWordEst = Math.max(1, Math.floor(overflowChars(overflow) / 5));
+  const prevWords = safePrevious.trim() ? safePrevious.trim().split(/\s+/).length : 0;
+  const overflowWordEst = Math.max(1, Math.floor(overflowChars(safeOverflow) / 5));
   const minWords = prevWords
     ? Math.max(80, Math.floor(prevWords * 0.85))
     : Math.max(80, Math.min(MIN_ACCEPT_WORDS, overflowWordEst));
@@ -513,16 +714,7 @@ export async function maybeAutoCompact(args: AutoCompactArgs): Promise<boolean> 
 
     let savedToRag = false;
     try {
-      await callMcp('memory', {
-        action: 'save_memory',
-        params: {
-          title: `Chat compact (${chatId})`,
-          content: compactText,
-          project: 'rivendell',
-          category: 'context',
-          tags: [cli, chatId, 'rolling-compact'],
-        },
-      });
+      await saveCompactToMemory(key, epoch, cli, chatId, compactText);
       savedToRag = true;
     } catch (err) {
       console.warn(`[compaction] ${key}: savemem hook failed (compact still applies locally):`, (err as Error).message);

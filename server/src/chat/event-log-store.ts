@@ -1,8 +1,9 @@
-import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFile, mkdir, rm } from 'node:fs/promises';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import type { SessionEvent } from './runner.ts';
+import { isSyntheticApiErrorEvent } from './providerErrors.ts';
 
 // Per-session event log persistence. The in-memory rolling buffer
 // (ClaudeSession.eventLog / CodexSession.eventLog) is the primary source
@@ -56,20 +57,32 @@ export function sanitizeKey(key: string): string {
   return key.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200);
 }
 
-/** CLI plumbing that is not conversation. commands_changed dumps the whole
- *  slash catalog (multi-KB) on every session start; hook_response is the same
- *  SessionStart noise. Persisting it is what grew 4 MB lanes and made every
- *  hello expensive. Filter on write AND on load so old logs shrink in memory. */
+/** CLI plumbing that is not conversation. Filter on write AND on load so
+ * old logs shrink in memory. In particular, Claude Code emits one
+ * `thinking_tokens` system record AND one `thinking_delta` stream record for
+ * nearly every reasoning token; neither renders in Rivendell, but together
+ * they turned two GLM turns into ~40,000 durable events. */
 export function isPlumbingEvent(ev: unknown): boolean {
-  const e = ev as { type?: unknown; event?: { type?: unknown; subtype?: unknown }; subtype?: unknown };
+  const e = ev as { type?: unknown; event?: any; subtype?: unknown };
   const inner = e?.type === 'event' ? e.event : e;
+  if (isSyntheticApiErrorEvent(inner)) return true;
+
   const type = (inner as { type?: unknown } | undefined)?.type ?? e?.type;
   const subtype = (inner as { subtype?: unknown } | undefined)?.subtype ?? e?.subtype;
-  if (type !== 'system') return false;
-  return subtype === 'commands_changed'
-    || subtype === 'hook_response'
-    || subtype === 'hook_started'
-    || subtype === 'hook_progress';
+  if (type === '_protocol_watermark') return true;
+  if (type === 'system') {
+    return subtype === 'commands_changed'
+      || subtype === 'hook_response'
+      || subtype === 'hook_started'
+      || subtype === 'hook_progress'
+      || subtype === 'thinking_tokens'
+      || subtype === 'api_retry';
+  }
+  if (type !== 'stream_event' || !inner?.event || typeof inner.event !== 'object') return false;
+  const stream = inner.event as { type?: unknown; delta?: { type?: unknown }; content_block?: { type?: unknown } };
+  return (stream.type === 'content_block_delta'
+      && (stream.delta?.type === 'thinking_delta' || stream.delta?.type === 'signature_delta'))
+    || (stream.type === 'content_block_start' && stream.content_block?.type === 'thinking');
 }
 
 
@@ -288,6 +301,59 @@ export function appendEventLog(key: string, persisted: PersistedEvent): void {
   writeChains.set(key, next);
 }
 
+/** Remove already-streamed protocol text once Claude identifies the enclosing
+ * assistant message as synthetic. Exact seqs are supplied by the live runner,
+ * so legitimate prose that merely discusses an API error is untouched. The
+ * rewrite queues behind those appends and ahead of the durable terminal card. */
+export function removeEventLogEvents(key: string, sequences: Iterable<number>): Promise<void> {
+  const targets = new Set([...sequences].filter((seq) => Number.isFinite(seq) && seq > 0));
+  if (targets.size === 0) return Promise.resolve();
+  const path = logPath(key);
+  const prior = writeChains.get(key) ?? Promise.resolve();
+  const next = prior.then(() => {
+    try {
+      const raw = readFileSync(path, 'utf8');
+      const kept: string[] = [];
+      let maxRemoved = 0;
+      let maxKept = 0;
+      for (const line of raw.split('\n')) {
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line);
+          const seq = typeof parsed?.seq === 'number' ? parsed.seq : 0;
+          if (seq > 0 && targets.has(seq)) {
+            maxRemoved = Math.max(maxRemoved, seq);
+            continue;
+          }
+          maxKept = Math.max(maxKept, seq);
+        } catch {
+          // Preserve malformed/interrupted lines; this targeted scrub owns only
+          // records whose exact sequence was positively classified synthetic.
+        }
+        kept.push(line);
+      }
+      if (maxRemoved === 0) return;
+      if (maxRemoved > maxKept) {
+        kept.push(JSON.stringify({
+          seq: maxRemoved,
+          ev: { type: 'event', event: { type: '_protocol_watermark' } },
+        }));
+      }
+      const tmp = `${path}.scrub-${process.pid}`;
+      writeFileSync(tmp, kept.length ? `${kept.join('\n')}\n` : '', 'utf8');
+      renameSync(tmp, path);
+      bumpEventLogRevision();
+    } catch (err) {
+      console.warn('[event-log-store] synthetic stream scrub failed', key, (err as Error).message);
+    }
+  }).catch(() => {});
+  writeChains.set(key, next);
+  void next.finally(() => {
+    if (writeChains.get(key) === next) writeChains.delete(key);
+  });
+  return next;
+}
+
 // Wipe the durable log for a key. Called on freshStart so a reset thread can't
 // be resurrected when a client with an empty cache requests a full replay
 // (sinceSeq=0). Chained through the per-key write queue so any in-flight append
@@ -327,24 +393,64 @@ export async function clearEventLog(key: string): Promise<void> {
 // logs into a single thread log pushes long threads past the event cap, and
 // deleting the oldest turns off disk to enforce a memory bound is not a trade
 // anyone agreed to. Archive first, then trim; nothing leaves the box.
-export async function compactEventLog(key: string, compactedThroughSeq = 0): Promise<void> {
+type LogLine = { raw: string; seq: number | null; plumbing: boolean };
+
+/** Remove old invisible protocol chatter without sacrificing the allocator's
+ * high-water mark. If the newest record is plumbing, retain that ONE line so a
+ * restart cannot reuse its seq; loadEventLogSync still hides it from replay. */
+function stripPlumbingLines(lines: string[]): { lines: string[]; removed: number } {
+  const parsed: LogLine[] = lines.map((raw) => {
+    try {
+      const record = JSON.parse(raw);
+      return {
+        raw,
+        seq: typeof record?.seq === 'number' ? record.seq : null,
+        plumbing: Boolean(record?.ev && isPlumbingEvent(record.ev)),
+      };
+    } catch {
+      return { raw, seq: null, plumbing: false };
+    }
+  });
+
+  let maxSemanticSeq = -1;
+  let maxPlumbingSeq = -1;
+  let watermarkIndex = -1;
+  for (let i = 0; i < parsed.length; i += 1) {
+    const line = parsed[i];
+    if (line.seq === null) continue;
+    if (line.plumbing) {
+      if (line.seq > maxPlumbingSeq) {
+        maxPlumbingSeq = line.seq;
+        watermarkIndex = i;
+      }
+    } else if (line.seq > maxSemanticSeq) {
+      maxSemanticSeq = line.seq;
+    }
+  }
+  const keepWatermark = maxPlumbingSeq > maxSemanticSeq ? watermarkIndex : -1;
+  const kept = parsed.filter((line, index) => !line.plumbing || index === keepWatermark).map((line) => line.raw);
+  return { lines: kept, removed: lines.length - kept.length };
+}
+
+function compactEventLogUnlocked(key: string, compactedThroughSeq: number): void {
   const path = logPath(key);
   if (!existsSync(path)) return;
   let raw: string;
   try {
-    raw = await readFile(path, 'utf8');
+    raw = readFileSync(path, 'utf8');
   } catch {
     return;
   }
-  const lines = raw.split('\n').filter(Boolean);
-  if (lines.length <= MAX_EVENTS_PER_LOG) return;
+  const original = raw.split('\n').filter(Boolean);
+  const cleaned = stripPlumbingLines(original);
+  const lines = cleaned.lines;
+  const desiredDrop = Math.max(0, lines.length - MAX_EVENTS_PER_LOG);
 
   // Only archive records the rolling compact already covers. The old cap-only
   // trim could evict a tiny unmerged overflow batch before it reached the
   // batching threshold, so a one-word reply either triggered a full compact or
   // disappeared from model memory. Retaining a temporarily oversized hot file
   // is the safe side of that trade; the next post-compact spawn trims it.
-  const desiredDrop = lines.length - MAX_EVENTS_PER_LOG;
   let safeDrop = 0;
   for (; safeDrop < desiredDrop; safeDrop += 1) {
     try {
@@ -354,32 +460,65 @@ export async function compactEventLog(key: string, compactedThroughSeq = 0): Pro
       break;
     }
   }
-  if (safeDrop === 0) {
-    console.log(
-      `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
-    );
+
+  if (cleaned.removed === 0 && safeDrop === 0) {
+    if (desiredDrop > 0) {
+      console.log(
+        `[event-log-store] trim deferred for ${key}: ${desiredDrop} event(s) are not compacted yet`,
+      );
+    }
     return;
   }
+
   const dropped = lines.slice(0, safeDrop);
-  const kept = lines.slice(safeDrop).join('\n') + '\n';
+  if (dropped.length > 0) {
+    try {
+      // Archive must land BEFORE the rewrite. Keep the whole critical section
+      // synchronous: shutdown tombstones use appendEventLogSync(), and any
+      // await between read and rename would let that terminal line land in the
+      // old file and then be overwritten by our snapshot.
+      appendFileSync(archivePath(key), dropped.join('\n') + '\n', 'utf8');
+    } catch (err) {
+      console.warn(
+        `[event-log-store] archive failed for ${key}, leaving log untrimmed:`,
+        (err as Error).message,
+      );
+      return;
+    }
+  }
+
+  const keptLines = lines.slice(safeDrop);
+  const kept = keptLines.length ? keptLines.join('\n') + '\n' : '';
   const tmp = `${path}.compact-${process.pid}`;
   try {
-    // Archive must land BEFORE the rewrite. If the append fails we keep the
-    // fat log rather than trim it, so a full disk cannot turn into data loss.
-    await appendFile(archivePath(key), dropped.join('\n') + '\n', 'utf8');
-  } catch (err) {
-    console.warn(
-      `[event-log-store] archive failed for ${key}, leaving log untrimmed:`,
-      (err as Error).message,
-    );
-    return;
-  }
-  try {
-    await writeFile(tmp, kept, 'utf8');
-    await rename(tmp, path);
+    writeFileSync(tmp, kept, 'utf8');
+    renameSync(tmp, path);
     bumpEventLogRevision();
-    console.log(`[event-log-store] trimmed ${key}: archived ${dropped.length} event(s)`);
+    console.log(
+      `[event-log-store] cleaned ${key}: dropped ${cleaned.removed} plumbing event(s), archived ${dropped.length} compacted event(s)`,
+    );
+    if (desiredDrop > safeDrop) {
+      console.log(
+        `[event-log-store] trim deferred for ${key}: ${desiredDrop - safeDrop} event(s) are not compacted yet`,
+      );
+    }
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* best-effort stale temp cleanup */ }
+    console.warn('[event-log-store] compact failed', key, (err as Error).message);
+  }
+}
+
+export async function compactEventLog(key: string, compactedThroughSeq = 0): Promise<void> {
+  // Serialize cleanup with appends. An append landing between our read and
+  // atomic rename must queue behind the rewrite rather than disappear.
+  const prior = writeChains.get(key) ?? Promise.resolve();
+  const next = prior.then(() => compactEventLogUnlocked(key, compactedThroughSeq));
+  writeChains.set(key, next);
+  try {
+    await next;
   } catch (err) {
     console.warn('[event-log-store] compact failed', key, (err as Error).message);
+  } finally {
+    if (writeChains.get(key) === next) writeChains.delete(key);
   }
 }

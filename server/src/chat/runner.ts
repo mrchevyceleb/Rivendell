@@ -8,8 +8,8 @@ import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
-import { maybeAutoCompact, noteUserTurn, peekEnginePrimer, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents } from './event-log-store.ts';
+import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
 import { isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -24,6 +24,7 @@ import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../rou
 import { isVoiceChatId, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
+import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
 
@@ -192,6 +193,11 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
   env.ANTHROPIC_BASE_URL = ZAI_BASE_URL;
   env.ANTHROPIC_AUTH_TOKEN = process.env.Z_AI_API_KEY || '';
   env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = zaiCompactWindowForModel(model);
+  // Z.ai's coding-plan 429 is a fixed usage-window cap. Claude Code's default
+  // ten exponential retries leave Jessica "typing" for ~5 minutes. Keep one
+  // retry for a transient transport/5xx blip, then fail promptly so a manual
+  // retry after the provider reset remains the useful behavior.
+  env.CLAUDE_CODE_MAX_RETRIES = '1';
   env.SAMWISE_ACCOUNT = 'zai';
   return env;
 }
@@ -433,10 +439,17 @@ class ClaudeSession {
   readonly spawnEffort: string;
   private resumeFailed = false;
   private spawnError: string | null = null;
-  /** Set once we detect a fatal auth failure (401/403). Guards failAuth() so a
-   *  10-deep retry storm only tears the child down once, and flips isAlive()
-   *  false so the next getOrCreateSession respawns against fresh credentials. */
+  /** Set once we detect a fatal 401. Guards failAuth() so a retry storm only
+   *  tears the child down once, and flips isAlive() false so the next
+   *  getOrCreateSession respawns against fresh credentials. */
   private authFailed = false;
+  /** A 401 can arrive as both api_retry and result. Persist one notice per turn. */
+  private terminalNoticeEmitted = false;
+  /** The CLI may stream API-error prose before flagging its synthetic message. */
+  private syntheticApiErrorSeen = false;
+  /** Text-block seqs for the current Claude stream. A later synthetic marker
+   * lets us surgically remove only its protocol prose from durable storage. */
+  private streamTextBlocks = new Map<number, { text: string; seqs: number[] }>();
   private initSeen = false;
   private exitedBeforeInit = false;
   /** Set by shutdown(): once an intentional teardown begins, stop appending to
@@ -688,9 +701,15 @@ class ClaudeSession {
       return;
     }
     this.turnStartedAt = Date.now();
-    const eventsForSeed = this.eventLog.slice();
+    this.terminalNoticeEmitted = false;
+    this.syntheticApiErrorSeen = false;
+    this.streamTextBlocks.clear();
+    const historyThroughSeq = this.latestSeq();
+    const fallbackHistory = this.eventLog.slice();
     const wantSeed = this.seedWindowOnNextTurn;
-    const seed = wantSeed ? peekEnginePrimer(this.logKey, eventsForSeed) : '';
+    const seed = wantSeed
+      ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
+      : '';
     // Echo the user message into our event log so reconnecting clients can
     // replay the full conversation, not just Sam's responses (claude doesn't
     // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
@@ -879,6 +898,66 @@ class ClaudeSession {
 
   // ── private ────────────────────────────────────────────────
 
+  private trackStreamText(ev: any): void {
+    if (ev?.type !== 'stream_event' || !ev.event || typeof ev.event !== 'object') return;
+    const stream = ev.event;
+    if (stream.type === 'message_start') {
+      this.streamTextBlocks.clear();
+      return;
+    }
+    if (typeof stream.index !== 'number') return;
+    if (stream.type === 'content_block_start' && stream.content_block?.type === 'text') {
+      this.streamTextBlocks.set(stream.index, {
+        text: typeof stream.content_block.text === 'string' ? stream.content_block.text : '',
+        seqs: [this.nextSeq],
+      });
+      return;
+    }
+    if (stream.type === 'content_block_delta' && stream.delta?.type === 'text_delta') {
+      const block = this.streamTextBlocks.get(stream.index) ?? { text: '', seqs: [] };
+      if (typeof stream.delta.text === 'string') block.text += stream.delta.text;
+      block.seqs.push(this.nextSeq);
+      this.streamTextBlocks.set(stream.index, block);
+      return;
+    }
+    if (stream.type === 'content_block_stop') {
+      const block = this.streamTextBlocks.get(stream.index);
+      if (block) block.seqs.push(this.nextSeq);
+    }
+  }
+
+  private scrubSyntheticStreamText(): void {
+    const seqs = [...this.streamTextBlocks.values()]
+      .filter((block) => isSyntheticApiErrorText(block.text))
+      .flatMap((block) => block.seqs);
+    this.streamTextBlocks.clear();
+    if (seqs.length === 0) return;
+    const targets = new Set(seqs);
+    this.eventLog = this.eventLog.filter((event) => !targets.has(event.seq));
+    // Queue behind the stream appends and ahead of the terminal notice append.
+    // The exact-seq rewrite also leaves a safe high-watermark if needed.
+    void removeEventLogEvents(this.logKey, targets);
+  }
+
+  private emitTerminalNotice(
+    terminal: TerminalProviderError,
+    discardSynthetic = this.syntheticApiErrorSeen,
+  ): void {
+    if (this.terminalNoticeEmitted) return;
+    this.terminalNoticeEmitted = true;
+    this.emit({
+      type: 'event',
+      event: {
+        type: '_terminal_error',
+        message: terminal.message,
+        code: terminal.code,
+        retryable: terminal.retryable,
+        discardSynthetic: discardSynthetic || undefined,
+        ts: Date.now(),
+      },
+    });
+  }
+
   private emit(msg: SessionEvent): void {
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
@@ -1012,42 +1091,37 @@ class ClaudeSession {
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
 
-    this.emit({ type: 'event', event: ev });
-
-    if (ev?.type === 'result' && (ev.is_error === true || typeof ev.api_error_status === 'number')) {
-      const status = typeof ev.api_error_status === 'number' ? ` (${ev.api_error_status})` : '';
-      const reason = typeof ev.result === 'string' && ev.result.trim()
-        ? ev.result.trim()
-        : `Request failed${status}`;
-      // Only a 401 (dead/rotated OAuth token) is recoverable by respawning a
-      // fresh process. A 403 is usually a plan/permission problem that a respawn
-      // can't fix — surface it, but don't kill the session over it. Token-backed
-      // engines (zai/xai) use a fixed env API key, so a 401 there is NOT
-      // recoverable by respawn (same key reloads) — surface it as a hard auth
-      // error with an accurate message and don't promise a reconnect.
-      const tokenBacked = this.cli === 'zai' || this.cli === 'xai';
-      const fatalAuth = ev.api_error_status === 401;
-      const authMessage = fatalAuth && tokenBacked
-        ? `${this.cli === 'xai' ? 'xAI' : 'Z.ai'} authentication failed (401). The API key is invalid or expired — check Doppler.`
-        : fatalAuth
-          ? `Claude authentication failed (${ev.api_error_status}). Reconnecting with fresh credentials…`
-          : reason;
-      this.emit({
-        type: 'error',
-        message: authMessage,
-        code: ev.api_error_status ? String(ev.api_error_status) : undefined,
-        retryable: ev.api_error_status === 429,
-        fatal: fatalAuth,
-      });
-      if (fatalAuth) this.failAuth();
+    this.trackStreamText(ev);
+    const syntheticApiError = isSyntheticApiErrorEvent(ev);
+    if (syntheticApiError) {
+      this.syntheticApiErrorSeen = true;
+      this.scrubSyntheticStreamText();
+    }
+    const providerTerminal = ev?.type === 'result' ? terminalProviderError(this.cli, ev) : null;
+    const terminal = providerTerminal
+      ?? (ev?.type === 'result' ? terminalExecutionError(this.cli, ev) : null);
+    if (terminal) {
+      // Never persist the raw failed result: provider payloads can include
+      // request metadata or echoed prompt fragments. The normalized notice is
+      // the durable transcript record; turnEnd below remains the boundary.
+      this.emitTerminalNotice(terminal, this.syntheticApiErrorSeen);
+    } else {
+      this.emit({ type: 'event', event: ev });
+    }
+    if ((ev?.type === 'assistant' && !syntheticApiError) || ev?.type === 'result') {
+      this.streamTextBlocks.clear();
     }
 
-    // A mid-turn API retry storm is otherwise invisible — the session just
-    // appears to hang while the CLI retries up to 10× with backoff. A 401/403
-    // means the OAuth token is dead: retrying in-process can't fix it, so surface
-    // it and kill the child (failAuth) to force a fresh respawn on the next send.
-    // A 429 is retryable — surface it and let the CLI back off (the z.ai / GLM
-    // usage-limit path).
+    if (terminal && ev.api_error_status === 401) {
+      // Only 401 benefits from killing an OAuth-backed warm process. Fixed-key
+      // engines still report the durable notice and respawn on a later send.
+      this.failAuth();
+    }
+
+    // A mid-turn API retry storm is otherwise invisible. A 401 means the
+    // credential is dead: retrying in-process cannot fix it, so leave a durable
+    // notice and retire the child. Other engines may still back off on 429;
+    // Z.ai gets only one retry because its common 429 is a fixed usage window.
     if (ev?.type === 'system' && ev.subtype === 'api_retry' && typeof ev.error_status === 'number') {
       // error_status is always present here, so key strictly off 401 — a 403
       // carrying error:"authentication_failed" is a plan/permission problem a
@@ -1055,14 +1129,11 @@ class ClaudeSession {
       const fatalAuth = ev.error_status === 401;
       const tokenBacked = this.cli === 'zai' || this.cli === 'xai';
       if (fatalAuth) {
-        this.emit({
-          type: 'error',
-          message: tokenBacked
-            ? `${this.cli === 'xai' ? 'xAI' : 'Z.ai'} authentication failed (${ev.error_status}). The API key is invalid or expired — check Doppler.`
-            : `Claude authentication failed (${ev.error_status}). Reconnecting with fresh credentials…`,
+        const provider = tokenBacked ? (this.cli === 'xai' ? 'xAI' : 'Z.ai') : 'Claude';
+        this.emitTerminalNotice({
+          message: `${provider} could not authenticate. Check its account or API key, then try again.`,
           code: String(ev.error_status),
-          fatal: true,
-        });
+        }, true);
         this.failAuth();
       } else {
         const attempt = ev.attempt ? ` (attempt ${ev.attempt}/${ev.max_retries ?? '?'})` : '';
@@ -1287,17 +1358,20 @@ async function spawnSessionOnce(
     const logKey = logKeyFor(cli, cwd, chatId);
     let resumeId = (await getSessionId(cli, cwd, chatId)) ?? null;
     let seedFirst = !resumeId;
+    await flushEventLog(logKey);
     const restored = loadEventLogSync(logKey);
+    const durable = loadEventLogForCompactionSync(logKey);
+    const history = durable.length ? durable : restored.events;
     // Who spoke last on this thread. On a model switch that is a DIFFERENT
     // engine, and this engine's own native session id (if it kept one from an
     // earlier stint) is stale by exactly the turns the other brain produced.
     // Resuming it would silently drop them, so seed compact+50 from the shared
     // thread log instead. Cross-engine resume is never attempted: that is what
     // produced `No conversation found with session ID: <uuid>`.
-    const priorEngine = lastEngineOf(restored.events);
+    const priorEngine = lastEngineOf(history);
     const switchedFrom = priorEngine && priorEngine !== cli ? priorEngine : null;
     const skipResume = shouldSkipEngineResume({
-      events: restored.events,
+      events: history,
       cli,
       cwd,
       sessionId: resumeId,
@@ -1462,8 +1536,10 @@ export async function freshStart(opts: {
   // For an agent home thread that log is the shared, engine-free one, so a
   // fresh start resets the whole thread rather than just this brain's slice.
   const logKey = logKeyFor(opts.cli, cwd, chatId);
+  // Stage external compact deletion first. Only clear the visible log after it
+  // succeeds, so an MCP outage leaves a coherent, retryable old thread.
+  await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
-  await clearThreadMemory(logKey);
   if (opts.cli === 'xai') await ensureXaiProxy();
   return spawnSession(opts.cli, cwd, chatId, null, key, 0, opts.model, opts.effort);
 }

@@ -73,6 +73,23 @@ function windowForClaudeModel(model: string | undefined): number {
 let nextId = 1;
 const id = () => `b${nextId++}`;
 
+function isProviderSyntheticErrorText(text: string): boolean {
+  return /^\s*API Error:\s*(?:Request rejected|.*\(\d{3}\))/i.test(text);
+}
+
+function isSyntheticApiErrorEvent(ev: any): boolean {
+  if (!ev || ev.type !== 'assistant') return false;
+  if (ev.is_api_error_message === true) return true;
+  if (ev.message?.model !== '<synthetic>') return false;
+  const content = ev.message?.content;
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.filter((block) => block?.type === 'text' && typeof block.text === 'string').map((block) => block.text).join('\n')
+      : '';
+  return isProviderSyntheticErrorText(text);
+}
+
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
@@ -85,6 +102,34 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
 
   if (ev.type === 'system' && (ev.subtype === 'commands_changed' || ev.subtype === 'hook_response' || ev.subtype === 'hook_started' || ev.subtype === 'hook_progress')) {
     return blocks;
+  }
+
+  if (ev.type === '_terminal_error' && typeof ev.message === 'string') {
+    const currentTurnId = turnIdRef.current;
+    const closed = blocks.flatMap((b): ChatBlock[] => {
+      // Older server versions could stream the raw synthetic "API Error"
+      // prose before the durable notice arrived. Remove only that protocol
+      // block; preserve any useful partial response from the same turn.
+      if (
+        ev.discardSynthetic === true
+        && b.kind === 'text'
+        && isProviderSyntheticErrorText(b.text)
+        && (!currentTurnId || b.turnId === currentTurnId)
+      ) return [];
+      if (b.kind === 'text' && b.open) return [{ ...b, open: false }];
+      if (b.kind === 'tool' && (b.open || b.running)) return [{ ...b, open: false, running: false }];
+      return [b];
+    });
+    const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
+    if (closed.some((b) => b.kind === 'terminal-error' && b.ts === ts && b.message === ev.message)) return closed;
+    return [...closed, {
+      kind: 'terminal-error',
+      id: id(),
+      message: ev.message,
+      code: typeof ev.code === 'string' ? ev.code : undefined,
+      retryable: ev.retryable === true || undefined,
+      ts,
+    }];
   }
 
   if (ev.type === '_engine_switch') {
@@ -265,6 +310,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
       .map((c) => c.text)
       .join('');
     if (fullText) {
+      if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
         return [...blocks, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, cbIndex: -1, open: false }];
@@ -372,10 +418,11 @@ function shiftOutbound(key: string): QueuedOutbound | undefined {
   return item;
 }
 
-const CHAT_CACHE_VERSION = 'v5';
+// v6 discards snapshots that may predate durable synthetic-error scrubbing.
+const CHAT_CACHE_VERSION = 'v6';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
-  // v5 preserves only completed routine deliverables as labeled boundaries. The
+  // v6 preserves only completed routine deliverables as labeled boundaries. The
   // durable server log rebuilds each thread once; future snapshots contain
   // only what the user could actually see.
   return `rivendell:chat-blocks:${CHAT_CACHE_VERSION}:${conversationKey(cli, repoPath, chatId)}`;
@@ -919,6 +966,7 @@ export function useChat(opts: {
           // flag NEVER cleared and "compacting context" stuck for the whole turn.
           const ev = msg.event;
           const evType = ev?.type;
+          if (evType === '_terminal_error') setError(null);
           if (evType === '_user_echo' && ev?.clientMsgId && queuedSteerRef.current === ev.clientMsgId) {
             queuedSteerRef.current = null;
             pendingSendRef.current = false;

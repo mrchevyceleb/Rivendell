@@ -94,6 +94,16 @@ export type ChatBlock =
       reason?: string;
     }
   | {
+      /** Durable provider failure. This is visible to the user but excluded
+       * from future model context and sidebar conversation previews. */
+      kind: 'terminal-error';
+      id: string;
+      message: string;
+      code?: string;
+      retryable?: boolean;
+      ts: number;
+    }
+  | {
       /** Brain change mid-thread. The conversation continues; only the engine
        *  that will answer the next turn changed. */
       kind: 'switch';

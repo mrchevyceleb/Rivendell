@@ -2,6 +2,8 @@
  *  Used by unread counts, history previews, and team-recent so quiet
  *  automations never look like a teammate waiting on Matt. */
 
+import { isSyntheticApiErrorEvent } from './providerErrors.ts';
+
 const GEAR = '\u2699';
 const MODEL_EOS_TOKENS = new Set(['<|eos|>', '<|endoftext|>', '<|end_of_text|>', '<|im_end|>']);
 
@@ -23,6 +25,9 @@ export function eventType(raw: unknown): string | undefined {
 
 /** Every text payload on the event (assistant content can be an array). */
 export function eventTexts(raw: unknown): string[] {
+  // Claude Code emits upstream failures as assistant-shaped text. It is
+  // transport output, not a reply, and must not become a preview or unread.
+  if (isSyntheticApiErrorEvent(raw)) return [];
   const inner = eventInner(raw);
   if (!inner) return [];
   if (typeof inner.text === 'string') return inner.text ? [inner.text] : [];

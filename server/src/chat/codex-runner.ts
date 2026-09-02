@@ -6,9 +6,9 @@ import { join } from 'node:path';
 import { TEAM_MCP_SCRIPT } from '../config.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, loadEventLogForCompactionSync, loadEventLogSync, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
-import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -150,7 +150,11 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
-type CodexSessionOptions = { recoverContextOnNextTurn?: boolean; cli?: CliKind };
+type CodexSessionOptions = {
+  recoverContextOnNextTurn?: boolean;
+  cli?: CliKind;
+  durableHistory?: PersistedEvent[];
+};
 type ToolUseBlock = { index: number; toolUseId: string };
 type CodexUsage = {
   input_tokens: number;
@@ -283,8 +287,12 @@ export class CodexSession {
       console.warn(`[chat codex] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
     // A different brain spoke last on this thread: its rollout is not ours to
-    // resume, so seed compact+50 from the shared log and mark the handover.
-    const priorEngine = lastEngineOf(this.eventLog);
+    // resume, so seed compact+50 from the COMPLETE shared log and mark the
+    // handover. The 2,000-event replay tail can contain less than one tool-heavy
+    // turn and is not a safe continuity source.
+    const durableHistory = opts.durableHistory ?? loadEventLogForCompactionSync(this.logKey);
+    const history = durableHistory.length ? durableHistory : this.eventLog;
+    const priorEngine = lastEngineOf(history);
     const switchedFrom = priorEngine && priorEngine !== this.cli ? priorEngine : null;
     if (switchedFrom) {
       this.seedWindowOnNextTurn = true;
@@ -300,7 +308,7 @@ export class CodexSession {
       } as SessionEvent);
     }
     // Never exec-resume a rollout jsonl (tool novels). Seed compact(history − last50) + last 50.
-    const visible = extractVisibleTurns(this.eventLog);
+    const visible = extractVisibleTurns(history);
     if (!switchedFrom && (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS)) {
       this.seedWindowOnNextTurn = true;
       this.threadId = null;
@@ -429,7 +437,8 @@ export class CodexSession {
     this.busy = true;
     this.cancellationEmitted = false;
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
-    const eventsForSeed = this.eventLog.slice();
+    const historyThroughSeq = this.latestSeq();
+    const fallbackHistory = this.eventLog.slice();
     // Echo for reconnect replay (codex's events don't re-emit the user prompt).
     // peerFrom marks a team-bus delivery: sender-tagged bubble, no compaction tick.
     if (opts.peerFrom) {
@@ -487,7 +496,9 @@ export class CodexSession {
     }
 
     const seedWindow = this.consumeWindowSeed() || recoverContextThisTurn;
-    const seed = seedWindow ? peekEnginePrimer(this.logKey, eventsForSeed) : '';
+    const seed = seedWindow
+      ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
+      : '';
     if (seed) {
       this.recoverContextOnNextTurn = false;
       this.emit({
@@ -1040,7 +1051,10 @@ export async function getOrCreateCodexSession(opts: {
   if (existing && existing.isAlive()) return existing;
 
   const threadId = (await getSessionId(cli, cwd, chatId)) ?? null;
-  const session = new CodexSession(cwd, chatId, threadId, { cli });
+  const logKey = logKeyFor(cli, cwd, chatId);
+  await flushEventLog(logKey);
+  const durableHistory = loadEventLogForCompactionSync(logKey);
+  const session = new CodexSession(cwd, chatId, threadId, { cli, durableHistory });
   codexSessions.set(key, session);
   return session;
 }
@@ -1084,9 +1098,11 @@ export async function freshStartCodex(opts: {
   // Wipe the durable log before the new session loads it, so a reset thread
   // can't be resurrected by a full (sinceSeq=0) replay from an empty client.
   const logKey = logKeyFor(cli, cwd, chatId);
+  // Delete external compact memory before the visible transcript, so a remote
+  // failure leaves the old thread coherent and Fresh can be retried safely.
+  await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
-  await clearThreadMemory(logKey);
-  const session = new CodexSession(cwd, chatId, null, { cli });
+  const session = new CodexSession(cwd, chatId, null, { cli, durableHistory: [] });
   codexSessions.set(key, session);
   return session;
 }

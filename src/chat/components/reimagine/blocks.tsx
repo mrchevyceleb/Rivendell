@@ -277,6 +277,18 @@ function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart'
   );
 }
 
+function TerminalErrorCard({ block }: { block: Extract<ChatBlock, { kind: 'terminal-error' }> }) {
+  return (
+    <div className="terminal-error" role="alert">
+      <span className="terminal-error-mark" aria-hidden="true">!</span>
+      <span>
+        <strong>Couldn’t answer this turn</strong>
+        <span className="terminal-error-copy">{block.message}</span>
+      </span>
+    </div>
+  );
+}
+
 const ENGINE_LABEL: Record<string, string> = {
   xai: 'Grok',
   zai: 'GLM',
@@ -648,7 +660,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   const hasVisible = blocks.some(
     (b) =>
       (b.kind === 'text' && (b as Extract<ChatBlock, { kind: 'text' }>).open && (b as Extract<ChatBlock, { kind: 'text' }>).text.trim().length > 0) ||
-      (b.kind === 'tool' && (b as Extract<ChatBlock, { kind: 'tool' }>).running),
+      (b.kind === 'tool' && (b as Extract<ChatBlock, { kind: 'tool' }>).running) ||
+      b.kind === 'terminal-error',
   );
 
   // Group consecutive assistant blocks (same turnId) and user blocks.
@@ -657,6 +670,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     | { type: 'elrond'; blocks: Array<Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>>; day: string }
     | { type: 'compact'; block: Extract<ChatBlock, { kind: 'compact' }>; day: string }
     | { type: 'restart'; block: Extract<ChatBlock, { kind: 'restart' }>; day: string }
+    | { type: 'terminal-error'; block: Extract<ChatBlock, { kind: 'terminal-error' }>; day: string }
     | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
     | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; day: string }
   > = [];
@@ -669,6 +683,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     }
     if (b.kind === 'restart') {
       groups.push({ type: 'restart', block: b, day: lastDay || day });
+      continue;
+    }
+    if (b.kind === 'terminal-error') {
+      groups.push({ type: 'terminal-error', block: b, day: lastDay || day });
       continue;
     }
     if (b.kind === 'switch') {
@@ -710,7 +728,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       hideThinking = true;
       continue;
     }
-    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'switch' || g.type === 'peer') {
+    if (g.type === 'user' || g.type === 'compact' || g.type === 'restart' || g.type === 'terminal-error' || g.type === 'switch' || g.type === 'peer') {
       pendingAutomation = false;
       hideThinking = false;
     }
@@ -752,6 +770,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
       nodes.push(<CompactDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'restart') {
       nodes.push(<RestartDivider key={g.block.id} block={g.block} />);
+    } else if (g.type === 'terminal-error') {
+      nodes.push(<TerminalErrorCard key={g.block.id} block={g.block} />);
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'peer') {

@@ -29,6 +29,7 @@ import {
   isQuietRoutineReply,
   isRoutinePromptText,
 } from './routineNoise.ts';
+import { isSyntheticApiErrorEvent, isSyntheticApiErrorText } from './providerErrors.ts';
 
 export const WINDOW_TURNS = 50;
 /** Clip a single visible turn so one essay cannot blow the window. */
@@ -124,6 +125,16 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
     return chunks.join('').trim();
   };
 
+  const discardPendingSynthetic = () => {
+    const trailing = [...openText.values()].join('').trim();
+    const body = `${pendingAssistant}${trailing ? `\n${trailing}` : ''}`.trim();
+    if (!isSyntheticApiErrorText(body)) return;
+    pendingAssistant = '';
+    pendingAssistantSeq = 0;
+    haveAssistantEvent = false;
+    openText.clear();
+  };
+
   const flushAssistant = () => {
     const trailing = takeStreamTail();
     const body = haveAssistantEvent
@@ -171,7 +182,19 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
       continue;
     }
 
+    if (t === '_terminal_error') {
+      // Only a marker tied to a positively identified synthetic assistant
+      // message may remove pending text. Preserve useful partial prose from
+      // unrelated execution failures so model memory matches the transcript.
+      if (inner.discardSynthetic === true) discardPendingSynthetic();
+      continue;
+    }
+
     if (t === 'assistant') {
+      if (isSyntheticApiErrorEvent(inner)) {
+        discardPendingSynthetic();
+        continue;
+      }
       const texts = assistantTextBlocks(inner);
       if (texts.length) {
         const joined = texts.join('\n').trim();

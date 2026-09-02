@@ -10,9 +10,9 @@ import type { Event, PermissionRequest, PermissionRuleset } from '@opencode-ai/s
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { adaptImagesForTextModel, getVisionMode } from './vision-adapter.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, isPlumbingEvent, loadEventLogSync } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, loadEventLogForCompactionSync, loadEventLogSync, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
-import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimer, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
+import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
 import { lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
@@ -50,7 +50,11 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
-type BananaSessionOptions = { recoverContextOnNextTurn?: boolean; cli?: CliKind };
+type BananaSessionOptions = {
+  recoverContextOnNextTurn?: boolean;
+  cli?: CliKind;
+  durableHistory?: PersistedEvent[];
+};
 type BananaSendOptions = {
   model?: string;
   /** Reasoning effort (e.g. low|medium|high) for OpenRouter/openai-compatible models. */
@@ -2468,10 +2472,13 @@ export class BananaSession {
       console.warn(`[chat banana] event-log restore failed for ${this.logKey}:`, (err as Error).message);
     }
     void compactEventLog(this.logKey, compactedThroughSeq(this.logKey));
-    // A different brain spoke last on this thread — mark the handover. The seed
-    // below already covers context; opencode threads are never resumed across
-    // engines anyway.
-    const priorEngine = lastEngineOf(this.eventLog);
+    // A different brain spoke last on this thread — mark the handover. Use the
+    // complete durable history: the 2,000-event replay tail can be less than one
+    // tool-heavy turn. The seed below covers context; opencode threads are never
+    // resumed across engines anyway.
+    const durableHistory = opts.durableHistory ?? loadEventLogForCompactionSync(this.logKey);
+    const history = durableHistory.length ? durableHistory : this.eventLog;
+    const priorEngine = lastEngineOf(history);
     if (priorEngine && priorEngine !== this.cli) {
       console.warn(
         `[chat banana] model switch on ${this.logKey}: ${priorEngine} → ${this.cli} — seeding compact+50 from the thread log`,
@@ -2482,7 +2489,7 @@ export class BananaSession {
       } as SessionEvent);
     }
     // Never exec-resume a week of opencode history. Seed compact(history − last50) + last 50.
-    const visible = extractVisibleTurns(this.eventLog);
+    const visible = extractVisibleTurns(history);
     if (isRotationOwed(this.logKey) || visible.length > WINDOW_TURNS) {
       this.seedWindowOnNextTurn = true;
       this.threadId = null;
@@ -2675,7 +2682,8 @@ export class BananaSession {
     this.wipedThisTurn = false;
     if (opts.hidden) this.emit({ type: 'turnStart' });
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
-    const eventsForSeed = this.eventLog.slice();
+    const historyThroughSeq = this.latestSeq();
+    const fallbackHistory = this.eventLog.slice();
     const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(text);
     // Echo for reconnect replay (banana's events don't re-emit the user prompt).
     // Internal auto-continues are intentionally hidden; they are just Rivendell
@@ -2902,7 +2910,9 @@ export class BananaSession {
     const needsContextRecovery = this.wipedThisTurn || recoverContextThisTurn;
     const seedWindow = this.consumeWindowSeed() || needsContextRecovery;
     const commandExpandedText = visionPromptText ?? (slashCommand ? expandBananaSlashCommand(slashCommand) : text);
-    const seed = seedWindow ? peekEnginePrimer(this.logKey, eventsForSeed) : '';
+    const seed = seedWindow
+      ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
+      : '';
     const personaScope = personaPromptFor(this.chatId);
     const personaPrefix = personaScope ? `${personaScope}\n\n---\n\n` : '';
     const effectiveText = `${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${commandExpandedText}`;
@@ -3965,7 +3975,14 @@ export async function getOrCreateBananaSession(opts: {
       `[chat banana] ignoring persisted opencode session after process restart for ${key}; will recover context from event log on next turn`,
     );
   }
-  const session = new BananaSession(cwd, chatId, null, { recoverContextOnNextTurn, cli });
+  const logKey = logKeyFor(cli, cwd, chatId);
+  await flushEventLog(logKey);
+  const durableHistory = loadEventLogForCompactionSync(logKey);
+  const session = new BananaSession(cwd, chatId, null, {
+    recoverContextOnNextTurn,
+    cli,
+    durableHistory,
+  });
   bananaSessions.set(key, session);
   return session;
 }
@@ -4008,9 +4025,11 @@ export async function freshStartBanana(opts: {
   // Wipe the durable log before the new session loads it, so a reset thread
   // can't be resurrected by a full (sinceSeq=0) replay from an empty client.
   const logKey = logKeyFor(cli, cwd, chatId);
+  // Delete external compact memory before the visible transcript, so a remote
+  // failure leaves the old thread coherent and Fresh can be retried safely.
+  await clearThreadMemory(logKey, chatId);
   await clearEventLog(logKey);
-  await clearThreadMemory(logKey);
-  const session = new BananaSession(cwd, chatId, null, { cli });
+  const session = new BananaSession(cwd, chatId, null, { cli, durableHistory: [] });
   bananaSessions.set(key, session);
   return session;
 }
