@@ -18,6 +18,7 @@ interface AccountMap {
 
 const HOME = homedir();
 const MAP_PATH = process.env.RIVENDELL_ACCOUNT_MAP?.trim() || '';
+const DEFAULT_CLI_ACCOUNT = process.env.RIVENDELL_DEFAULT_CLI_ACCOUNT?.trim() || '';
 
 let cached: AccountMap | null = null;
 function loadMap(): AccountMap | null {
@@ -50,9 +51,8 @@ export function resolveAccount(cwd: string): string | null {
  * rules. Rivendell uses this to bind a companion (not a directory) to an account:
  * A custom/private picker may bind a lane to a named profile. The per-directory
  * `accountEnv` below remains authoritative for ordinary lanes. If a named
- * profile is missing from the configured map we FAIL CLOSED: scrub
- * CLAUDE_CONFIG_DIR/CODEX_HOME to the CLI defaults rather than silently
- * falling back to another profile.
+ * profile is missing from the configured map we fail closed and refuse to
+ * launch rather than silently falling back to another profile.
  */
 export function accountEnvForAccount(account: string, cwd: string): NodeJS.ProcessEnv {
   const map = loadMap();
@@ -73,13 +73,9 @@ export function accountEnvForAccount(account: string, cwd: string): NodeJS.Proce
     env.CODEX_HOME = join(HOME, a.codex_home);
     return env;
   }
-  console.warn(
-    `[accountResolver] forced account "${account}" not in configured map; failing CLOSED — scrubbing CLAUDE_CONFIG_DIR/CODEX_HOME -> CLI default rather than risk wrong-account bleed (cwd="${cwd}")`,
+  throw new Error(
+    `[accountResolver] configured account "${account}" is unavailable; refusing to launch a CLI under a different profile (cwd="${cwd}")`,
   );
-  delete env.CLAUDE_CONFIG_DIR;
-  delete env.CODEX_HOME;
-  env.SAMWISE_ACCOUNT = `unresolved:${account}`;
-  return env;
 }
 
 /**
@@ -88,6 +84,9 @@ export function accountEnvForAccount(account: string, cwd: string): NodeJS.Proce
  * unknown, returns process.env unchanged (safe no-op fallback).
  */
 export function accountEnv(cwd: string): NodeJS.ProcessEnv {
+  // Private/multi-profile deployments may explicitly pin Rivendell's CLI lanes
+  // while public defaults continue to use the normal local profile.
+  if (DEFAULT_CLI_ACCOUNT) return accountEnvForAccount(DEFAULT_CLI_ACCOUNT, cwd);
   const map = loadMap();
   const account = resolveAccount(cwd);
   const env: NodeJS.ProcessEnv = { ...process.env };

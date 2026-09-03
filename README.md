@@ -85,7 +85,7 @@ Start with [`.env.example`](.env.example). Important groups:
 | Hosted models | `OPENROUTER_API_KEY`, `FIREWORKS_API_KEY` |
 | External MCP | `ASSISTANT_MCP_URL`, `ASSISTANT_MCP_TOKEN`, `RIVENDELL_ASSISTANT_MCP_PROXY` |
 | Browser bridge | `RIVENDELL_BROWSER_MCP` |
-| CLI profiles | `RIVENDELL_ACCOUNT_MAP` (optional explicit account routing) |
+| CLI profiles | `RIVENDELL_ACCOUNT_MAP`, `RIVENDELL_DEFAULT_CLI_ACCOUNT` (optional explicit account routing) |
 | Calendar display | `RIVENDELL_CALENDAR_PRIMARY_*`, `RIVENDELL_CALENDAR_SECONDARY_*`, `RIVENDELL_CALENDAR_SECONDARY_MARKERS` |
 | Windows links | `VITE_RIVENDELL_WINDOWS_WORKSPACE_PATH` |
 | Persistence | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
@@ -93,7 +93,7 @@ Start with [`.env.example`](.env.example). Important groups:
 
 Secrets belong in environment variables or a secret manager, never in tracked files. Rivendell does not automatically read global Railway credentials or neighboring repositories.
 
-By default, Claude Code and Codex use their normal authenticated CLI profiles. Advanced multi-profile routing is opt-in through `RIVENDELL_ACCOUNT_MAP`; point it at JSON containing `accounts`, `default_account`, and path-prefix `rules`. Keep that file private and outside the repository.
+By default, Claude Code and Codex use their normal authenticated CLI profiles. Advanced multi-profile routing is opt-in through `RIVENDELL_ACCOUNT_MAP`; point it at JSON containing `accounts`, `default_account`, and path-prefix `rules`. Set `RIVENDELL_DEFAULT_CLI_ACCOUNT` only when every Rivendell Claude/Codex lane should use one named profile regardless of workspace rules. It requires a matching account entry in `RIVENDELL_ACCOUNT_MAP`; Rivendell refuses to launch those CLIs rather than silently using the wrong profile. Keep the map private and outside the repository.
 
 For a two-source calendar feed, `RIVENDELL_CALENDAR_SECONDARY_MARKERS` accepts comma-separated substrings matched against upstream source, account, calendar ID, calendar name, and organizer fields. For example, `work,company.example` groups matching events into the secondary calendar. Labels, names, and colors come from the corresponding `RIVENDELL_CALENDAR_*` variables in `.env.example`.
 
