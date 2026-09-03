@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
 import { TEAM_MCP_SCRIPT } from '../config.ts';
-import { getSessionId, setSessionId } from './sessions.ts';
+import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents } from './event-log-store.ts';
@@ -454,6 +454,13 @@ class ClaudeSession {
   /** True only while the active turn came from a scheduled routine. Human
    * input must wait for this turn's boundary instead of steering its mission. */
   private automationTurn = false;
+  /** Boot warmup is a real hidden provider round-trip. It never enters the
+   * transcript, and human input waits for its natural result boundary. */
+  private hiddenTurn = false;
+  private warmupPromise: Promise<void> | null = null;
+  private finishWarmupWait: ((error?: Error) => void) | null = null;
+  private warmupTimer: NodeJS.Timeout | null = null;
+  private selectionPersisted = false;
   private initSeen = false;
   private exitedBeforeInit = false;
   /** Set by shutdown(): once an intentional teardown begins, stop appending to
@@ -609,6 +616,10 @@ class ClaudeSession {
 
     this.child.on('exit', (code, signal) => {
       this.flushStderr();
+      const hiddenAtExit = this.hiddenTurn;
+      if (hiddenAtExit) {
+        this.finishWarmupWait?.(new Error(`Max warmup process exited (${code ?? signal ?? 'unknown'})`));
+      }
       const idleMs = Date.now() - this.lastActivityAtMs;
       console.log(
         `[chat ${this.cli}] child exit cwd=${this.cwd} code=${code} signal=${signal ?? '-'} initSeen=${this.initSeen} idleMs=${idleMs}`,
@@ -624,7 +635,7 @@ class ClaudeSession {
       // would then read a blank window and report that it did nothing, while the
       // work it actually finished sits on disk. `disposed` is set first by
       // shutdown()/interrupt(), so a deliberate stop stays quiet.
-      if (this.turnStartedAt !== null && !this.disposed) {
+      if (this.turnStartedAt !== null && !this.disposed && !hiddenAtExit) {
         const ranMs = Date.now() - this.turnStartedAt;
         console.warn(
           `[chat ${this.cli}] mid-turn death after ${ranMs}ms — writing crash tombstone (code=${code} signal=${signal ?? '-'})`,
@@ -646,6 +657,7 @@ class ClaudeSession {
       // A dead process is never busy, however it got there.
       this.turnStartedAt = null;
       this.automationTurn = false;
+      this.hiddenTurn = false;
       this.emit({ type: 'closed', code, signal });
     });
 
@@ -697,34 +709,91 @@ class ClaudeSession {
 
   /** Most recent turn start (ms) — used for telegram-ping duration. */
   private turnStartedAt: number | null = null;
+
+  /** Force the lazy Claude CLI through one complete hidden provider round-trip
+   * so Max's first real message never pays process/MCP initialization. */
+  async prewarm(): Promise<void> {
+    if (this.warmupPromise) return this.warmupPromise;
+    if (this.initSeen || this.turnStartedAt !== null) return;
+
+    let settled = false;
+    const boundary = new Promise<void>((resolve, reject) => {
+      this.finishWarmupWait = (error) => {
+        if (settled) return;
+        settled = true;
+        if (this.warmupTimer) clearTimeout(this.warmupTimer);
+        this.warmupTimer = null;
+        this.finishWarmupWait = null;
+        if (error) reject(error);
+        else resolve();
+      };
+    });
+    this.warmupPromise = boundary;
+    this.warmupTimer = setTimeout(() => {
+      this.finishWarmupWait?.(new Error('Max warmup timed out'));
+      this.shutdown('prewarm-timeout');
+    }, 120_000);
+    this.warmupTimer.unref?.();
+
+    try {
+      await this.send(
+        '[Rivendell internal boot warmup. Do not call tools. Reply with exactly READY.]',
+        undefined,
+        { hidden: true },
+      );
+      await boundary;
+    } catch (err) {
+      this.finishWarmupWait?.(err as Error);
+      await boundary;
+    } finally {
+      this.warmupPromise = null;
+    }
+  }
+
+  isPrewarming(): boolean {
+    return this.hiddenTurn;
+  }
+
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean; hidden?: boolean } = {}): Promise<void> {
     if (this.child.exitCode !== null) {
+      if (opts.hidden) throw new Error('cannot prewarm an exited session');
       this.emit({ type: 'error', message: 'session has exited' });
       return;
     }
     const startsNewTurn = this.turnStartedAt === null;
     const automationRequest = opts.peerFromRole === 'automation';
+    const hiddenRequest = opts.hidden === true;
+    if (hiddenRequest && !startsNewTurn) {
+      throw new Error('cannot prewarm a session that already has a turn');
+    }
     if (automationRequest && (!startsNewTurn || isThreadWatched(this.cwd, this.chatId))) {
       throw new Error('routine deferred because this thread is active');
     }
-    if (!startsNewTurn && this.automationTurn) {
-      // Register normally waits for the routine boundary. Keep this admission
-      // guard here too so a race can reject, but never hijack, that mission.
-      throw new Error('human message is waiting for the automation turn to finish');
+    if (!startsNewTurn && (this.automationTurn || this.hiddenTurn)) {
+      // Register normally waits for these internal boundaries. Keep this
+      // admission guard here too so a race can reject, but never hijack, them.
+      throw new Error(this.hiddenTurn
+        ? 'human message is waiting for Max to finish warming'
+        : 'human message is waiting for the automation turn to finish');
     }
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
       this.automationTurn = automationRequest;
+      this.hiddenTurn = hiddenRequest;
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
       this.streamTextBlocks.clear();
     }
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
-    const wantSeed = this.seedWindowOnNextTurn;
+    // Warm the process/provider without replaying conversation context or
+    // consuming rotation debt. The first real user turn still receives the
+    // complete compact+window seed, so a restart marker can never make hidden
+    // warmup resume side effects from an interrupted task.
+    const wantSeed = this.seedWindowOnNextTurn && !hiddenRequest;
     const seed = wantSeed
       ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
       : '';
@@ -733,7 +802,10 @@ class ClaudeSession {
     // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
     // so the UI still shows Matt's message and thumbnails even when the vision
     // adapter rewrites the prompt below.
-    if (opts.peerFrom) {
+    if (hiddenRequest) {
+      // A warmup exists only inside the native provider session. It does not
+      // become a visible/durable Rivendell conversation turn.
+    } else if (opts.peerFrom) {
       this.emit({
         type: 'event',
         event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
@@ -814,6 +886,13 @@ class ClaudeSession {
       }
     } catch (e) {
       if (wantSeed) this.seedWindowOnNextTurn = true;
+      if (hiddenRequest) {
+        this.turnStartedAt = null;
+        this.hiddenTurn = false;
+        this.emitHiddenTurnEnd();
+        this.finishWarmupWait?.(e as Error);
+        throw e;
+      }
       this.emit({ type: 'error', message: `stdin write failed: ${(e as Error).message}` });
     }
   }
@@ -840,7 +919,7 @@ class ClaudeSession {
   }
 
   isAlive(): boolean {
-    return this.child.exitCode === null && !this.spawnError && !this.authFailed;
+    return this.child.exitCode === null && !this.spawnError && !this.authFailed && !this.disposed;
   }
 
   /** The warm child's OAuth token is dead (401/403). Retrying in-process can't
@@ -873,7 +952,10 @@ class ClaudeSession {
 
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
-    return this.turnStartedAt !== null;
+    // Boot warmup is internal readiness work, not a user/automation turn. The
+    // send path has an explicit isPrewarming wait, so clients stay ready and
+    // their first message is admitted normally after the hidden boundary.
+    return this.turnStartedAt !== null && !this.hiddenTurn;
   }
 
   /** Scheduled turns yield to human messages at their natural boundary. */
@@ -883,7 +965,7 @@ class ClaudeSession {
 
   /** One synchronous admission snapshot for register's native-steer decision. */
   canAcceptNativeHumanSteer(): boolean {
-    return this.turnStartedAt !== null && !this.automationTurn;
+    return this.turnStartedAt !== null && !this.automationTurn && !this.hiddenTurn;
   }
 
   sessionId(): string | null {
@@ -967,6 +1049,18 @@ class ClaudeSession {
     void removeEventLogEvents(this.logKey, targets);
   }
 
+  private persistAppliedSelection(): void {
+    if (this.selectionPersisted) return;
+    this.selectionPersisted = true;
+    void setSessionSelection(this.cli, this.cwd, {
+      model: this.spawnModel,
+      effort: this.spawnEffort,
+    }, this.chatId).catch((err) => {
+      this.selectionPersisted = false;
+      console.warn(`[chat ${this.cli}] could not persist applied model/effort:`, (err as Error).message);
+    });
+  }
+
   private emitTerminalNotice(
     terminal: TerminalProviderError,
     discardSynthetic = this.syntheticApiErrorSeen,
@@ -986,8 +1080,18 @@ class ClaudeSession {
     });
   }
 
+  private emitHiddenTurnEnd(): void {
+    // Internal waiters need a boundary, but it must not consume/persist a seq or
+    // make Max look recently active in the conversation list after every boot.
+    const se: SeqEvent = {
+      seq: this.latestSeq(),
+      ev: { type: 'turnEnd', sessionId: this.currentSessionId ?? undefined },
+    };
+    for (const fn of this.listeners) fn(se);
+  }
+
   private emit(msg: SessionEvent): void {
-    if (isPlumbingEvent(msg)) return;
+    if (this.hiddenTurn || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
     this.eventLog.push(se);
@@ -1119,6 +1223,27 @@ class ClaudeSession {
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
     }
 
+    if (this.hiddenTurn) {
+      if (ev?.type === 'result') {
+        const failed = ev.is_error === true || typeof ev.api_error_status === 'number';
+        const seeded = this.pendingSeedAck;
+        if (seeded) this.pendingSeedAck = false;
+        if (failed) this.seedWindowOnNextTurn = true;
+        this.turnStartedAt = null;
+        this.automationTurn = false;
+        this.hiddenTurn = false;
+        this.streamTextBlocks.clear();
+        if (!failed) this.persistAppliedSelection();
+        // Unblock an immediate human message that arrived during boot warmup
+        // without creating a fake durable transcript event.
+        this.emitHiddenTurnEnd();
+        if (seeded && !failed) void clearRotation(this.logKey);
+        this.finishWarmupWait?.(failed ? new Error('Max warmup provider turn failed') : undefined);
+        if (ev.api_error_status === 401) this.failAuth();
+      }
+      return;
+    }
+
     this.trackStreamText(ev);
     const syntheticApiError = isSyntheticApiErrorEvent(ev);
     if (syntheticApiError) {
@@ -1177,9 +1302,11 @@ class ClaudeSession {
       this.automationTurn = false;
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       const seeded = this.pendingSeedAck;
-      const failed = seeded && (ev.is_error === true || typeof ev.api_error_status === 'number');
+      const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
+      const failed = seeded && resultFailed;
       if (seeded) this.pendingSeedAck = false;
       if (failed) this.seedWindowOnNextTurn = true;
+      if (!resultFailed) this.persistAppliedSelection();
       void (async () => {
         if (seeded && !failed) await clearRotation(this.logKey);
         await this.maybeCompact();
@@ -1216,6 +1343,7 @@ export function markBusyLanesRestarting(signal: string): number {
 // ── Session manager ────────────────────────────────────────────────
 
 const sessions = new Map<string, ClaudeSession>();
+let sessionsShuttingDown = false;
 
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
   const normalized = chatId || 'main';
@@ -1239,6 +1367,7 @@ export async function getOrCreateSession(opts: {
    *  replacement never reaches init → the "asleep"/"no session" storm. */
   recycleOnMismatch?: boolean;
 }): Promise<AnySession> {
+  if (sessionsShuttingDown) throw new Error('Rivendell is shutting down');
   const chatId = opts.chatId || 'main';
   retireOtherEnginesOnThread(opts.cli, opts.repoPath, chatId);
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
@@ -1423,6 +1552,7 @@ async function spawnSessionOnce(
       resumeId = null;
       seedFirst = true;
     }
+    if (sessionsShuttingDown) throw new Error('Rivendell is shutting down');
     return spawnSession(cli, cwd, chatId, resumeId, key, 0, model, effort, seedFirst, switchedFrom);
   })();
   pendingSpawns.set(key, spawnPromise);
@@ -1445,6 +1575,7 @@ async function spawnSession(
   seedFirst = false,
   switchedFrom: string | null = null,
 ): Promise<ClaudeSession> {
+  if (sessionsShuttingDown) throw new Error('Rivendell is shutting down');
   const breaker = spawnFailures.get(key);
   if (breaker && Date.now() >= breaker.until) {
     // Window closed: those failures are history, not a streak. The count used to
@@ -1470,12 +1601,21 @@ async function spawnSession(
 
   const ok = await session.ready;
   if (!ok) {
+    const owner = sessions.get(key);
+    if (owner !== session) {
+      // Fresh/model replacement won the lane while this older spawn was still
+      // initializing. Never delete or overwrite the new owner.
+      if (owner) return owner;
+      throw new Error('claude startup was superseded');
+    }
     sessions.delete(key);
     // Recover from a stale persisted session id: drop it and retry without
     // --resume. Only one retry — if even a fresh spawn dies before init,
     // something else is wrong.
     if (resumeId && attempt === 0) {
       await setSessionId(cli, cwd, '', chatId); // clear the bad id
+      const replacement = sessions.get(key);
+      if (replacement) return replacement;
       return spawnSession(
         cli, cwd, chatId, null, key, attempt + 1, model, effort, true,
       );
@@ -1492,6 +1632,7 @@ async function spawnSession(
 }
 
 export function shutdownAllSessions(): void {
+  sessionsShuttingDown = true;
   console.warn(`[chat] shutdownAllSessions called (${sessions.size} session(s))`);
   for (const s of sessions.values()) s.shutdown('shutdownAllSessions');
   sessions.clear();
@@ -1556,6 +1697,11 @@ export async function freshStart(opts: {
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
+  // A boot prewarm may still be resolving getSessionId before its constructor
+  // claims the map. Let it claim, then replace that exact owner, rather than
+  // racing two detached children into the same lane.
+  const pending = pendingSpawns.get(key);
+  if (pending) await pending.catch(() => null);
   const existing = sessions.get(key);
   if (existing) {
     existing.shutdown('freshStart');

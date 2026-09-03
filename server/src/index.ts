@@ -3,8 +3,10 @@ import compression from 'compression';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
+import { ELROND_WORKSPACE_PATH, HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { quiesceChat, registerChat } from './chat/register.ts';
+import { getOrCreateSession } from './chat/runner.ts';
+import { getSessionSelection } from './chat/sessions.ts';
 import { ensureAgents } from './chat/agents.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { teamRouter } from './routes/team.ts';
@@ -140,11 +142,41 @@ app.use((error: Error, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: error.message });
 });
 
+let tearingDown = false;
+let maxPrewarm: Promise<void> | null = null;
+
 server.listen(PORT, HOST, () => {
   console.log(`rivendell listening on http://${HOST}:${PORT}`);
+  // Max is the always-on front door. A deploy used to leave him cold until
+  // Matt's first message, making every routine restart feel like a brand-new
+  // session. Prewarm exactly once at boot (never from hello/reconnect storms)
+  // using the last model/effort actually applied to his lane.
+  maxPrewarm = (async () => {
+    const chatId = 'bot-chief-of-staff';
+    const selection = await getSessionSelection('xai', ELROND_WORKSPACE_PATH, chatId);
+    if (tearingDown) return;
+    const session = await getOrCreateSession({
+      cli: 'xai',
+      repoPath: ELROND_WORKSPACE_PATH,
+      chatId,
+      model: selection?.model,
+      effort: selection?.effort,
+    });
+    if (tearingDown) {
+      session.shutdown('prewarm-teardown');
+      return;
+    }
+    if ('prewarm' in session && typeof session.prewarm === 'function') {
+      await session.prewarm();
+    }
+    if (!tearingDown) console.log('[chat prewarm] Max is ready');
+  })().catch((err) => {
+    if (!tearingDown) console.warn('[chat prewarm] Max could not prewarm:', (err as Error).message);
+  }).finally(() => {
+    maxPrewarm = null;
+  });
 });
 
-let tearingDown = false;
 const tearDown = (signal: NodeJS.Signals) => {
   if (tearingDown) return; // a second SIGTERM/SIGINT must not re-mark or re-launch shutdown
   tearingDown = true;

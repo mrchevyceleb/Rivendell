@@ -67,11 +67,16 @@ type ResumeWatchableSession = AnySession & {
 
 type SteerBoundary = 'turn-complete' | 'closed' | 'timeout' | 'aborted';
 
+function sessionHasActiveBoundary(session: AnySession): boolean {
+  return (session as { isBusy?: () => boolean }).isBusy?.() === true
+    || (session as { isPrewarming?: () => boolean }).isPrewarming?.() === true;
+}
+
 /** Every engine finishes its current turn naturally before guidance is sent.
  * This is the only steering policy that can guarantee no tool/process abort. */
 function waitForNaturalTurnEnd(session: AnySession, signal: AbortSignal, timeoutMs = 30 * 60_000): Promise<SteerBoundary> {
   if (signal.aborted) return Promise.resolve('aborted');
-  if ((session as { isBusy?: () => boolean }).isBusy?.() !== true) return Promise.resolve('turn-complete');
+  if (!sessionHasActiveBoundary(session)) return Promise.resolve('turn-complete');
   return new Promise((resolve) => {
     let settled = false;
     let unsubscribe: () => void = () => {};
@@ -819,7 +824,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               .canAcceptNativeHumanSteer?.() === true,
           );
           const steerDeadline = Date.now() + 30 * 60_000;
-          while (!nativeClaudeSteer && session && (session as { isBusy?: () => boolean }).isBusy?.() === true) {
+          while (!nativeClaudeSteer && session && sessionHasActiveBoundary(session)) {
             const remaining = Math.max(1, steerDeadline - Date.now());
             const boundary = await waitForNaturalTurnEnd(session, steerAborter.signal, remaining);
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
@@ -945,7 +950,6 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'error', message: 'codex is on a turn - wait for the result' });
             return;
           }
-          const wasBusy = busy;
           // Model/effort values are device-local. Only the explicit dirty bit
           // advanced by a real picker click may recycle a warm Claude-family
           // process. Defaults/hydration/reconnects always send false.
@@ -953,11 +957,28 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const requestedSelectionRevision = selectionRevisionOf(msg.selectionRevision);
           let selectionApplied = false;
           const generation = ++turnGeneration;
-          if (!busy) {
+          let session: AnySession | null = await sessionPromise;
+
+          // Boot prewarm is a hidden real provider turn. If a user arrives in
+          // its tiny startup window, wait for that natural boundary, then admit
+          // the message as a normal turn rather than steering the warmup.
+          if (session && (session as { isPrewarming?: () => boolean }).isPrewarming?.() === true) {
+            const boundary = await waitForNaturalTurnEnd(session, new AbortController().signal, 120_000);
+            if (boundary === 'timeout') throw new Error('Max is still warming — try again in a moment');
+            if (boundary === 'closed') session = null;
+          }
+          if (!session && cliKind && repoPath) {
+            // sessionPromise resolved to a dead/null session — rebind a fresh
+            // one rather than crashing on `null.send`.
+            session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
+          }
+          const wasBusy = Boolean(session && (session as { isBusy?: () => boolean }).isBusy?.() === true);
+          busy = wasBusy;
+          if (!wasBusy) {
             busy = true;
             safeSend({ type: 'turnStart' });
           }
-          let session: AnySession | null = await sessionPromise;
+
           // Persistent CLIs (claude/assistant): reconcile the spawned model/effort
           // with the current pick before an idle turn. getOrCreateSession recycles
           // an IDLE session whose model/effort differ (busy sessions left intact),
@@ -973,10 +994,6 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 `[chat ws#${wsId}] preserving warm ${cliKind} session across device-local model/effort mismatch`,
               );
             }
-          } else if (!session && cliKind && repoPath) {
-            // sessionPromise resolved to a dead/null session — rebind a fresh
-            // one rather than crashing on `null.send`.
-            session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
           }
           if (!session) throw new Error('session unavailable, please retry');
           if (chatQuiesced) {
