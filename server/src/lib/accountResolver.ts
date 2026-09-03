@@ -1,8 +1,7 @@
-// Single source of truth for which Claude Code / Codex account a workspace uses.
-// Reads the canonical map at ~/samwise/.accounts/account-map.json — the same file
-// the shell resolver (~/samwise/.bin/resolve-account) reads for interactive terminals.
-// Maps a spawn `cwd` to the right CLAUDE_CONFIG_DIR / CODEX_HOME so the Kim and
-// Personal accounts never collide. See ~/samwise/MATT-OS-V2-PLAN.md.
+// Optional source of truth for which Claude Code / Codex profile a workspace
+// uses. A fresh clone uses each CLI's normal profile. Operators can explicitly
+// opt into a map with RIVENDELL_ACCOUNT_MAP; Rivendell never discovers an
+// unrelated account configuration from the home directory.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
@@ -18,10 +17,11 @@ interface AccountMap {
 }
 
 const HOME = homedir();
-const MAP_PATH = join(HOME, 'samwise', '.accounts', 'account-map.json');
+const MAP_PATH = process.env.RIVENDELL_ACCOUNT_MAP?.trim() || '';
 
 let cached: AccountMap | null = null;
 function loadMap(): AccountMap | null {
+  if (!MAP_PATH) return null;
   if (cached) return cached;
   try {
     cached = JSON.parse(readFileSync(MAP_PATH, 'utf8')) as AccountMap;
@@ -34,7 +34,7 @@ function loadMap(): AccountMap | null {
   }
 }
 
-/** Which account ('kim' | 'personal' | ...) owns this path; null if no map. */
+/** Which named profile owns this path; null if no map is configured. */
 export function resolveAccount(cwd: string): string | null {
   const map = loadMap();
   if (!map) return null;
@@ -48,12 +48,11 @@ export function resolveAccount(cwd: string): string | null {
 /**
  * Env for spawning a CLI on an EXPLICITLY NAMED account, overriding the directory
  * rules. Rivendell uses this to bind a companion (not a directory) to an account:
- * Elrond/Codex → kim, Banana's personal engines → personal. The per-directory
- * `accountEnv` below stays authoritative everywhere else (terminals, AutoSam,
- * samwise-2). If the named account is missing from the map we FAIL CLOSED —
- * scrub CLAUDE_CONFIG_DIR/CODEX_HOME to the CLI defaults rather than silently
- * falling back to directory rules, which could bleed the companion onto the
- * wrong account (e.g. Personal Claude in ASSISTANT-HUB routing to Kim).
+ * A custom/private picker may bind a lane to a named profile. The per-directory
+ * `accountEnv` below remains authoritative for ordinary lanes. If a named
+ * profile is missing from the configured map we FAIL CLOSED: scrub
+ * CLAUDE_CONFIG_DIR/CODEX_HOME to the CLI defaults rather than silently
+ * falling back to another profile.
  */
 export function accountEnvForAccount(account: string, cwd: string): NodeJS.ProcessEnv {
   const map = loadMap();
@@ -75,7 +74,7 @@ export function accountEnvForAccount(account: string, cwd: string): NodeJS.Proce
     return env;
   }
   console.warn(
-    `[accountResolver] forced account "${account}" not in map (${MAP_PATH}); failing CLOSED — scrubbing CLAUDE_CONFIG_DIR/CODEX_HOME -> CLI default rather than risk wrong-account bleed (cwd="${cwd}")`,
+    `[accountResolver] forced account "${account}" not in configured map; failing CLOSED — scrubbing CLAUDE_CONFIG_DIR/CODEX_HOME -> CLI default rather than risk wrong-account bleed (cwd="${cwd}")`,
   );
   delete env.CLAUDE_CONFIG_DIR;
   delete env.CODEX_HOME;
@@ -112,19 +111,17 @@ export function accountEnv(cwd: string): NodeJS.ProcessEnv {
   // inherit a stray CLAUDE_CONFIG_DIR / CODEX_HOME that could route work through
   // the wrong account — scrub them so the CLIs use their own ~/.claude / ~/.codex
   // default deterministically, and log it loudly.
-  console.warn(
-    `[accountResolver] unresolved account for cwd="${cwd}" (map ${map ? 'loaded' : 'MISSING'}); scrubbing CLAUDE_CONFIG_DIR/CODEX_HOME -> CLI default`,
-  );
+  if (map) {
+    console.warn(`[accountResolver] configured account map has no usable profile for cwd="${cwd}"; using the default CLI profile`);
+  }
   delete env.CLAUDE_CONFIG_DIR;
   delete env.CODEX_HOME;
   env.SAMWISE_ACCOUNT = 'default';
   return env;
 }
 
-// Rivendell's account-pinned chat lanes (Claude · kim, Codex · personal, etc.)
-// carry the chosen login inside the chatId as a `__acct__<account>` suffix. That
-// rides through every keying/session-id/interrupt path untouched, so kim and
-// personal stay separate sessions; here we pull it back out at spawn time so the
+// Legacy/custom account-pinned chat lanes carry the chosen profile inside the
+// chatId as a `__acct__<account>` suffix. Here we pull it back out at spawn time so the
 // CLI launches under that exact account regardless of the repo path. The client
 // (useChat.ts) MUST use the same `__acct__` separator. Null for normal lanes,
 // which keep the per-repo account-map resolution.

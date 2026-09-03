@@ -32,11 +32,11 @@ const LOCAL_THINKING: Array<{ value: string; label: string }> = [
 type LaneMeta = { ring: string; short: string; word: string };
 
 const LANE_META: Record<string, LaneMeta> = {
-  'claude-kim': { ring: 'C', short: 'Claude Code · kim login', word: 'effort' },
-  'codex-kim': { ring: 'X', short: 'Codex · kim login', word: 'effort' },
+  claude: { ring: 'C', short: 'Claude Code · local profile', word: 'effort' },
+  codex: { ring: 'X', short: 'Codex · local profile', word: 'effort' },
   banana: { ring: 'O', short: 'billed to your OpenRouter key', word: 'effort' },
   'banana-fireworks': { ring: 'F', short: 'billed to your Fireworks key', word: 'effort' },
-  'banana-local': { ring: 'L', short: 'Moria · no cloud cost', word: 'thinking' },
+  'banana-local': { ring: 'L', short: 'Local · no cloud cost', word: 'thinking' },
   zai: { ring: 'Z', short: 'Z.ai coding plan', word: 'thinking' },
   xai: { ring: 'G', short: 'xAI coding plan', word: 'thinking' },
 };

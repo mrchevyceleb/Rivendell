@@ -1,5 +1,5 @@
 // The Rivendell mark — an 8-pointed star (Star of Eärendil silhouette) for
-// now; Matt will restyle later. Replaces the earlier blob+eyes glyph that
+// now; it can be restyled later. Replaces the earlier blob+eyes glyph that
 // leaned too close to the Grok Bot logo. Same component API so every
 // call site (rail mark, empty state, wordmark) switches in one place.
 

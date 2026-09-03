@@ -20,7 +20,7 @@ familyRouter.post('/', asyncHandler(async (req, res) => {
   try {
     const item = await createAdminFamilyTodo({
       title: req.body.title,
-      assignee: req.body.owner || req.body.assignee || 'Matt',
+      assignee: req.body.owner || req.body.assignee || 'Owner',
       category: req.body.category || 'home',
       due_date: req.body.due_date,
       notes: req.body.notes,

@@ -1,6 +1,7 @@
 {
   "name": "jarvis-agent",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "start": "tsx src/agent.ts start",
@@ -8,16 +9,19 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@livekit/agents": "1.5.3",
-    "@livekit/agents-plugin-elevenlabs": "1.5.3",
-    "@livekit/agents-plugin-silero": "1.5.3",
-    "@livekit/rtc-node": "^0.13.31",
-    "ws": "^8.18.0"
+    "@livekit/agents": "^1.7.1",
+    "@livekit/agents-plugin-elevenlabs": "^1.7.1",
+    "@livekit/agents-plugin-silero": "^1.7.1",
+    "@livekit/rtc-node": "^0.13.34",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/ws": "^8.5.12",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "adm-zip": "^0.6.0"
   }
 }

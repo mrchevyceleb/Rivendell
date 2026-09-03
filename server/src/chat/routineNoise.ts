@@ -1,6 +1,6 @@
 /** Classifiers for scheduled-routine noise in durable chat event logs.
  *  Used by unread counts, history previews, and team-recent so quiet
- *  automations never look like a teammate waiting on Matt. */
+ *  automations never look like a teammate waiting on the user. */
 
 import { isSyntheticApiErrorEvent } from './providerErrors.ts';
 
@@ -100,7 +100,7 @@ export function hasFailureSignal(text: string): boolean {
   });
 }
 
-/** No-op automation replies: hide these, keep real ship/fail/needs-Matt text. */
+/** No-op automation replies: hide these, keep real ship/fail/needs-user text. */
 export function isQuietRoutineReply(text: string): boolean {
   const t = text.trim();
   if (!t) return true;

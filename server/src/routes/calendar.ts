@@ -21,6 +21,7 @@ type CalendarEvent = {
   calendarId?: string;
   calendarName?: string;
   account?: string;
+  accountLabel?: string;
   source?: CalendarSource;
   status?: string;
   start?: CalendarEventDate;
@@ -30,20 +31,22 @@ type CalendarEvent = {
   [key: string]: unknown;
 };
 
-const ACCOUNT_META: Record<string, { account: string; accountLabel: string; calendarName: string; color: string }> = {
+const ACCOUNT_META: Record<string, { accountLabel: string; calendarName: string; color: string }> = {
   primary: {
-    account: 'matt@mattjohnston.io',
-    accountLabel: 'Matt',
-    calendarName: 'mattjohnston.io',
-    color: '#6aa3ff',
+    accountLabel: process.env.RIVENDELL_CALENDAR_PRIMARY_LABEL || 'Primary',
+    calendarName: process.env.RIVENDELL_CALENDAR_PRIMARY_NAME || 'Primary calendar',
+    color: process.env.RIVENDELL_CALENDAR_PRIMARY_COLOR || '#6aa3ff',
   },
   workspace2: {
-    account: 'matt@your-profit-partners.com',
-    accountLabel: 'YPP',
-    calendarName: 'Your Profit Partners',
-    color: '#d4af63',
+    accountLabel: process.env.RIVENDELL_CALENDAR_SECONDARY_LABEL || 'Secondary',
+    calendarName: process.env.RIVENDELL_CALENDAR_SECONDARY_NAME || 'Secondary calendar',
+    color: process.env.RIVENDELL_CALENDAR_SECONDARY_COLOR || '#d4af63',
   },
 };
+const SECONDARY_MARKERS = (process.env.RIVENDELL_CALENDAR_SECONDARY_MARKERS || '')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
 
 const DEFAULT_MAX_RESULTS = 250;
 const MAX_RESULTS = 250;
@@ -121,7 +124,10 @@ function sourceForEvent(event: CalendarEvent): 'primary' | 'workspace2' {
     stringValue(event.calendarName),
     organizerEmail(event.organizer),
   ];
-  if (markers.some((value) => value === 'workspace2' || value.includes('your-profit-partners'))) {
+  if (markers.some((value) =>
+    value === 'workspace2'
+    || value === 'secondary'
+    || SECONDARY_MARKERS.some((marker) => value.includes(marker)))) {
     return 'workspace2';
   }
   return 'primary';
@@ -157,9 +163,9 @@ function normalizeEvent(event: CalendarEvent) {
     ...event,
     id: event.id || `${source}-${event.calendarId || 'calendar'}-${event.summary || 'untitled'}-${event.start?.dateTime || event.start?.date || ''}`,
     source,
-    account: meta.account,
+    account: event.account || '',
     accountLabel: meta.accountLabel,
-    calendarName: event.calendarName || meta.calendarName,
+    calendarName: meta.calendarName,
     color: meta.color,
     attendees: Array.isArray(event.attendees) ? event.attendees : [],
   };

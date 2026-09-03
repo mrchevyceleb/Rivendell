@@ -6,6 +6,7 @@ import { discoverRepos } from './repos.ts';
 import { readChronicle } from './chronicle.ts';
 import { readCommands } from './commands.ts';
 import { ensureStateDir } from './sessions.ts';
+import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import {
   activeClaudeSessions,
   freshStart,
@@ -158,7 +159,10 @@ function normalizeChatId(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_CHAT_ID;
   const trimmed = value.trim();
   if (!trimmed) return DEFAULT_CHAT_ID;
-  const safe = trimmed.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+  // Account-suffixed lanes were a private deployment detail. Collapse legacy
+  // clients onto the same public/default-profile thread instead of forking it.
+  const withoutLegacyAccount = trimmed.replace(/__acct__[a-z0-9-]+$/i, '');
+  const safe = withoutLegacyAccount.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
   return safe || DEFAULT_CHAT_ID;
 }
 
@@ -395,6 +399,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
   const onUpgrade = (req: import('node:http').IncomingMessage, socket: import('node:net').Socket, head: Buffer) => {
     const path = new URL(req.url || '/', 'http://localhost').pathname;
     if (path !== '/api/ws') return;
+    if (!trustedWebSocketOrigin(req)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });

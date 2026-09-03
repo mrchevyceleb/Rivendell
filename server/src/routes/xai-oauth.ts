@@ -8,10 +8,12 @@ import { join, dirname } from 'node:path';
 export const xaiOauthRouter = Router();
 
 // xAI SuperGrok subscription OAuth (PKCE). Mirrors the pi-grok extension flow
-// so the access token draws on Matt's SuperGrok subscription instead of the
+// so the access token draws on the operator's SuperGrok subscription instead of the
 // metered GROK_PERSONAL_API_KEY. One-time browser login; the token refreshes
 // itself (refresh logic lives in the chat runner on spawn).
 const ISSUER = 'https://auth.x.ai';
+// OAuth client identifiers are public metadata, not credentials. Operators can
+// override this known CLI client without checking a client secret into Git.
 const CLIENT_ID = process.env.XAI_OAUTH_CLIENT_ID || 'b1a00492-073a-47ea-816f-4c329264a828';
 const SCOPE = 'openid profile email offline_access grok-cli:access api:access';
 const REDIRECT_URI = 'http://127.0.0.1:56121/callback';
@@ -19,7 +21,7 @@ const TOKEN_PATH = join(homedir(), '.rivendell', 'xai-oauth.json');
 // Guards the read-modify-write around a refresh. The token file is shared with
 // a SEPARATE process (assistant-mcp cron), and xAI rotates refresh tokens, so
 // two processes refreshing at once can invalidate the whole family and force
-// Matt through the browser login again. An in-process promise cannot see the
+// the operator through browser login again. An in-process promise cannot see the
 // other process; a lock file can.
 const LOCK_PATH = `${TOKEN_PATH}.lock`;
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
@@ -36,7 +38,7 @@ type XaiCreds = { access: string; refresh?: string; expires?: number; tokenEndpo
 
 /** Why the caller can (or can't) have a subscription token right now.
  *  `unconfigured` is the ONLY state that may fall back to the metered API key —
- *  every other failure must surface, never quietly bill Matt per token. */
+ *  every other failure must surface, never quietly bill the operator per token. */
 export type XaiAuth =
   | { mode: 'oauth'; token: string }
   | { mode: 'unconfigured' }
@@ -244,7 +246,7 @@ xaiOauthRouter.get('/', async (_req, res) => {
 <textarea id="paste" placeholder="http://127.0.0.1:56121/callback?code=...&state=..."></textarea>
 <p style="margin:10px 0"><button id="go">Connect</button></p>
 <div id="result"></div>
-<p class="muted">Token stored locally on Moria at ~/.rivendell/xai-oauth.json. Never leaves the machine.</p>
+<p class="muted">Token stored locally on this server at ~/.rivendell/xai-oauth.json. Never leaves the machine.</p>
 </div>
 <script>
 document.getElementById('go').onclick = async () => {

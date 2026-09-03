@@ -32,7 +32,7 @@ function humanizeMs(ms: number | undefined): string {
   return rem ? `${m}m ${rem}s` : `${m}m`;
 }
 
-/** SIGKILL / 137 is nearly always the OOM killer on Moria (GB10 unified
+/** SIGKILL / 137 is commonly the Linux OOM killer (including unified
  *  memory). 139 / SIGSEGV is a hard crash. Both mean "not your fault, and the
  *  work may well have finished." */
 function likelyOom(code: number | null, signal: string | null): boolean {
@@ -67,7 +67,7 @@ export function crashTombstoneText(opts: TombstoneOpts): string {
     );
   }
   lines.push(
-    `Work from this turn may have COMPLETED and written files even though no answer came back. Do NOT tell Matt nothing was done until you have checked:`,
+    `Work from this turn may have COMPLETED and written files even though no answer came back. Do NOT tell the user nothing was done until you have checked:`,
   );
   const slug = engineProjectSlug(cwd);
   lines.push(
@@ -103,7 +103,7 @@ export function restartMarkerEvent(signal: string) {
     `[Rivendell] The service restarted mid-turn (${signal} — a deploy or bounce). This turn was KILLED with the process.`,
     `Your in-flight tool call's output — including any error it printed — is LOST. Do NOT stall silently and do NOT guess:` ,
     `  1. re-check the work directly (re-run the interrupted command, or inspect its logs/artifacts), then`,
-    `  2. tell Matt the turn was restarted and what you recovered.`,
+    `  2. tell the user the turn was restarted and what you recovered.`,
   ].join('\n');
   return {
     type: 'event' as const,

@@ -173,7 +173,7 @@ const CODEX_TURN_PREAMBLE = [
   '<samwise-codex-runtime>',
   'When you run shell commands that may take more than a few seconds or need polling, use exec_command with tty=true. This includes gh run watch, dev servers, test watchers, and other watch or follow commands.',
   'If you see "stdin is closed for this session", rerun the command with tty=true.',
-  'When searching files, use `rg` or `rg --files` with scoped paths and exclusions for `node_modules`, `.git`, build output, and CloudStorage sync trees. Do not run broad recursive `grep` or `find` over `/Users/mjohnst`, `~/samwise`, or ASSISTANT-HUB.',
+  'When searching files, use `rg` or `rg --files` with scoped paths and exclusions for `node_modules`, `.git`, build output, and cloud-sync trees. Do not run broad recursive `grep` or `find` over the home directory, workspace hubs, or ASSISTANT-HUB.',
   'Give spawned subagents the same search constraint before asking them to inspect code.',
   HUB_WRITE_LOCK_PROMPT,
   '</samwise-codex-runtime>',
@@ -514,21 +514,24 @@ export class CodexSession {
     // interpolated into this config fragment, so only allow-listed strings
     // can reach the CLI.
     const codexReasoning = `model_reasoning_effort="${codexEffort}"`;
-    // Matt's real Chrome, the same MCP server the claude lanes get. Passed as
+    // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to Rivendell.
-    const browserMcpEntry =
-      process.env.RIVENDELL_BROWSER_MCP ||
-      `${process.env.HOME || '/home/mrchevyceleb'}/samwise/Personal-Apps/rivendell-browser-bridge/bridge/mcp-server.mjs`;
-    const browserMcpArgs = [
-      '-c', 'mcp_servers.rivendell-browser.command="node"',
-      '-c', `mcp_servers.rivendell-browser.args=["${browserMcpEntry}"]`,
+    const browserMcpEntry = process.env.RIVENDELL_BROWSER_MCP?.trim() || '';
+    const browserMcpArgs: string[] = [];
+    if (browserMcpEntry && existsSync(browserMcpEntry)) {
+      browserMcpArgs.push(
+        '-c', 'mcp_servers.rivendell-browser.command="node"',
+        '-c', `mcp_servers.rivendell-browser.args=${JSON.stringify([browserMcpEntry])}`,
+      );
+    }
+    browserMcpArgs.push(
       // rivendell-team: agent-to-agent messaging (this thread's agent identity
       // rides in via env so sends are attributed correctly).
-      '-c', `mcp_servers.rivendell-team.command="node"`,
-      '-c', `mcp_servers.rivendell-team.args=["${TEAM_MCP_SCRIPT}"]`,
-      '-c', `mcp_servers.rivendell-team.env.RIVENDELL_AGENT_NAME="${(agentForChatId(this.chatId)?.name ?? 'Teammate').replace(/"/g, '')}"`,
-    ];
+      '-c', 'mcp_servers.rivendell-team.command="node"',
+      '-c', `mcp_servers.rivendell-team.args=${JSON.stringify([TEAM_MCP_SCRIPT])}`,
+      '-c', `mcp_servers.rivendell-team.env.RIVENDELL_AGENT_NAME=${JSON.stringify(agentForChatId(this.chatId)?.name ?? 'Teammate')}`,
+    );
     const args: string[] = this.threadId
       ? [
           'exec',

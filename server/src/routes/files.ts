@@ -99,7 +99,7 @@ filesRouter.get('/raw', asyncHandler(async (req, res) => {
 }));
 
 // One-time installer for the Windows-side `rivendell://` URL handler. Served
-// as a plain-text PowerShell script Matt downloads on each Windows PC and runs
+// as a plain-text PowerShell script the operator downloads on each Windows PC and runs
 // once. The script registers an HKCU URL scheme entry and writes a sibling
 // handler script that translates `rivendell://open?winpath=...` URLs into
 // `Start-Process` against the OneDrive-synced ASSISTANT-HUB copy.

@@ -69,11 +69,11 @@ function rateOk(pairKey: string): { ok: boolean; reason?: string } {
 
 // ---- delivery ----------------------------------------------------------------
 
-/** Resolve an agent's live session key (lane-stamped, account-suffixed). */
+/** Resolve an agent's live session key. Account routing, when configured, is
+ * derived server-side from the workspace rather than baked into public IDs. */
 export function agentLogKey(agent: Agent): { cli: string; chatKey: string } {
   const cli = agent.cli || cliForEngine(agent.engine);
-  const account = cli === 'claude' || cli === 'codex' ? '__acct__kim' : '';
-  return { cli, chatKey: `${agent.home}${account}` };
+  return { cli, chatKey: agent.home };
 }
 
 /** Fire-and-forget delivery into an agent's home thread (routines path). */
@@ -86,7 +86,7 @@ export async function sendToAgentHome(
   const watchedByHuman = () => opts.peerFromRole === 'automation'
     && isThreadWatched(ELROND_WORKSPACE_PATH, chatKey);
   // Human conversation always owns a visible home thread. Do not even spawn a
-  // routine engine while Matt is there; the next scheduled cycle can retry.
+  // routine engine while the user is there; the next scheduled cycle can retry.
   if (watchedByHuman()) {
     return { delivered: false, reason: 'agent thread is actively watched — routine deferred' };
   }
@@ -152,12 +152,8 @@ export async function deliverTeamMessage(input: {
   const runner = await getRunner();
   // Prefer the LIVE lane (stamped on every user turn) over the birth engine —
   // a rebrained teammate receives on the thread the human actually sees.
-  const cli = to.cli || cliForEngine(to.engine);
+  const { cli, chatKey } = agentLogKey(to);
   const repoPath = ELROND_WORKSPACE_PATH;
-  // The UI encodes the account into the chatId (`__acct__kim`); deliver into
-  // the same key so the thread the human sees is the thread that receives.
-  const account = cli === 'claude' || cli === 'codex' ? '__acct__kim' : '';
-  const chatKey = `${to.home}${account}`;
   let session: SessionLike;
   try {
     session = await runner.getOrCreateSession({ cli, repoPath, chatId: chatKey });

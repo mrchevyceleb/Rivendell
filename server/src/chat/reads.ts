@@ -99,7 +99,7 @@ export function agentUnread(agent: Agent): number {
     const { events } = loadEventLogSync(agentHistoryKey(agent));
     if (!events.length) return 0;
     {
-      // A thread Matt is actively watching (visible tab) can never be "waiting
+      // A thread the user is actively watching (visible tab) can never be "waiting
       // for you" — replies there are seen as they land. Advance the durable
       // cursor too, so a reply rendered on a visible tab can't re-badge after
       // the tab backgrounds before the client's next mark-read POST.

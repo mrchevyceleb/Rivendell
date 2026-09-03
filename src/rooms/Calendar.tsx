@@ -1,5 +1,5 @@
 import { CalendarDays, Clock3, ExternalLink, Link2, MapPin, RefreshCcw, Users } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { Button, Chip, EmptyState } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import type { CalendarEvent } from '../data/types';
@@ -7,6 +7,7 @@ import { useCalendarEvents } from '../hooks/useRoomData';
 
 type CalendarAccount = 'primary' | 'workspace2';
 type CalendarFilter = CalendarAccount | 'all';
+type CalendarAccountMeta = { label: string; email: string; sourceName: string; className: string; color: string };
 
 type EventWithDate = {
   event: CalendarEvent;
@@ -14,18 +15,20 @@ type EventWithDate = {
   end: Date | null;
 };
 
-const accounts: Record<CalendarAccount, { label: string; email: string; sourceName: string; className: string }> = {
+const DEFAULT_ACCOUNTS: Record<CalendarAccount, CalendarAccountMeta> = {
   primary: {
-    label: 'Matt',
-    email: 'matt@mattjohnston.io',
-    sourceName: 'mattjohnston.io',
+    label: 'Primary',
+    email: 'Primary account',
+    sourceName: 'Primary calendar',
     className: 'source-primary',
+    color: '#6aa3ff',
   },
   workspace2: {
-    label: 'YPP',
-    email: 'matt@your-profit-partners.com',
-    sourceName: 'Your Profit Partners',
+    label: 'Secondary',
+    email: 'Secondary account',
+    sourceName: 'Secondary calendar',
     className: 'source-ypp',
+    color: '#d4af63',
   },
 };
 
@@ -62,6 +65,24 @@ export function Calendar() {
       .sort((a, b) => a.start.getTime() - b.start.getTime());
   }, [data.events]);
 
+  const accounts = useMemo(() => {
+    const next = {
+      primary: { ...DEFAULT_ACCOUNTS.primary },
+      workspace2: { ...DEFAULT_ACCOUNTS.workspace2 },
+    };
+    const seen = new Set<CalendarAccount>();
+    for (const { event } of allEvents) {
+      const source = sourceFor(event);
+      if (seen.has(source)) continue;
+      seen.add(source);
+      if (event.accountLabel) next[source].label = event.accountLabel;
+      if (event.account) next[source].email = event.account;
+      if (event.calendarName) next[source].sourceName = event.calendarName;
+      if (event.color) next[source].color = event.color;
+    }
+    return next;
+  }, [allEvents]);
+
   const accountCounts = useMemo(() => {
     return allEvents.reduce(
       (counts, item) => {
@@ -83,11 +104,17 @@ export function Calendar() {
   const filterLabel = filter === 'all' ? 'both calendars' : accounts[filter].sourceName;
   const showLoading = isLoading && allEvents.length === 0;
   const subtitle = data.truncated
-    ? `mattjohnston.io and Your Profit Partners, merged into one color-coded agenda. Showing the first ${data.maxResults ?? allEvents.length}.`
-    : 'mattjohnston.io and Your Profit Partners, merged into one color-coded agenda.';
+    ? `Your connected calendars, merged into one color-coded agenda. Showing the first ${data.maxResults ?? allEvents.length}.`
+    : 'Your connected calendars, merged into one color-coded agenda.';
 
   return (
-    <div className="split-room calendar-room">
+    <div
+      className="split-room calendar-room"
+      style={{
+        '--calendar-primary': accounts.primary.color,
+        '--calendar-ypp': accounts.workspace2.color,
+      } as CSSProperties}
+    >
       <aside className="room-rail calendar-rail r-scroll">
         <p className="r-eyebrow-gold">Calendar</p>
         <h2>Schedule</h2>
@@ -97,13 +124,14 @@ export function Calendar() {
           onFilterChange={setFilter}
           allCount={allEvents.length}
           accountCounts={accountCounts}
+          accounts={accounts}
         />
 
         <NextEventPanel nextEvent={nextEvent} />
 
         <div className="calendar-legend">
-          <span><i className="calendar-dot source-primary" /> Matt</span>
-          <span><i className="calendar-dot source-ypp" /> Your Profit Partners</span>
+          <span><i className="calendar-dot source-primary" /> {accounts.primary.label}</span>
+          <span><i className="calendar-dot source-ypp" /> {accounts.workspace2.label}</span>
         </div>
       </aside>
 
@@ -126,6 +154,7 @@ export function Calendar() {
             onFilterChange={setFilter}
             allCount={allEvents.length}
             accountCounts={accountCounts}
+            accounts={accounts}
           />
           <NextEventPanel nextEvent={nextEvent} />
         </div>
@@ -142,7 +171,7 @@ export function Calendar() {
           </div>
 
           {showLoading ? (
-            <EmptyState title="Loading calendar" body="Pulling Matt and Your Profit Partners events." />
+            <EmptyState title="Loading calendar" body="Pulling your connected calendar events." />
           ) : null}
 
           {isError ? (
@@ -166,7 +195,7 @@ export function Calendar() {
 
                 <div className="calendar-event-stack">
                   {day.events.map((item) => (
-                    <CalendarEventCard item={item} key={`${item.event.id}-${item.start.toISOString()}`} />
+                    <CalendarEventCard item={item} accounts={accounts} key={`${item.event.id}-${item.start.toISOString()}`} />
                   ))}
                 </div>
               </section>
@@ -183,11 +212,13 @@ function CalendarAccountFilters({
   onFilterChange,
   allCount,
   accountCounts,
+  accounts,
 }: {
   filter: CalendarFilter;
   onFilterChange: (filter: CalendarFilter) => void;
   allCount: number;
   accountCounts: Record<CalendarAccount, number>;
+  accounts: Record<CalendarAccount, CalendarAccountMeta>;
 }) {
   return (
     <div className="calendar-account-stack">
@@ -195,7 +226,7 @@ function CalendarAccountFilters({
         <span className="calendar-dot duo" />
         <span>
           <strong>All calendars</strong>
-          <small>Matt + YPP</small>
+          <small>Primary + secondary</small>
         </span>
         <code>{allCount}</code>
       </button>
@@ -232,7 +263,13 @@ function NextEventPanel({ nextEvent }: { nextEvent?: EventWithDate }) {
   );
 }
 
-function CalendarEventCard({ item }: { item: EventWithDate }) {
+function CalendarEventCard({
+  item,
+  accounts,
+}: {
+  item: EventWithDate;
+  accounts: Record<CalendarAccount, CalendarAccountMeta>;
+}) {
   const { event } = item;
   const source = sourceFor(event);
   const account = accounts[source];
@@ -291,9 +328,7 @@ function CalendarEventCard({ item }: { item: EventWithDate }) {
 
 function sourceFor(event: CalendarEvent): CalendarAccount {
   if (event.source === 'workspace2') return 'workspace2';
-  if (event.account?.includes('your-profit-partners') || event.calendarId?.includes('your-profit-partners')) {
-    return 'workspace2';
-  }
+  if (event.source === 'secondary') return 'workspace2';
   return 'primary';
 }
 

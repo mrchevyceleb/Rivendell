@@ -11,25 +11,23 @@ import { DEFAULT_CLAUDE_MODEL, normalizeClaudeModel } from '../components/CodexE
 
 // Companion + model/effort selection for an embedded chat (the Workspace room).
 // Unlike Hall, this exposes every engine family directly in one flat list.
-// Claude Code and Codex lanes are pinned to the kim login — the personal Claude
-// and Codex accounts have been removed.
+// Claude Code and Codex use their normal local CLI profiles unless the server
+// operator explicitly configures an account map.
 //
 // Model/effort choices share localStorage keys with Hall so a model pick in one
 // place carries to the other; only the companion choice is panel-scoped.
 
 // One entry per picker lane. `id` is the (string) selection key; `cli` is the
-// engine the server runs; `account`, when set, PINS that login no matter the
-// repo. Rivendell's picker is the only surface that overrides the per-repo
-// account-map (terminals/AutoSam keep repo resolution) — the choice rides into
-// the chat via useChat's chatId encoding and is forced at spawn server-side.
+// engine the server runs; `account`, when set by a custom integration, pins a
+// named profile. Public defaults do not select a machine-specific account.
 export const WORKSPACE_COMPANIONS: {
   id: string;
   cli: CompanionId;
   account?: RepoAccount;
   label: string;
 }[] = [
-  { id: 'claude-kim', cli: 'claude', account: 'kim', label: 'Claude · kim' },
-  { id: 'codex-kim', cli: 'codex', account: 'kim', label: 'Codex · kim' },
+  { id: 'claude', cli: 'claude', label: 'Claude Code' },
+  { id: 'codex', cli: 'codex', label: 'Codex' },
   { id: 'banana', cli: 'banana', label: 'OpenRouter' },
   { id: 'banana-fireworks', cli: 'banana-fireworks', label: 'Fireworks' },
   { id: 'banana-local', cli: 'banana-local', label: 'Local · LM Studio' },
@@ -37,16 +35,14 @@ export const WORKSPACE_COMPANIONS: {
   { id: 'xai', cli: 'xai', label: 'xAI · Grok 4.6' },
 ];
 
-// Login Rivendell can pin a Claude/Codex lane to. Personal Claude/Codex are
-// gone; kim is the only subscription account left on these engines.
-export type RepoAccount = 'kim';
+// Optional named profile for custom/private picker extensions. Public entries
+// intentionally leave this unset and use the CLI's normal local profile.
+export type RepoAccount = string;
 
 // Plain-words, one-line explanation of the ACTIVE lane's auth, shown under the
 // picker so "which account is this?" is never a mystery.
 export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null): string {
-  const who =
-    account === 'kim' ? 'the kim login (R-Link / Kim Garst)'
-    : 'the login mapped to the selected repo';
+  const who = account ? 'the configured subscription login' : 'the login mapped to the selected repo';
   switch (cli) {
     case 'assistant':      return `Elrond on Claude Code, signed in as ${who}.`;
     case 'claude':         return `Claude Code, signed in as ${who}.`;
@@ -55,7 +51,7 @@ export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null
     case 'xai':              return 'Grok 4.6 via your xAI coding plan (no Claude or Codex login).';
     case 'banana':           return 'OpenRouter, billed to your OpenRouter API key (no Claude or Codex login).';
     case 'banana-fireworks': return 'Fireworks, billed to your Fireworks API key (no Claude or Codex login).';
-    case 'banana-local':     return 'A local model on Moria via LM Studio. No account, no cloud cost.';
+    case 'banana-local':     return 'A local model via an OpenAI-compatible server. No cloud account required.';
     default:                 return '';
   }
 }
@@ -171,7 +167,9 @@ export function useCompanionPicker(storageKey: string) {
     // migrate stale lanes removed from the picker (assistant / claude-personal /
     // codex-personal / any personal-* lane) to that default so a stored
     // selection doesn't silently fall through to the first lane on every load.
-    const raw = readLS(storageKey, 'xai');
+    const stored = readLS(storageKey, 'xai');
+    const raw = stored === 'claude-kim' ? 'claude' : stored === 'codex-kim' ? 'codex' : stored;
+    if (raw !== stored && typeof window !== 'undefined') localStorage.setItem(storageKey, raw);
     const valid = WORKSPACE_COMPANIONS.some((c) => c.id === raw);
     if (!valid || /personal/i.test(raw)) {
       if (typeof window !== 'undefined') localStorage.setItem(storageKey, 'xai');
@@ -183,8 +181,7 @@ export function useCompanionPicker(storageKey: string) {
     setCompanionState(c);
     if (typeof window !== 'undefined') localStorage.setItem(storageKey, c);
   };
-  // Resolve the selected lane to its engine + (optional) pinned account. A stale
-  // stored id (e.g. a pre-account-lanes 'claude') falls back to the first lane.
+  // Resolve the selected lane to its engine + optional explicitly pinned account.
   const entry = WORKSPACE_COMPANIONS.find((c) => c.id === companion) ?? WORKSPACE_COMPANIONS[0];
   const account = entry.account ?? null;
 
@@ -220,12 +217,12 @@ export function useCompanionPicker(storageKey: string) {
     if (typeof window !== 'undefined') localStorage.setItem(key, v);
   };
   const setClaudeModel = (value: string) => {
-    markSelectionChanged('claude-kim');
+    markSelectionChanged('claude');
     const model = normalizeClaudeModel(value);
     setClaudeModelState(model);
     if (typeof window !== 'undefined') localStorage.setItem('rivendell:claude-model', model);
   };
-  const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState, 'claude-kim');
+  const setClaudeEffort = persist('rivendell:claude-effort', setClaudeEffortState, 'claude');
   const setCodexModel = (value: string) => {
     const model = normalizeCodexModel(value);
     const effort = normalizeCodexEffort(model, codexEffort);

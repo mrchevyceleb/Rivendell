@@ -1,7 +1,7 @@
 // Client mirror of server/src/chat/routineNoise.ts — keep the classifiers in
 // sync. Automation (routine) turns are silent in the chat thread unless the
 // turn's final text is a real deliverable: something shipped, failed, or
-// needs Matt. The durable event log keeps everything; this only filters the
+// needs the user. The durable event log keeps everything; this only filters the
 // rendered blocks (live stream, replay, and the localStorage cache alike).
 
 import type { ChatBlock } from '../data/types';
@@ -50,7 +50,7 @@ function hasFailureSignal(text: string): boolean {
   });
 }
 
-/** No-op automation replies: hide these, keep real ship/fail/needs-Matt text. */
+/** No-op automation replies: hide these, keep real ship/fail/needs-user text. */
 export function isQuietRoutineReply(text: string): boolean {
   const t = text.trim();
   if (!t) return true;

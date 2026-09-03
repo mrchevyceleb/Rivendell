@@ -90,8 +90,8 @@ function sortCommands(a: CommandEntry, b: CommandEntry): number {
 export async function readCommands(): Promise<CommandCatalog> {
   // Each spawned CLI loads BOTH its per-account user commands and the project's
   // .claude/commands; mirror that union here so the Hall slash-menu matches what
-  // the model can actually run. (Hall maps Elrond/Claude · kim to `claude`,
-  // Codex · kim to `codex`, Banana engines to `banana`.) Personal Claude/Codex
+  // the model can actually run. (Hall maps Claude Code to `claude`, Codex to
+  // `codex`, and hosted/local OpenAI-compatible engines to `banana`.) Legacy
   // command dirs are no longer scanned.
   const [elrondUser, codexPrompts, assistantHubProject] = await Promise.all([
     markdownCommands(ELROND_COMMANDS_DIR),

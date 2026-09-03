@@ -262,7 +262,7 @@ export function shouldCompactOverflow(overflow: VisibleTurn[]): boolean {
 /** Aged-out turns for the compact slot (history − last 50). Never the tail. */
 export function formatAgedTurns(turns: VisibleTurn[]): string {
   if (turns.length === 0) return '';
-  return turns.map((t) => `${t.role === 'user' ? 'MATT' : 'AGENT'}: ${t.text}`).join('\n\n');
+  return turns.map((t) => `${t.role === 'user' ? 'USER' : 'AGENT'}: ${t.text}`).join('\n\n');
 }
 
 /** Compact slot: overwriteable blob, plus any overflow not yet merged. Never the last 50. */

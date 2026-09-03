@@ -1,6 +1,6 @@
 // Thread watch registry — which (repo, chatId) lanes have a live chat
 // WebSocket bound right now, and whether that tab is VISIBLE. A reply landing
-// in a thread Matt is actively looking at is not "unread": the badge means
+// in a thread the user is actively looking at is not "unread": the badge means
 // "waiting for you", and it can't be waiting if he's watching. Backgrounded
 // tabs do NOT count (they can still be unread on other devices). Written by
 // the WS register (hello / watch message / close), read by unread counting.

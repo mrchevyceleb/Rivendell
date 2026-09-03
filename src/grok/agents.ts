@@ -1,4 +1,4 @@
-// Client agent model — the team Matt curates, served from /api/agents.
+// Client agent model — the team the user curates, served from /api/agents.
 // One agent = one persistent forever-thread + a scope document + an engine.
 
 import { useCallback, useEffect, useState } from 'react';
@@ -9,7 +9,7 @@ export type Agent = {
   id: string;
   name: string;
   role: string;
-  /** WORKSPACE_COMPANIONS lane id ('claude-kim', 'xai', …). */
+  /** WORKSPACE_COMPANIONS lane id ('claude', 'xai', …). */
   engine: string;
   /** home thread chatId (bot-<id>). */
   home: string;

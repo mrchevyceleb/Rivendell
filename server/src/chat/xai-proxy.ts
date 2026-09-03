@@ -28,7 +28,7 @@ import { getXaiAuth } from '../routes/xai-oauth.ts';
 // swaps it for a freshly-refreshed subscription token on every request. That
 // kills the staleness bug at the root (nothing expirable is frozen into an
 // env) and doubles as caller identity, so a stray local process that finds the
-// port can't spend Matt's plan. Callers that don't present the secret (the
+// port can't spend the operator's plan. Callers that don't present the secret (the
 // GROK_PERSONAL_API_KEY path) forward their own header untouched.
 //
 // Started once per server process on an ephemeral 127.0.0.1 port and reused by
@@ -40,7 +40,7 @@ const XAI_UPSTREAM = process.env.RIVENDELL_XAI_UPSTREAM?.trim() || 'https://api.
 // THIS instead of a real token, which is what makes the whole scheme work:
 // nothing expirable is ever frozen into a child env, and the proxy can tell its
 // own claude children apart from any other process that stumbles onto the port.
-// Without it, binding 127.0.0.1 would hand Matt's subscription to any local
+// Without it, binding 127.0.0.1 would hand the operator's subscription to any local
 // caller that asked — loopback is not identity on a shared machine.
 const PROXY_SECRET = randomBytes(32).toString('hex');
 
@@ -191,7 +191,7 @@ function startServer(): Promise<string> {
         // Only a child WE seeded gets the subscription. It proves that by
         // presenting the proxy secret, which we then swap for a live token —
         // so a frozen env can never carry an expiring credential, and an
-        // unrelated local process can't spend Matt's plan.
+        // unrelated local process can't spend the operator's plan.
         if (presentsProxySecret(headers['authorization'])) {
           const auth = await getXaiAuth();
           if (aborted || res.writableEnded) return; // client vanished mid-refresh

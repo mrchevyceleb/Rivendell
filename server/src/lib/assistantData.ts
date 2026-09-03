@@ -1,6 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import { assistantAdminJson } from './assistantAdmin.ts';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 
@@ -70,7 +69,7 @@ export type RivendellCronJob = {
   runtime: CronRuntime;
   cwd?: string;
   permissionMode?: CronPermissionMode;
-  source?: 'assistant-mcp' | 'autosam';
+  source?: 'assistant-mcp' | 'autosam' | 'observed';
   sourceLabel?: string;
   readOnly?: boolean;
   lastRun: string;
@@ -138,30 +137,8 @@ type AdminCron = {
   updated_at?: string | null;
 };
 
-// Workspace + repo paths are env-driven so Rivendell runs on the Mac host today
-// and on Moria (Linux) after the cutover. On the Mini the env vars are unset, so
-// homedir()/ELROND_WORKSPACE_PATH resolve to the same /Users/mjohnst paths as before.
-// Env overrides are normalized (trim, expand a leading ~) and only honored when
-// they resolve to an absolute path, so a stray, relative, or whitespace-padded
-// value falls back to the platform default instead of silently resolving against cwd.
-function envPath(value: string | undefined): string | null {
-  if (!value) return null;
-  let v = value.trim();
-  if (v === '') return null;
-  if (v === '~' || v.startsWith('~/')) v = join(homedir(), v.slice(1));
-  return isAbsolute(v) ? v : null;
-}
 const DEFAULT_NO_REPO_CWD = ELROND_WORKSPACE_PATH;
-const AUTOSAM_APP_ID = 'com.mattjohnston.agent-one';
-const AUTOSAM_DATA_DIR =
-  process.platform === 'darwin'
-    ? join(homedir(), 'Library/Application Support', AUTOSAM_APP_ID)
-    : join(envPath(process.env.XDG_DATA_HOME) || join(homedir(), '.local/share'), AUTOSAM_APP_ID);
-const AUTOSAM_SETTINGS_PATH =
-  envPath(process.env.AUTOSAM_SETTINGS_PATH) || join(AUTOSAM_DATA_DIR, 'settings.json');
-const KIM_PR_REVIEW_REPO_PATH =
-  envPath(process.env.KIM_PR_REVIEW_REPO_PATH) ||
-  join(homedir(), 'samwise/KG-Apps/r-link-studio-rebuild');
+const OBSERVED_JOBS_FILE = process.env.RIVENDELL_OBSERVED_JOBS_FILE?.trim() || '';
 
 type SamQueueTask = {
   id: string;
@@ -342,11 +319,16 @@ export async function createAdminFamilyTodo(input: Record<string, unknown>): Pro
 }
 
 export async function fetchAdminCronJobs(): Promise<RivendellCronJob[]> {
-  const data = await assistantAdminJson<{ jobs?: AdminCron[] }>('/admin/api/cron/jobs');
-  return [
-    ...autosamObservedCronJobs(),
-    ...(data.jobs ?? []).map(mapCron),
-  ];
+  const observed = readObservedCronJobs();
+  try {
+    const data = await assistantAdminJson<{ jobs?: AdminCron[] }>('/admin/api/cron/jobs');
+    return [...observed, ...(data.jobs ?? []).map(mapCron)];
+  } catch (error) {
+    // A local observed scheduler is useful even when no optional admin backend
+    // is configured. Preserve upstream errors only when there is no local data.
+    if (observed.length > 0) return observed;
+    throw error;
+  }
 }
 
 export async function updateAdminCronJob(id: string, updates: Partial<RivendellCronJob>): Promise<RivendellCronJob> {
@@ -581,46 +563,72 @@ function mapCron(job: AdminCron): RivendellCronJob {
   };
 }
 
-function autosamObservedCronJobs(): RivendellCronJob[] {
-  const settings = readAutosamSettings();
-  const kimPrReviewEnabled = settings?.kimFullPrReviewEnabled !== false;
-
-  return [
-    {
-      id: 'autosam:kim-full-pr-review',
-      name: 'Kim PR full review watcher',
-      description: 'AutoSam watches Kim\'s ready R-Link Studio PRs and launches Codex `$pr-review`.',
-      schedule: '*/1 * * * *',
-      target: 'Codex $pr-review',
-      actionType: 'autosam_worker_poller',
-      prompt: 'Watch open, non-draft PRs by @kgenterprisesbiz on R-Link-LLC/r-link-studio-rebuild. For each new PR, create an AutoSam audit card and run Codex `$pr-review` through review, fix, merge, and deploy.',
-      aiModel: 'codex',
-      repo: KIM_PR_REVIEW_REPO_PATH,
-      deliveryChannel: 'telegram',
-      status: kimPrReviewEnabled ? 'active' : 'paused',
-      runtime: 'local',
-      cwd: KIM_PR_REVIEW_REPO_PATH,
-      source: 'autosam',
-      sourceLabel: 'AutoSam',
-      readOnly: true,
-      lastRun: 'AutoSam worker poller',
-      lastRunAt: null,
-      lastRunStatus: null,
-      lastRunError: null,
-      createdAt: undefined,
-    },
-  ];
+function observedString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-function readAutosamSettings(): Record<string, unknown> | null {
-  if (!existsSync(AUTOSAM_SETTINGS_PATH)) return null;
+export function normalizeObservedCronJob(value: unknown): RivendellCronJob | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const id = observedString(record, 'id');
+  const name = observedString(record, 'name');
+  const schedule = observedString(record, 'schedule');
+  if (!id || !name || !schedule) return null;
+  const isPaused = record.paused === true || record.status === 'paused';
+  const status: RivendellCronJob['status'] = isPaused
+    ? 'paused'
+    : record.status === 'failed' ? 'failed' : 'active';
+  const runtime: CronRuntime = record.runtime === 'railway' ? 'railway' : 'local';
+  const aiModel = record.aiModel === 'claude' || record.aiModel === 'codex' || record.aiModel === 'mandrill'
+    ? record.aiModel
+    : undefined;
+  const permissionMode = ['default', 'acceptEdits', 'auto', 'bypassPermissions', 'dontAsk', 'plan']
+    .includes(String(record.permissionMode))
+    ? record.permissionMode as CronPermissionMode
+    : undefined;
+  return {
+    id,
+    name,
+    schedule,
+    target: observedString(record, 'target') || name,
+    description: observedString(record, 'description'),
+    actionType: observedString(record, 'actionType'),
+    prompt: observedString(record, 'prompt'),
+    aiModel,
+    engine: observedString(record, 'engine'),
+    modelId: observedString(record, 'modelId'),
+    reasoningEffort: observedString(record, 'reasoningEffort'),
+    repo: observedString(record, 'repo'),
+    toolName: observedString(record, 'toolName'),
+    deliveryChannel: observedString(record, 'deliveryChannel'),
+    maxTokens: typeof record.maxTokens === 'number' && Number.isFinite(record.maxTokens) ? record.maxTokens : undefined,
+    status,
+    paused: isPaused,
+    runtime,
+    cwd: observedString(record, 'cwd'),
+    permissionMode,
+    source: 'observed',
+    sourceLabel: observedString(record, 'sourceLabel') || 'Observed',
+    readOnly: true,
+    lastRun: observedString(record, 'lastRun') || 'observed externally',
+    lastRunAt: observedString(record, 'lastRunAt') || null,
+    lastRunStatus: observedString(record, 'lastRunStatus') || null,
+    lastRunError: observedString(record, 'lastRunError') || null,
+    createdAt: observedString(record, 'createdAt'),
+    updatedAt: observedString(record, 'updatedAt'),
+  };
+}
+
+function readObservedCronJobs(): RivendellCronJob[] {
+  if (!OBSERVED_JOBS_FILE || !isAbsolute(OBSERVED_JOBS_FILE)) return [];
   try {
-    const parsed = JSON.parse(readFileSync(AUTOSAM_SETTINGS_PATH, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
+    const parsed = JSON.parse(readFileSync(OBSERVED_JOBS_FILE, 'utf8')) as { jobs?: unknown };
+    if (!Array.isArray(parsed.jobs)) return [];
+    return parsed.jobs.map(normalizeObservedCronJob).filter((job): job is RivendellCronJob => job !== null);
+  } catch (error) {
+    console.warn(`[assistantData] could not read observed jobs file: ${(error as Error).message}`);
+    return [];
   }
 }
 
@@ -673,7 +681,7 @@ function mapSamQueue(task: SamQueueTask, status: RivendellQueueJob['status'], sk
     repo: task.project || undefined,
     prompt: task.title || 'Samwise task',
     error: task.failure_reason || undefined,
-    needs_review_reason: task.auto_merge_blocked_reason || (status === 'needs_review' ? 'Ready for Matt review.' : undefined),
+    needs_review_reason: task.auto_merge_blocked_reason || (status === 'needs_review' ? 'Ready for review.' : undefined),
   };
 }
 

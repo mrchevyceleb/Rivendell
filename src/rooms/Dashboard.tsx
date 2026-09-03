@@ -38,7 +38,7 @@ export function Dashboard() {
       <RoomHeader
         eyebrow="Dashboard"
         title="Today at a glance"
-        subtitle="The office on Bag End, awake on the tailnet."
+        subtitle="Your always-on office, awake on your private network."
         actions={
           <>
             <Button tone="gold" onClick={() => window.location.assign('/')}>

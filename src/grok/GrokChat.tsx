@@ -18,7 +18,7 @@ import { markAgentRead, updateAgentReq } from './agents';
 export type GrokChatProps = {
   chatId: string;
   cli?: CompanionId;
-  /** Persona lane id ('xai', 'claude-kim', …) — seeds the picker lane. */
+  /** Persona lane id ('xai', 'claude', …) — seeds the picker lane. */
   lane?: string;
   agent?: Agent;
   repo?: Repo;
@@ -136,7 +136,7 @@ export function GrokChat(props: GrokChatProps) {
   // the server's read marker at the log head. A backgrounded tab must not
   // clear badges for replies it never showed — visibilityState covers that.
   // document.hasFocus() is too strict (devtools / another pane steals focus
-  // and the badge sticks while Matt is looking at the thread).
+  // and the badge sticks while the user is looking at the thread).
   useEffect(() => {
     if (!props.agent) return;
     const agentId = props.agent.id;

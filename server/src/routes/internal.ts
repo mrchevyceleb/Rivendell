@@ -15,7 +15,7 @@ const RUN_TIMEOUT_MS = Number(process.env.RIVENDELL_CRON_LLM_TIMEOUT_MS) || 280_
 const DEBUG = process.env.RIVENDELL_CRON_LLM_DEBUG === '1';
 
 /** Internal headless agentic runner. Drives the BananaSession tool-use loop
- *  (banana-local → Moria LM Studio) for one prompt and returns the final text,
+ *  (banana-local → a local model server) for one prompt and returns the final text,
  *  so a local-runtime cron can take actions (call tools) on LM Studio instead
  *  of only getting a one-shot text answer.
  *

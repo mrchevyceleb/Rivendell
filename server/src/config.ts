@@ -24,16 +24,19 @@ export const TEAM_MCP_SCRIPT = (() => {
 })();
 
 export const PORT = Number(process.env.PORT || process.env.RIVENDELL_PORT) || 8091;
-export const HOST = process.env.HOST || '0.0.0.0';
+// Safe-by-default: Rivendell exposes filesystem and agent-control APIs and has
+// no app-layer login. Bind loopback unless the operator explicitly opts into a
+// trusted network interface (Tailscale Serve can still proxy to 127.0.0.1).
+export const HOST = process.env.HOST || '127.0.0.1';
 export const STATE_DIR = process.env.RIVENDELL_STATE_DIR || join(homedir(), '.rivendell');
 export const STATIC_DIR = process.env.RIVENDELL_STATIC_DIR || resolve(APP_ROOT, 'dist');
 export const ELROND_WORKSPACE_PATH =
   process.env.ELROND_WORKSPACE_PATH ||
   join(homedir(), 'ASSISTANT-HUB');
 
-export const ASSISTANT_MCP_ENV_PATH =
-  process.env.ASSISTANT_MCP_ENV_PATH ||
-  join(ELROND_WORKSPACE_PATH, 'assistant-mcp', 'server', '.env');
+// Optional compatibility path for operators who intentionally share an MCP
+// dotenv file. Never crawl a neighboring repository for credentials by default.
+export const ASSISTANT_MCP_ENV_PATH = process.env.ASSISTANT_MCP_ENV_PATH || '';
 
 // OneDrive's fileproviderd intermittently locks files under
 // ~/Library/CloudStorage/OneDrive-Personal/* — readFileSync then throws
@@ -67,29 +70,17 @@ function dotenvValue(key: string): string {
   return match[1].trim().replace(/^["']|["']$/g, '');
 }
 
-function railwayCliToken(): string {
-  const path = join(homedir(), '.railway', 'config.json');
-  const raw = readFileWithLockRetry(path);
-  if (!raw) return '';
-  try {
-    const data = JSON.parse(raw);
-    return data?.user?.token || '';
-  } catch {
-    return '';
-  }
-}
-
 export const ASSISTANT_ADMIN_BASE_URL =
   process.env.ASSISTANT_ADMIN_BASE_URL ||
   process.env.ASSISTANT_MCP_ADMIN_URL ||
-  'https://matt-assistant-production.up.railway.app';
+  '';
 
 export const ASSISTANT_ADMIN_TOKEN =
   process.env.ASSISTANT_ADMIN_TOKEN ||
   process.env.MCP_AUTH_TOKEN ||
   dotenvValue('MCP_AUTH_TOKEN');
 
-// Loopback trigger for the local cron runner (cron-runner-local.ts) on Moria.
+// Loopback trigger for an optional local cron runner.
 // runtime=local cron jobs can only be run on demand by the local runner (the
 // Railway server refuses them with a runtime mismatch), so the Forge run-now
 // route posts local jobs here instead of to ASSISTANT_ADMIN_BASE_URL.
@@ -119,18 +110,16 @@ export const MCP_BEARER_TOKEN =
   ASSISTANT_ADMIN_TOKEN ||
   '';
 
-// Railway service identifiers for assistant-mcp (matt-assistant service in
-// the assistant-mcp project). Defaults match production; override via env if
-// the service is ever rebuilt.
+// Optional Railway redeploy integration. Explicit configuration is required;
+// Rivendell never borrows a developer's global Railway CLI credential.
 export const RAILWAY_API_TOKEN =
   process.env.RAILWAY_API_TOKEN ||
   process.env.RAILWAY_TOKEN ||
-  railwayCliToken();
-export const RAILWAY_SERVICE_ID =
-  process.env.RAILWAY_SERVICE_ID || 'a5d35005-3540-418a-b7fc-c1fc304ec7fc';
-export const RAILWAY_ENVIRONMENT_ID =
-  process.env.RAILWAY_ENVIRONMENT_ID || '5a4351fa-2041-4e72-af3a-cdd7db808181';
+  '';
+export const RAILWAY_SERVICE_ID = process.env.RAILWAY_SERVICE_ID || '';
+export const RAILWAY_ENVIRONMENT_ID = process.env.RAILWAY_ENVIRONMENT_ID || '';
 
+export const PREWARM_AGENTS = process.env.RIVENDELL_PREWARM_AGENTS === 'true';
 export const WORKER_ENABLED = process.env.RIVENDELL_WORKER_ENABLED !== 'false';
 export const WORKER_RUNNER = process.env.RIVENDELL_WORKER_RUNNER || 'dry-run';
 export const WORKER_POLL_MS = Number(process.env.RIVENDELL_WORKER_POLL_MS) || 10_000;

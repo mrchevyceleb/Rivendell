@@ -6,7 +6,7 @@
 //     Got it. Parking GHL for now.
 //   ○ <your next agent> …
 //   ────────────────────────────────────────────────
-//   Plugins · Matt
+//   Plugins · You
 //
 // [+] creates an agent (name/role/engine/scope). Every row = a teammate and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
@@ -179,7 +179,6 @@ export function BotRail(props: BotRailProps) {
       const adhoc: Row[] = [];
       for (const it of props.items) {
         if (props.agents.some((a) => (!it.repo || !props.hubRepo || it.repo === props.hubRepo) && sameChatId(it.chatId, a.home))) continue;
-        if ((it.cli === 'claude' || it.cli === 'codex') && !/__acct__[a-z0-9-]+$/i.test(it.chatId)) continue;
         adhoc.push({ kind: 'adhoc', item: it, ts: it.updatedAt });
       }
       adhoc.sort((a, b) => b.ts - a.ts);
@@ -388,8 +387,8 @@ export function BotRail(props: BotRailProps) {
         <button className="bt-foot-row" onClick={() => setPluginsOpen((o) => !o)} aria-haspopup="menu" aria-expanded={pluginsOpen}>
           <Plug size={17} /> Plugins
         </button>
-        <button className="bt-foot-row" title="The operator of Bag End">
-          <span className="bt-disc">M</span> Matt
+        <button className="bt-foot-row" title="Rivendell operator">
+          <span className="bt-disc">Y</span> You
         </button>
       </div>
     </aside>

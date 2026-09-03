@@ -31,6 +31,10 @@ function sameOrigin(req: Request): boolean {
 }
 
 mcpRouter.get('/health', asyncHandler(async (_req, res) => {
+  if (!ASSISTANT_ADMIN_BASE_URL) {
+    res.status(503).json({ ok: false, error: 'Assistant admin backend is not configured.' });
+    return;
+  }
   const url = `${ASSISTANT_ADMIN_BASE_URL.replace(/\/$/, '')}/health`;
   const startedAt = Date.now();
   const ctrl = new AbortController();
@@ -59,7 +63,7 @@ mcpRouter.get('/health', asyncHandler(async (_req, res) => {
 }));
 
 mcpRouter.post('/redeploy', asyncHandler(async (req, res) => {
-  // Guard against CSRF: a webpage Matt happens to visit can submit a form or
+  // Guard against CSRF: a webpage the operator visits can submit a form or
   // no-cors POST, but it cannot set a custom header without a CORS preflight,
   // and the same-origin check rejects cross-site fetches that try.
   if (!sameOrigin(req)) {
@@ -70,9 +74,9 @@ mcpRouter.post('/redeploy', asyncHandler(async (req, res) => {
     res.status(403).json({ error: `missing ${ACTION_HEADER} header` });
     return;
   }
-  if (!RAILWAY_API_TOKEN) {
+  if (!RAILWAY_API_TOKEN || !RAILWAY_SERVICE_ID || !RAILWAY_ENVIRONMENT_ID) {
     res.status(400).json({
-      error: 'Railway token not configured. Set RAILWAY_API_TOKEN or run `railway login` on the host.',
+      error: 'Railway redeploy is not configured. Set RAILWAY_API_TOKEN, RAILWAY_SERVICE_ID, and RAILWAY_ENVIRONMENT_ID.',
     });
     return;
   }

@@ -35,7 +35,7 @@ export function isNoopToken(text: string): boolean {
   return /^quiet[.!?]*$/.test(normalizeReply(t));
 }
 
-/** No-op automation replies: hide these, keep real ship/fail/needs-Matt text. */
+/** No-op automation replies: hide these, keep real ship/fail/needs-user text. */
 export function isQuietRoutineReply(text: string): boolean {
   const t = text.trim();
   if (!t) return true;

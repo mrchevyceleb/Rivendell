@@ -21,7 +21,7 @@ function validateCronEnginePayload(body: unknown): string | null {
   const payload = body as Record<string, unknown>;
   const engine = typeof payload.engine === 'string' ? payload.engine.trim() : '';
   if (REMOVED_PERSONAL_ENGINES.has(engine)) {
-    return `engine "${engine}" was removed; use ${engine === 'claude' ? 'assistant (KG Claude)' : 'codex (KG Codex)'}`;
+    return `engine "${engine}" was removed; use ${engine === 'claude' ? 'assistant (Claude Code)' : 'codex'}`;
   }
   if (MODEL_REQUIRED_ENGINES.has(engine)) {
     const modelId = typeof payload.modelId === 'string' ? payload.modelId.trim() : '';

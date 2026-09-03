@@ -33,7 +33,7 @@ const selStyle: React.CSSProperties = {
 // You shouldn't have to type a repo id perfectly. These resolve a sloppy entry
 // (bare name, wrong/missing org, a pasted URL) against the HF API, and with a
 // quant preference they surface that quant's build: NVFP4 is the Blackwell-
-// native 4-bit path on this box, FP8 is the other Spark-optimized one. The HF
+// native 4-bit path on supported Blackwell hardware; FP8 is another optimized option. The HF
 // API allows browser GETs (CORS), so this runs client-side.
 const HF_API = 'https://huggingface.co/api/models';
 const QUANTS = ['Auto', 'NVFP4', 'FP8', 'MXFP4', 'BF16'];
@@ -303,7 +303,7 @@ export function LocalModelPicker({
     <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
       <select
         aria-label="Local model"
-        title="Whatever text model is loaded in LM Studio on Moria"
+        title="Whatever text model is loaded in the configured local model server"
         style={selStyle}
         value={cat?.loaded ?? ''}
         disabled={!!busy}
@@ -319,7 +319,7 @@ export function LocalModelPicker({
       </select>
       <select
         aria-label="Quant"
-        title="Preferred quantization. NVFP4 = Blackwell-native 4-bit (great on this box); FP8 also Spark-optimized. Auto = use the checkpoint as-is."
+        title="Preferred quantization. NVFP4 = Blackwell-native 4-bit; FP8 is another optimized format. Auto = use the checkpoint as-is."
         style={selStyle}
         value={quant}
         disabled={!!busy}

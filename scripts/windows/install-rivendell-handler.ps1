@@ -1,7 +1,9 @@
 # One-time installer for the Rivendell `rivendell://` URL scheme handler on
-# Windows. Run on each Windows PC Matt uses with Rivendell:
+# Windows. Run on each Windows PC that uses Rivendell. The workspace defaults
+# to C:\ASSISTANT-HUB; pass -WorkspaceRoot to use another synced location:
 #
 #   powershell -ExecutionPolicy Bypass -File .\install-rivendell-handler.ps1
+#   powershell -ExecutionPolicy Bypass -File .\install-rivendell-handler.ps1 -WorkspaceRoot "$HOME\Documents\ASSISTANT-HUB"
 #
 # To remove:
 #
@@ -14,7 +16,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [string]$WorkspaceRoot = 'C:\ASSISTANT-HUB'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,13 +97,13 @@ if (-not $pairs.ContainsKey('winpath')) {
 
 $winPath = $pairs['winpath']
 
-$allowedRoot = Join-Path $env:UserProfile 'OneDrive\Documents\ASSISTANT-HUB'
+$allowedRoot = '__RIVENDELL_WORKSPACE_ROOT__'
 $allowedRootResolved = $null
 if (Test-Path -LiteralPath $allowedRoot) {
     $allowedRootResolved = (Resolve-Path -LiteralPath $allowedRoot).ProviderPath
 }
 if (-not $allowedRootResolved) {
-    Write-Error "ASSISTANT-HUB not found at $allowedRoot. Is OneDrive set up?"
+    Write-Error "ASSISTANT-HUB not found at $allowedRoot. Re-run the installer with -WorkspaceRoot."
     exit 1
 }
 
@@ -129,6 +132,8 @@ if (Test-Path -LiteralPath $resolved -PathType Container) {
 }
 '@
 
+$escapedWorkspaceRoot = $WorkspaceRoot.Replace("'", "''")
+$handlerSource = $handlerSource.Replace('__RIVENDELL_WORKSPACE_ROOT__', $escapedWorkspaceRoot)
 Set-Content -LiteralPath $handlerPath -Value $handlerSource -Encoding UTF8
 
 # Register the URL scheme under HKCU.
@@ -148,7 +153,7 @@ $commandLine = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy B
 Set-ItemProperty -Path $commandKey -Name '(Default)' -Value $commandLine
 
 Add-Type -AssemblyName System.Web | Out-Null
-$testTarget = Join-Path $env:UserProfile 'OneDrive\Documents\ASSISTANT-HUB'
+$testTarget = $WorkspaceRoot
 $testUri    = "rivendell://open?kind=folder&winpath=$([System.Web.HttpUtility]::UrlEncode($testTarget))"
 
 Write-Host ""

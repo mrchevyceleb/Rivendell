@@ -1,7 +1,7 @@
 // Reads the engine / model / effort matrix at ~/samwise/.accounts/engines.json — the single
 // source of truth (sibling to account-map.json) for the model+effort picker. Provides the
 // default model + effort per engine, falling back to the passed values if the config is missing.
-// See ~/samwise/MATT-OS-V2-PLAN.md.
+// Operator overrides live outside the repository.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';

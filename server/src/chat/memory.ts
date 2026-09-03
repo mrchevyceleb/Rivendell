@@ -101,7 +101,7 @@ function readCgroupAvailableBytes(): number | null {
   return null;
 }
 
-// Linux (Moria) equivalent of the macOS readers above. Take the tighter of host
+// Linux equivalent of the macOS readers above. Take the tighter of host
 // MemAvailable and the process's cgroup headroom so a memory-capped service
 // can't green-light a spawn that the cgroup would immediately OOM-kill.
 function readLinuxMemAvailable(): MemorySnapshot | null {

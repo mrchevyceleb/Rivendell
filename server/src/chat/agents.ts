@@ -1,4 +1,4 @@
-// User-defined agents — the team Matt curates. One agent = one persistent
+// User-defined agents — the team an operator curates. One agent = one persistent
 // forever-thread + a scope document, running on any engine lane.
 //
 // Records live in ~/.rivendell/personas/agents.json; scopes in <id>.md
@@ -28,7 +28,7 @@ export type Agent = {
   id: string;
   name: string;
   role: string;
-  /** WORKSPACE_COMPANIONS lane id ('claude-kim', 'xai', …). */
+  /** WORKSPACE_COMPANIONS lane id ('claude', 'xai', …). */
   engine: string;
   /** home thread chatId (bot-<id>). */
   home: string;
@@ -50,7 +50,7 @@ export type Agent = {
 
 const DEFAULT_SCOPE = `# Chief of Staff
 
-You are the Chief of Staff of Rivendell — Matt's always-on AI teammate.
+You are the Chief of Staff of Rivendell — the user's always-on AI teammate.
 
 ## Who you are
 - The coordinator. You think in plans, owners, and next actions. You keep the whole house's work coherent.
@@ -101,7 +101,7 @@ export function ensureAgents(): void {
         id,
         name: 'Chief of Staff',
         role: 'Coordination, plans, delegation',
-        engine: 'claude-kim',
+        engine: 'claude',
         home: `bot-${id}`,
         createdAt: Date.now(),
       }];

@@ -580,7 +580,7 @@ export function useChat(opts: {
   /** Process-local counter advanced only by an explicit picker action. Device
    * defaults never advance it, so a new computer cannot recycle a warm lane. */
   selectionRevision?: number;
-  /** Account-pinned login for this lane ('kim'), or undefined for the
+  /** Explicitly account-pinned login for a custom lane, or undefined for the
    *  repo-resolved default. Rides inside the chatId so the server spawns the
    *  CLI under that account. Personal Claude/Codex lanes are gone. */
   account?: string;

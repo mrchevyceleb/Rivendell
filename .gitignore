@@ -15,11 +15,8 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Environment files
-.env
-.env.local
-.env.*.local
-.env.development
-.env.production
+.env*
+!.env.example
 
 # Editor / OS
 .DS_Store
@@ -39,6 +36,8 @@ supabase/.temp
 # Misc
 *.local
 tmp/
+coverage/
+.gitleaks-report.*
 
 # Claude Code runtime
 .claude/

@@ -397,7 +397,7 @@ async function parseBananaSlashCommand(text: string, cwd: string): Promise<Banan
 function expandBananaSlashCommand(command: BananaSlashCommand): string {
   const args = command.arguments.trim();
   return [
-    `Matt invoked /${command.command}. Execute the slash command instructions below as the active task.`,
+    `The user invoked /${command.command}. Execute the slash command instructions below as the active task.`,
     `Command source: ${command.sourcePath}`,
     '',
     '<slash-command>',
@@ -408,7 +408,7 @@ function expandBananaSlashCommand(command: BananaSlashCommand): string {
     args || '(none)',
     '</command-args>',
     '',
-    'Important: external side effects remain draft/review-first. For email, show the full draft with From, To, Subject, and Body, then wait for Matt to explicitly approve in a later message before sending.',
+    'Important: external side effects remain draft/review-first. For email, show the full draft with From, To, Subject, and Body, then wait for the user to explicitly approve in a later message before sending.',
   ].join('\n');
 }
 
@@ -541,7 +541,7 @@ function gmailSideEffectBlockMessage(toolName: string, input: unknown, approvedD
     : 'No matching approved draft was found for this Gmail payload.';
   return [
     `Banana blocked a Gmail ${label}.`,
-    'Email sends/replies require a previously displayed full draft with From, To, Subject, and Body, plus Matt\'s explicit approval in a later message.',
+    'Email sends/replies require a previously displayed full draft with From, To, Subject, and Body, plus the user\'s explicit approval in a later message.',
     mismatch,
     'Draft it for review instead.',
   ].join(' ');
@@ -611,7 +611,7 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void
 // supplied a shared OpenRouter key. That proxy was deleted (every call now
 // 404s "Application not found"), which broke OpenRouter entirely AND killed
 // the `monkey/*` tiers (Silverback/Mandrill/Tamarin) that pointed at the same
-// dead app. We now go DIRECT to OpenRouter with Matt's own OPENROUTER_API_KEY,
+// dead app. We now go DIRECT to OpenRouter with the operator's OPENROUTER_API_KEY,
 // overriding the `openrouter` provider's baseURL + apiKey inline via the
 // BANANA_CONFIG_CONTENT env var. Any model id is forwarded straight to
 // OpenRouter, so picks past the registered cap still route.
@@ -1240,7 +1240,7 @@ function mapClaudeMcpServer(name: string, value: unknown, sourceDir: string): Ba
       url,
       ...(headers ? { headers } : {}),
       ...(timeout ? { timeout } : {}),
-      // Matt's mirrored servers already carry their auth in config/env. Avoid
+      // Mirrored servers already carry their auth in config/env. Avoid
       // Banana's OAuth auto-detection trying to pop an interactive flow.
       oauth: false,
     };
@@ -1381,7 +1381,7 @@ function canonicalJson(value: unknown): string {
  *  so operator-supplied providers/agents/permissions survive. A non-JSON or
  *  unparseable existing value is ignored (logged) and only the override is
  *  used — better than crashing the spawn. */
-// ── Local LLM (LM Studio on Moria) ─────────────────────────────────────────
+// ── Local LLM (LM Studio on the Rivendell host) ─────────────────────────────
 // The "Local" engine talks DIRECTLY to LM Studio's on-box OpenAI-compatible
 // endpoint (default http://localhost:1234/v1). We register whatever text model
 // LM Studio currently has loaded as a custom openai-compatible provider
@@ -1626,7 +1626,7 @@ export async function serveLocalModel(
   const key = model.replace(/^local\//, '');
 
   // Context: explicit value floored + hard-capped; blank => the model's MAX
-  // window (the Spark's unified memory holds 256k for the qwen family), capped.
+  // window (large-memory hosts may hold 256k for the qwen family), capped.
   const explicitLen = opts?.maxLen != null && opts.maxLen !== '' ? Number(opts.maxLen) : NaN;
   let ctx = 0;
   if (Number.isFinite(explicitLen) && explicitLen > 0) {
@@ -3639,7 +3639,7 @@ export class BananaSession {
         'Continue the previous task from where you left off.',
         message,
         'Do not retry that Gmail send/reply in this turn.',
-        'Show Matt the full email draft with From, To, Subject, and Body, then wait for explicit approval in a later message before sending.',
+        'Show the user the full email draft with From, To, Subject, and Body, then wait for explicit approval in a later message before sending.',
       ].join(' '),
       undefined,
       { model, hidden: true, blockedSideEffectContinueDepth },

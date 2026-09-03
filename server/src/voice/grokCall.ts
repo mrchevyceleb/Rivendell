@@ -24,14 +24,15 @@ import { join } from 'node:path';
 import { STATE_DIR } from '../config.ts';
 import { listAgents } from '../chat/agents.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
+import { trustedWebSocketOrigin } from '../lib/origin.ts';
 
 export const GROK_REALTIME_URL = 'wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0';
 export const GROK_VOICE_IDS = ['ara', 'eve', 'leo', 'rex', 'sal', 'atlas', 'aurora', 'luna', 'orion', 'carina'] as const;
 
 const CALL_RULES =
-  'You are a named teammate in Rivendell, on a voice call with Matt. Stay in character. ' +
+  'You are a named teammate in Rivendell, on a voice call with the user. Stay in character. ' +
   'Speak as I or me; never address yourself by your own name in the third person. Do not mention being an AI, Grok, or xAI unless asked. ' +
-  'Keep spoken replies short and conversational — one or two sentences unless Matt asks for depth. ' +
+  'Keep spoken replies short and conversational — one or two sentences unless the user asks for depth. ' +
   'If a request needs files, tools, or teammates, say you will handle it in the thread after the call and keep talking.';
 
 export function grokApiKey(): string {
@@ -280,18 +281,13 @@ export function registerVoiceCalls(server: HttpServer): void {
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (url.pathname !== '/ws/voice') return;
+    if (!trustedWebSocketOrigin(req)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     const wss = new WebSocketServer({ noServer: true });
     wss.handleUpgrade(req, socket, head, (client: WsClient) => {
-      // Same-origin only: a random page in an allowed browser must not be
-      // able to open billable xAI sockets through us.
-      const origin = req.headers.origin;
-      if (origin) {
-        try {
-          const o = new URL(String(origin));
-          const host = req.headers.host;
-          if (o.host !== host) { client.close(1008, 'bad origin'); return; }
-        } catch { client.close(1008, 'bad origin'); return; }
-      }
       let call: GrokCall | null = null;
       client.on('message', (raw: WsClient.RawData) => {
         let msg: Record<string, unknown>;
@@ -304,7 +300,7 @@ export function registerVoiceCalls(server: HttpServer): void {
           const scope = agent ? personaScopeFor(agent.home) : '';
           const name = agent?.name ?? 'Rivendell';
           const instructions = [CALL_RULES, scope || `You are ${name}, a teammate in Rivendell.`].filter(Boolean).join('\n\n');
-          const greeting = `Hey Matt — ${name} here. What's up?`;
+          const greeting = `Hey — ${name} here. What's up?`;
           call = new GrokCall(client, instructions, greeting, String(msg.voice ?? agent?.voice ?? 'ara'));
           void call.connect();
           return;

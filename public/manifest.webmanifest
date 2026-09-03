@@ -1,7 +1,7 @@
 {
   "name": "Rivendell",
   "short_name": "Rivendell",
-  "description": "Always-on office for Bag End.",
+  "description": "A local-first, always-on multi-agent office.",
   "start_url": "/?app=rivendell",
   "scope": "/",
   "display": "standalone",

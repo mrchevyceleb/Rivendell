@@ -109,19 +109,18 @@ const schedulePresets = [
   { label: 'M/F 7 AM', value: 'mon/fri 7am', cron: '0 7 * * 1,5' },
 ];
 
-// The six engines Matt wants for scheduled work. Each one dispatches to a real
+// The engines available for scheduled work. Each one dispatches to a real
 // backend on the local cron runner (see assistant-mcp cron-engines.ts):
-//   assistant        → KG Claude (kim account, claude CLI)
-//   codex            → KG Codex (kim account, codex CLI)
+//   assistant        → Claude Code CLI
+//   codex            → Codex CLI
 //   banana-local     → LM Studio local model (HTTP completion, on-box)
 //   zai              → GLM 5.3 via Z.ai (claude CLI redirected to z.ai)
 //   xai              → Grok 4.6 via xAI (claude CLI redirected to xAI + proxy)
 //   banana-fireworks → Fireworks models (HTTP completion, FIREWORKS_API_KEY)
-// Personal Claude (engine 'claude') was removed; legacy jobs with that engine
-// are migrated to KG Claude (assistant) on display and edit.
+// The legacy `claude` cron id maps to the current `assistant` Claude Code lane.
 const CRON_ENGINES: { id: string; label: string; hint: string }[] = [
-  { id: 'assistant', label: 'KG Claude', hint: 'Kim account · agentic CLI with tools' },
-  { id: 'codex', label: 'KG Codex', hint: 'Kim account · codex CLI with tools' },
+  { id: 'assistant', label: 'Claude Code', hint: 'Local authenticated CLI with tools' },
+  { id: 'codex', label: 'Codex', hint: 'Local authenticated CLI with tools' },
   { id: 'banana-local', label: 'LM Studio · Local', hint: 'On-box local model · plain completion' },
   { id: 'zai', label: 'GLM 5.3', hint: 'Z.ai GLM · agentic CLI with tools' },
   { id: 'xai', label: 'Grok 4.6', hint: 'xAI Grok · agentic CLI with tools' },
@@ -145,11 +144,11 @@ function engineFromAiModel(m: CronAiModel): string {
 
 /**
  * Clean display for ANY job, never "Mandrill". The engine field is the source of
- * truth; legacy jobs without one fall back to runtime (local crons run on KG
- * Claude by default). Returns the human label + optional specific model id.
+ * truth; legacy jobs without one fall back to the local Claude Code lane.
+ * Returns the human label + optional specific model id.
  */
 function engineDisplay(job: CronJob): { label: string; modelId?: string } {
-  // Migrate the removed Personal Claude engine ('claude') to KG Claude so
+  // Migrate the legacy Claude engine id to the current assistant lane so
   // legacy jobs render with a real label instead of the bare id.
   if (job.engine === 'claude') {
     return { label: engineLabel('assistant'), modelId: job.modelId };
@@ -256,12 +255,9 @@ function parseCron(cron: string): SchedParts | null {
   return null;
 }
 
-// CWDs that mean "no specific repo" and should be hidden in the UI. Covers both
-// the Moria workspace (where Rivendell runs today) and the legacy Mac path.
-const NO_REPO_CWDS = new Set([
-  '/home/mrchevyceleb/ASSISTANT-HUB',
-  '/Users/mjohnst/ASSISTANT-HUB',
-]);
+// A workspace-root CWD means "no specific repo" and should be hidden in the UI
+// regardless of the host operating system or account name.
+const isWorkspaceRoot = (cwd: string) => /(?:^|[\\/])ASSISTANT-HUB[\\/]?$/.test(cwd);
 
 export function Forge() {
   const { data: jobs = [], refetch } = useCronJobs();
@@ -954,7 +950,7 @@ function CronHistory({ runs, loading, error, readOnly, expanded, onToggle, onRef
 function draftFromJob(job: CronJob): CronDraft {
   // Clamp to one of the four known engines so editing a legacy/unknown job
   // lands on a valid choice instead of a phantom dropdown value. A legacy
-  // 'claude' (Personal Claude) job falls through to KG Claude (assistant).
+  // A legacy `claude` job falls through to the current assistant lane.
   const fallback = job.aiModel === 'codex' ? 'codex' : 'assistant';
   const rawEngine = job.engine && KNOWN_ENGINES.has(job.engine) ? job.engine : fallback;
   const cron = job.schedule || '';
@@ -1046,7 +1042,7 @@ function timeAgoLabel(value: string): string {
 
 function displayRepo(job: CronJob): string {
   if (job.repo) return job.repo;
-  if (job.cwd && !NO_REPO_CWDS.has(job.cwd)) return job.cwd;
+  if (job.cwd && !isWorkspaceRoot(job.cwd)) return job.cwd;
   return '';
 }
 

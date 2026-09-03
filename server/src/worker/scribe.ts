@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { events, newEvent, type ScribeEvent } from '../data/mock.ts';
 import { supabase } from '../lib/supabase.ts';
+import { trustedWebSocketOrigin } from '../lib/origin.ts';
 
 const clients = new Set<import('ws').WebSocket>();
 
@@ -37,6 +38,11 @@ export function registerScribeSocket(server: Server): void {
   server.on('upgrade', (req, socket, head) => {
     const path = new URL(req.url || '/', 'http://localhost').pathname;
     if (path !== '/ws/scribe') return;
+    if (!trustedWebSocketOrigin(req)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });

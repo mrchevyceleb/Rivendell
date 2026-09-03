@@ -4,7 +4,7 @@
 //   │ mark     [+]  │  ○ Agent          ⚙  >>   │  Agent's desk   │
 //   │ Search         │                            │  Routines    [+]│
 //   │ agents …       │  bubbles + Thoughts pods   │  Session + meter│
-//   │ Plugins  Matt  │  [+ Message Agent … (◉)]  │                 │
+//   │ Plugins  You   │  [+ Message Agent … (◉)]  │                 │
 //   └────────────────┴────────────────────────────┴─────────────────┘
 //
 // The team is USER-CURATED (created/edited via the agent editor; seeded with
@@ -168,13 +168,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   }, []);
 
   const openChat = useCallback((item: HistoryItem) => {
-    // Reopen on the exact lane that wrote the log. The account rides in the
-    // chatId (`...__acct__kim`); useChat re-appends it from the picker's
-    // account, so strip it here. kim is the only remaining account.
-    const acct = /__acct__([a-z]+)$/i.exec(item.chatId)?.[1] ?? 'kim';
-    const baseChatId = item.chatId.replace(/__acct__[a-z]+$/i, '');
+    // Reopen on the engine that wrote the log. Strip any legacy account suffix;
+    // public defaults use the CLI's normal profile or an explicit server map.
+    const baseChatId = item.chatId.replace(/__acct__[a-z0-9-]+$/i, '');
     const cli = item.cli as CompanionId;
-    const lane = cli === 'claude' || cli === 'codex' ? `${cli}-${acct}` : item.cli;
+    const lane = item.cli;
     setView({ kind: 'chat', chatId: baseChatId, cli, lane, repoPath: item.repo });
     setDrawerOpen(false);
   }, []);

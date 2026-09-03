@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { AccessToken } from 'livekit-server-sdk';
-import { RoomAgentDispatch, RoomConfiguration } from '@livekit/protocol';
+import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
 
 // Jarvis voice sessions: mints LiveKit Cloud room tokens with the jarvis-agent
 // auto-dispatched via token RoomConfiguration, and serves client bootstrap

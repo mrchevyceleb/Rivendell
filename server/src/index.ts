@@ -3,7 +3,7 @@ import compression from 'compression';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { ELROND_WORKSPACE_PATH, HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
+import { ELROND_WORKSPACE_PATH, HOST, PORT, PREWARM_AGENTS, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { quiesceChat, registerChat } from './chat/register.ts';
 import { getOrCreateSession, isClaudeFamilyCli, type CliKind } from './chat/runner.ts';
 import { getSessionSelection } from './chat/sessions.ts';
@@ -50,6 +50,14 @@ import { markBusyCodexLanesRestarting, activeCodexSessions } from './chat/codex-
 import { markBusyBananaLanesRestarting, activeBananaSessions } from './chat/banana-runner.ts';
 
 const app = express();
+app.disable('x-powered-by');
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), geolocation=(), microphone=(self)');
+  next();
+});
 app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: '25mb' }));
 
@@ -151,6 +159,10 @@ let agentPrewarm: Promise<void> | null = null;
 
 server.listen(PORT, HOST, () => {
   console.log(`rivendell listening on http://${HOST}:${PORT}`);
+  if (!PREWARM_AGENTS) {
+    console.log('[chat prewarm] disabled (set RIVENDELL_PREWARM_AGENTS=true to opt in)');
+    return;
+  }
   // Teammates are always-on office lanes. Prewarm every persistent
   // Claude-family agent exactly once at boot (never from hello/reconnect
   // storms), using each lane's last proven model/effort. Max goes first in the
@@ -175,7 +187,7 @@ server.listen(PORT, HOST, () => {
             : '';
         const cli = (durableCli ?? configuredCli) as CliKind;
         if (!isClaudeFamilyCli(cli)) continue;
-        const chatKey = `${agent.home}${cli === 'claude' ? '__acct__kim' : ''}`;
+        const chatKey = agent.home;
         const selectionCwd = cli === 'assistant' ? ASSISTANT_HUB_PATH : ELROND_WORKSPACE_PATH;
         const selection = await getSessionSelection(cli, selectionCwd, chatKey);
         if (tearingDown) break;

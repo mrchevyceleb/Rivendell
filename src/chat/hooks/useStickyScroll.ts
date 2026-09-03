@@ -46,7 +46,7 @@ export function useStickyScroll() {
   // True while the user is mid-drag selecting text inside the transcript, or
   // is keeping a non-collapsed selection alive after release. While set, we
   // refuse to pin — a programmatic scroll under the user's cursor collapses
-  // the in-progress selection, which is exactly what Matt was hitting.
+  // the in-progress selection, which is exactly the failure this guard prevents.
   const selectingRef = useRef(false);
 
   const setOverride = useCallback((next: boolean) => {

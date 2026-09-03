@@ -20,7 +20,7 @@ export const rooms: Room[] = [
   { key: '/dashboard', name: 'Dashboard', role: 'Today at a glance', icon: 'dashboard' },
   { key: '/council', name: 'The Council', role: 'Task board', icon: 'council' },
   { key: '/tidings', name: 'Tidings', role: 'Unified email inbox', icon: 'tidings' },
-  { key: '/calendar', name: 'Calendar', role: 'Matt + YPP schedule', icon: 'calendar' },
+  { key: '/calendar', name: 'Calendar', role: 'Connected schedules', icon: 'calendar' },
   { key: '/library', name: 'Library', role: 'Docs and references', icon: 'library' },
   { key: '/workspace', name: 'Workspace', role: "Edit Elrond's files", icon: 'workspace' },
   { key: '/pins', name: 'Pins', role: 'Quick notes', icon: 'pins' },

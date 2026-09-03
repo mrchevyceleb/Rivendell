@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcessByStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
@@ -72,7 +73,7 @@ function collectDescendantPids(pid: number): number[] {
 //   codex-personal = Banana through Codex (legacy, no longer surfaced)
 //   banana         = Banana → OpenRouter (direct, real OPENROUTER_API_KEY)
 //   banana-fireworks = Banana → Fireworks (direct, FIREWORKS_API_KEY)
-//   banana-local   = Banana → Local LLM (vLLM on the Spark, direct)
+//   banana-local   = Banana → local OpenAI-compatible model server
 //   zai            = Z.ai coding plan (claude CLI → GLM over Anthropic endpoint)
 //   xai            = xAI coding plan (claude CLI → Grok 4.6 over Anthropic endpoint)
 // Claude Code and Codex account selection comes from the per-directory
@@ -135,7 +136,7 @@ const { model: CLAUDE_MODEL, effort: CLAUDE_EFFORT } = engineDefault('claude', '
 // Z.ai coding plan — GLM models served over the Anthropic-compatible endpoint.
 // Runs through the same `claude` binary with the base URL + auth token
 // redirected and a dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the GLM token
-// authenticates (never Matt's Anthropic subscription). GLM 5.3 / 5.2 1M context
+// authenticates (never the operator's Anthropic subscription). GLM 5.3 / 5.2 1M context
 // REQUIRES the `[1m]` model-id suffix on Z.ai. Bare `glm-5.3` / `glm-5.2` serve
 // the standard 200K variant, which made Claude Code auto-compact far too early
 // (observed ~109K) even with CLAUDE_CODE_AUTO_COMPACT_WINDOW=1M. Per Z.ai's
@@ -207,7 +208,7 @@ function zaiEnv(model: string): NodeJS.ProcessEnv {
 // (https://api.x.ai/v1/messages). Same trick as Z.ai: run the stock `claude`
 // binary with ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN redirected and a
 // dedicated, OAuth-free CLAUDE_CONFIG_DIR, so the Grok token authenticates
-// (never Matt's Anthropic subscription). Auth uses GROK_PERSONAL_API_KEY from
+// (never the operator's Anthropic subscription). Auth uses GROK_PERSONAL_API_KEY from
 // the assistant Doppler project (Bearer, which xAI accepts). Grok 4.6 has a
 // 500K context window.
 //
@@ -278,7 +279,7 @@ const resolveClaudeModel = (cli: CliKind, m?: string): string => {
   if (cli === 'xai') return resolveXaiModel(m, XAI_MODEL);
   // Anthropic Claude Code only. A drifted Counsel picker can send grok-* / glm-*
   // here; those ids are valid xAI/Z.ai spawn args and must not become `--model`
-  // on kim's Claude process (which then prints unrecognized_model to stderr).
+  // on an Anthropic Claude process (which then prints unrecognized_model to stderr).
   if (m && VALID_MODEL_ID.test(m) && m.startsWith('claude-')) return m;
   return CLAUDE_MODEL;
 };
@@ -310,49 +311,39 @@ export async function primeXaiOauthToken(): Promise<void> {
 }
 
 
-// assistant-mcp is defined in the personal-account config (~/.claude.json) but NOT
-// in the kim-account config (~/.claude/.claude.json) that Elrond (cli='assistant')
-// runs under — so a kim-account spawn reads zero MCP servers and Elrond loses his
-// entire tool backend (tasks, gmail, calendar, docs, memory, ...). Inject it
-// explicitly at spawn time so it's present no matter which per-account .claude.json
-// claude reads. Path is derived from ELROND_WORKSPACE_PATH so it's correct on every
-// host (Moria/Mac). Passed WITHOUT --strict-mcp-config so it MERGES with, never
-// replaces, any servers the account config already has.
-const ASSISTANT_MCP_WORKSPACE = process.env.ELROND_WORKSPACE_PATH || '/home/mrchevyceleb/ASSISTANT-HUB';
+// Optional operator-provided MCP integrations. The team bus below is built in;
+// external task/browser backends are included only when their entry points are
+// actually configured and present. A fresh clone never calls the maintainer's
+// services or spawns a missing private bridge.
+const ASSISTANT_MCP_WORKSPACE = process.env.ELROND_WORKSPACE_PATH || join(homedir(), 'ASSISTANT-HUB');
 const ASSISTANT_MCP_SERVER_URL =
-  process.env.ASSISTANT_MCP_URL || 'https://matt-assistant-production.up.railway.app/mcp';
-const BROWSER_MCP_ENTRY =
-  process.env.RIVENDELL_BROWSER_MCP ||
-  `${process.env.HOME || '/home/mrchevyceleb'}/samwise/Personal-Apps/rivendell-browser-bridge/bridge/mcp-server.mjs`;
-const BROWSER_ONLY_MCP_CONFIG = JSON.stringify({
-  mcpServers: {
-    'rivendell-browser': {
-      type: 'stdio',
-      command: 'node',
-      args: [BROWSER_MCP_ENTRY],
-    },
-  },
-});
-const ASSISTANT_MCP_CONFIG = JSON.stringify({
-  mcpServers: {
-    'assistant-mcp': {
-      type: 'stdio',
-      command: 'node',
-      args: [`${ASSISTANT_MCP_WORKSPACE}/assistant-mcp/proxy/mcp-proxy.js`],
-      env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
-    },
-    // Matt's REAL Chrome, via the rivendell-browser-bridge sidebar. Distinct
-    // from the playwright MCP: that drives a throwaway browser on this box,
-    // this drives the window Matt is actually looking at, already logged in
-    // everywhere. Writes are gated by the extension on his machine, so Elrond
-    // cannot act unsupervised no matter what he decides here.
-    'rivendell-browser': {
-      type: 'stdio',
-      command: 'node',
-      args: [BROWSER_MCP_ENTRY],
-    },
-  },
-});
+  process.env.ASSISTANT_MCP_URL || process.env.RAILWAY_MCP_URL || '';
+const ASSISTANT_MCP_PROXY =
+  process.env.RIVENDELL_ASSISTANT_MCP_PROXY ||
+  join(ASSISTANT_MCP_WORKSPACE, 'assistant-mcp', 'proxy', 'mcp-proxy.js');
+const BROWSER_MCP_ENTRY = process.env.RIVENDELL_BROWSER_MCP?.trim() || '';
+const optionalMcpServers: Record<string, {
+  type: string;
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+}> = {};
+if (ASSISTANT_MCP_SERVER_URL && existsSync(ASSISTANT_MCP_PROXY)) {
+  optionalMcpServers['assistant-mcp'] = {
+    type: 'stdio',
+    command: 'node',
+    args: [ASSISTANT_MCP_PROXY],
+    env: { MCP_SERVER_URL: ASSISTANT_MCP_SERVER_URL },
+  };
+}
+if (BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
+  optionalMcpServers['rivendell-browser'] = {
+    type: 'stdio',
+    command: 'node',
+    args: [BROWSER_MCP_ENTRY],
+  };
+}
+const ASSISTANT_MCP_CONFIG = JSON.stringify({ mcpServers: optionalMcpServers });
 
 
 /** Add the rivendell-team MCP (agent-to-agent messaging) to any mcp-config
@@ -378,7 +369,7 @@ function withTeamMcp(configJson: string, chatId: string): string {
   }
 }
 
-// Grok (xAI): Matt opted the xai lane into the FULL assistant-mcp (same
+// Grok (xAI) can use the full optional assistant-mcp integration (the same
 // toolbox as every other lane - "give grok my mcp"). Built-in WebSearch/
 // WebFetch stay disallowed below (xAI's Anthropic endpoint 422s the server
 // tool shape; the MCP's web_search/quick_search/deep_research tools cover it
@@ -387,14 +378,14 @@ function withTeamMcp(configJson: string, chatId: string): string {
 // ~/.claude-xai/.claude.json (dead proxy path) cannot shadow this one.
 
 const ASSISTANT_AGENT_PROMPT =
-  "You are Elrond, a calm, exacting, helpful assistant. The user is Matt. " +
-  "You're working inside ASSISTANT-HUB, which contains his task system, " +
-  "client dashboards, and personal automation. Address him directly. Stay terse. " +
+  "You are Elrond, a calm, exacting, helpful assistant. " +
+  "You're working inside ASSISTANT-HUB, which contains the user's task system, " +
+  "project dashboards, and personal automation. Address the user directly. Stay terse. " +
   "When you reference a workspace file or folder, use the form `ASSISTANT-HUB/relative/path` " +
-  "rather than an absolute filesystem path. Matt accesses Rivendell from multiple " +
-  "machines, so absolute Mac paths are useless to him on Windows or iPad. " +
+  "rather than an absolute filesystem path. Rivendell may be accessed from multiple " +
+  "machines, so host-specific absolute paths are not useful on other devices. " +
   "For file search, use `rg` or `rg --files` with scoped paths and explicit exclusions. " +
-  "Do not run broad recursive `grep` or `find` over `/Users/mjohnst`, `~/samwise`, " +
+  "Do not run broad recursive `grep` or `find` over a home directory, workspace hub, " +
   "or ASSISTANT-HUB without excluding `node_modules`, `.git`, and generated output; " +
   "give the same constraint to any subagent you launch. " +
   HUB_WRITE_LOCK_PROMPT;
@@ -580,8 +571,8 @@ class ClaudeSession {
       if (sys) args.push('--append-system-prompt', sys);
     }
 
-    // Same toolbox on every claude-family engine: assistant-mcp + Matt's real
-    // Chrome + rivendell-team. --strict-mcp-config so a model switch cannot
+    // Same toolbox on every Claude-family engine: optional external MCPs plus
+    // rivendell-team. --strict-mcp-config so a model switch cannot
     // silently pick up extra (or stale) servers from ~/.claude*.json. Keep
     // --mcp-config last: it is variadic and swallows any plain arg after it.
     if (cli === 'assistant' || cli === 'xai' || cli === 'claude' || cli === 'zai') {
@@ -794,7 +785,7 @@ class ClaudeSession {
     // Echo the user message into our event log so reconnecting clients can
     // replay the full conversation, not just Sam's responses (claude doesn't
     // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
-    // so the UI still shows Matt's message and thumbnails even when the vision
+    // so the UI still shows the user's message and thumbnails even when the vision
     // adapter rewrites the prompt below.
     if (opts.peerFrom) {
       this.emit({

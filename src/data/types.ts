@@ -251,7 +251,7 @@ export type CronJob = {
   runtime: CronRuntime;
   cwd?: string;
   permissionMode?: CronPermissionMode;
-  source?: 'assistant-mcp' | 'autosam';
+  source?: 'assistant-mcp' | 'autosam' | 'observed';
   sourceLabel?: string;
   readOnly?: boolean;
   lastRun: string;

@@ -1,6 +1,9 @@
-// jarvis-agent configuration. Everything env-driven so Doppler rotates keys
-// without code changes. LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET are
-// consumed by the agents CLI runner directly from env.
+// jarvis-agent configuration. Everything is environment-driven so operators
+// can rotate keys without code changes. LIVEKIT_URL / LIVEKIT_API_KEY /
+// LIVEKIT_API_SECRET are consumed by the agents CLI runner directly from env.
+
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const DANIEL_VOICE_ID = 'cjVigY5qzO86Huf0OWal'; // ElevenLabs "Daniel", British, authoritative
 
@@ -13,7 +16,7 @@ export const CONFIG = {
   stt: process.env.JARVIS_STT || 'elevenlabs/scribe_v2_realtime:en',
   /** Rivendell Hall chat bridge */
   rivendellWsUrl: process.env.RIVENDELL_WS_URL || 'ws://127.0.0.1:8091/api/ws',
-  rivendellRepo: process.env.RIVENDELL_REPO || '/home/mrchevyceleb/ASSISTANT-HUB',
+  rivendellRepo: process.env.RIVENDELL_REPO || join(homedir(), 'ASSISTANT-HUB'),
   /** Engine defaults: Grok 4.6 at max effort via Rivendell's xai engine.
    *  Model stays undefined so the runner's engine config (engines.json /
    *  RIVENDELL_XAI_MODEL) supplies the baked-in Grok id. */

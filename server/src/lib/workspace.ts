@@ -73,7 +73,7 @@ export function workspaceRoot(): string {
 
 // Display-only label sent to the client. Never an absolute Mac path; OneDrive
 // syncs ASSISTANT-HUB to every device, so a friendly relative-style label is
-// what we want the UI to show regardless of which machine Matt is on.
+// what the UI should show regardless of which machine the user is on.
 export const WORKSPACE_DISPLAY_LABEL = 'ASSISTANT-HUB';
 export const WORKSPACE_DISPLAY_PATH = '~/ASSISTANT-HUB';
 
