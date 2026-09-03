@@ -254,15 +254,20 @@ const laneLastWrite = new Map<string, number>();
 export function noteAgentLane(chatId: string, cli: string): void {
   const bare = chatId.replace(/__acct__[a-z0-9-]+$/i, '');
   if (laneStamps.get(bare) === cli) return;
-  laneStamps.set(bare, cli);
   const now = Date.now();
+  // Do not stamp an unsaved change as complete. The old code updated
+  // laneStamps before this throttle and then returned forever on later turns,
+  // leaving agents.json permanently pointed at the previous brain.
   if (now - (laneLastWrite.get(bare) ?? 0) < 60_000) return;
-  laneLastWrite.set(bare, now);
   try {
     const agents = listAgents();
     const idx = agents.findIndex((a) => a.home === bare);
-    if (idx < 0 || agents[idx].cli === cli) return;
-    agents[idx] = { ...agents[idx], cli };
-    saveAgents(agents);
-  } catch { /* best-effort stamp */ }
+    if (idx < 0) return;
+    if (agents[idx].cli !== cli) {
+      agents[idx] = { ...agents[idx], cli };
+      saveAgents(agents);
+    }
+    laneStamps.set(bare, cli);
+    laneLastWrite.set(bare, now);
+  } catch { /* best-effort stamp; leave unstamped so a later turn retries */ }
 }

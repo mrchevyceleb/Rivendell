@@ -5,9 +5,13 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ELROND_WORKSPACE_PATH, HOST, PORT, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { quiesceChat, registerChat } from './chat/register.ts';
-import { getOrCreateSession } from './chat/runner.ts';
+import { getOrCreateSession, isClaudeFamilyCli, type CliKind } from './chat/runner.ts';
 import { getSessionSelection } from './chat/sessions.ts';
-import { ensureAgents } from './chat/agents.ts';
+import { ensureAgents, listAgents } from './chat/agents.ts';
+import { cliForEngine } from './chat/teamBus.ts';
+import { loadEventLogSync } from './chat/event-log-store.ts';
+import { lastEngineOf, threadLogKey } from './chat/threadKey.ts';
+import { ASSISTANT_HUB_PATH } from './chat/config.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { teamRouter } from './routes/team.ts';
 import { routinesRouter } from './routes/routines.ts';
@@ -143,37 +147,59 @@ app.use((error: Error, _req: express.Request, res: express.Response, _next: expr
 });
 
 let tearingDown = false;
-let maxPrewarm: Promise<void> | null = null;
+let agentPrewarm: Promise<void> | null = null;
 
 server.listen(PORT, HOST, () => {
   console.log(`rivendell listening on http://${HOST}:${PORT}`);
-  // Max is the always-on front door. A deploy used to leave him cold until
-  // Matt's first message, making every routine restart feel like a brand-new
-  // session. Prewarm exactly once at boot (never from hello/reconnect storms)
-  // using the last model/effort actually applied to his lane.
-  maxPrewarm = (async () => {
-    const chatId = 'bot-chief-of-staff';
-    const selection = await getSessionSelection('xai', ELROND_WORKSPACE_PATH, chatId);
-    if (tearingDown) return;
-    const session = await getOrCreateSession({
-      cli: 'xai',
-      repoPath: ELROND_WORKSPACE_PATH,
-      chatId,
-      model: selection?.model,
-      effort: selection?.effort,
-    });
-    if (tearingDown) {
-      session.shutdown('prewarm-teardown');
-      return;
+  // Teammates are always-on office lanes. Prewarm every persistent
+  // Claude-family agent exactly once at boot (never from hello/reconnect
+  // storms), using each lane's last proven model/effort. Max goes first in the
+  // list, while independent lanes initialize concurrently.
+  agentPrewarm = (async () => {
+    const agents = listAgents().sort((a, b) =>
+      Number(b.id === 'chief-of-staff') - Number(a.id === 'chief-of-staff'));
+    // Sequential admission makes Max genuinely first and lets the memory guard
+    // observe each already-spawned process before deciding on the next one.
+    for (const agent of agents) {
+      if (tearingDown) break;
+      try {
+        if (typeof agent?.name !== 'string' || typeof agent?.home !== 'string' || !agent.home) {
+          throw new Error('invalid agent record');
+        }
+        const threadHistory = loadEventLogSync(threadLogKey(ELROND_WORKSPACE_PATH, agent.home)).events;
+        const durableCli = lastEngineOf(threadHistory);
+        const configuredCli = typeof agent.cli === 'string'
+          ? agent.cli
+          : typeof agent.engine === 'string'
+            ? cliForEngine(agent.engine)
+            : '';
+        const cli = (durableCli ?? configuredCli) as CliKind;
+        if (!isClaudeFamilyCli(cli)) continue;
+        const chatKey = `${agent.home}${cli === 'claude' ? '__acct__kim' : ''}`;
+        const selectionCwd = cli === 'assistant' ? ASSISTANT_HUB_PATH : ELROND_WORKSPACE_PATH;
+        const selection = await getSessionSelection(cli, selectionCwd, chatKey);
+        if (tearingDown) break;
+        const session = await getOrCreateSession({
+          cli,
+          repoPath: ELROND_WORKSPACE_PATH,
+          chatId: chatKey,
+          model: selection?.model,
+          effort: selection?.effort,
+        });
+        if (tearingDown) {
+          session.shutdown('prewarm-teardown');
+          break;
+        }
+        if ('prewarm' in session && typeof session.prewarm === 'function') {
+          await session.prewarm();
+        }
+        if (!tearingDown) console.log(`[chat prewarm] ${agent.name} is ready`);
+      } catch (err) {
+        if (!tearingDown) console.warn(`[chat prewarm] ${String(agent?.name || agent?.id || 'agent')} could not prewarm:`, (err as Error).message);
+      }
     }
-    if ('prewarm' in session && typeof session.prewarm === 'function') {
-      await session.prewarm();
-    }
-    if (!tearingDown) console.log('[chat prewarm] Max is ready');
-  })().catch((err) => {
-    if (!tearingDown) console.warn('[chat prewarm] Max could not prewarm:', (err as Error).message);
-  }).finally(() => {
-    maxPrewarm = null;
+  })().finally(() => {
+    agentPrewarm = null;
   });
 });
 
