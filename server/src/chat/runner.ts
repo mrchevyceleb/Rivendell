@@ -903,6 +903,10 @@ class ClaudeSession {
     return this.child.exitCode === null && !this.spawnError && !this.authFailed && !this.disposed;
   }
 
+  isDisposed(): boolean {
+    return this.disposed;
+  }
+
   /** The warm child's OAuth token is dead (401/403). Retrying in-process can't
    *  recover it — its cached refresh token was rotated out. Tear the child down
    *  so the next getOrCreateSession respawns a fresh process that re-reads
@@ -1568,14 +1572,19 @@ async function spawnSession(
 
   const ok = await session.ready;
   if (!ok) {
+    if (session.isDisposed() || sessionsShuttingDown) {
+      throw new Error('claude startup was intentionally cancelled');
+    }
     const owner = sessions.get(key);
-    if (owner !== session) {
+    if (owner && owner !== session) {
       // Fresh/model replacement won the lane while this older spawn was still
       // initializing. Never delete or overwrite the new owner.
-      if (owner) return owner;
-      throw new Error('claude startup was superseded');
+      return owner;
     }
-    sessions.delete(key);
+    // The closed-event subscriber may already have removed this exact failed
+    // session before ready resolves. An empty slot is still ours to recover;
+    // it is not evidence that another spawn superseded us.
+    if (owner === session) sessions.delete(key);
     // Recover from a stale persisted session id: drop it and retry without
     // --resume. Only one retry — if even a fresh spawn dies before init,
     // something else is wrong.
