@@ -9,9 +9,9 @@
 //
 // Overflow compact fires when visible turns go past 50: fold the oldest
 // extras into the compact blob (replace file), keep last 50 as the tail.
-// Engine rotation (fresh process, no jsonl --resume) happens on that overflow
-// compact — never because tool dumps bloated jsonl past 350KB, and never
-// every message.
+// Persistent Claude-family processes stay warm after overflow compaction. The
+// rolling compact is the recovery seed for the next genuine process start;
+// durable memory maintenance must never create a mid-chat handoff gap.
 //
 // The durable event log the user sees is NEVER wiped.
 

@@ -97,7 +97,7 @@ export type SessionEvent =
   | { type: 'turnStart' }
   | { type: 'turnEnd'; sessionId?: string }
   | { type: 'compacted'; chatId: string; words: number; turns: number; count: number; savedToRag?: boolean; at: number }
-  | { type: 'closed'; code: number | null; signal: NodeJS.Signals | null }
+  | { type: 'closed'; code: number | null; signal: NodeJS.Signals | null; intentional?: boolean }
   | { type: 'error'; message: string; code?: string; retryable?: boolean; fatal?: boolean };
 
 // Match `/<skill-name> <body>` at the very start of a user message. Skill names
@@ -657,7 +657,8 @@ class ClaudeSession {
       // A dead process is never busy, however it got there.
       this.turnStartedAt = null;
       this.automationTurn = false;
-      this.emit({ type: 'closed', code, signal });
+      if (this.disposed) this.notifyClosed(code, signal);
+      else this.emit({ type: 'closed', code, signal });
     });
 
     this.child.on('error', (err) => {
@@ -765,8 +766,7 @@ class ClaudeSession {
     // A read-only MCP control warmup can never reject or absorb a real message.
     if (this.warmupPromise) await this.warmupPromise.catch(() => {});
     if (this.child.exitCode !== null || this.disposed) {
-      this.emit({ type: 'error', message: 'session has exited' });
-      return;
+      throw new Error('session has exited');
     }
     const startsNewTurn = this.turnStartedAt === null;
     const automationRequest = opts.peerFromRole === 'automation';
@@ -1061,8 +1061,19 @@ class ClaudeSession {
     });
   }
 
+  private notifyClosed(code: number | null, signal: NodeJS.Signals | null): void {
+    // Intentional replacement must detach server subscribers without advancing
+    // clients beyond the durable seq high-water. The replacement inherits that
+    // exact allocator; a synthetic higher seq here would make clients discard
+    // its first real events as duplicates.
+    const se: SeqEvent = { seq: this.latestSeq(), ev: { type: 'closed', code, signal, intentional: true } };
+    for (const fn of this.listeners) fn(se);
+  }
+
   private emit(msg: SessionEvent): void {
-    if (isPlumbingEvent(msg)) return;
+    // Once intentional teardown begins, every remaining child frame belongs to
+    // the retiring process. Do not allocate, persist, or deliver it.
+    if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
     this.eventLog.push(se);
@@ -1085,37 +1096,21 @@ class ClaudeSession {
         events: this.eventLog,
         isBusy: () => this.turnStartedAt !== null,
         emit: (ev) => this.emit(ev as SessionEvent),
-        rotate: (primer) => this.rotateContextWithPrimer(primer),
+        rotate: () => this.keepWarmAfterCompact(),
       });
     } catch (err) {
       console.warn(`[chat ${this.cli}] compaction check failed for ${this.key}:`, (err as Error).message);
     }
   }
 
-  /** Rotate the MODEL context after visible-overflow compact: fresh CLI
-   *  process (no --resume) seeded with persona + rolling compact + last 50.
-   *  Not used for bloated jsonl. The durable event log is untouched. */
-  async rotateContextWithPrimer(_primer: string): Promise<boolean> {
-    const { cli, cwd, chatId, key } = this;
-    const model = this.spawnModel;
-    const effort = this.spawnEffort;
-    // Ownership guard: if this session was replaced since the compaction check
-    // began (steer respawn, model recycle), the LANE now has a different owner
-    // — rotating would shutdown/delete the replacement, possibly mid-turn.
-    if (sessions.get(key) !== this) {
-      console.warn(`[chat ${cli}] compaction rotate skipped for ${key}: lane owner changed`);
-      return false;
-    }
-    this.shutdown('compaction-rotate');
-    sessions.delete(key);
-    await setSessionId(cli, cwd, '', chatId); // fresh CLI session — first send seeds the forever-window
-    const replacement = await spawnSession(cli, cwd, chatId, null, key, 0, model, effort, true);
-    // Rotation used to create only a quiet-ready process; the next human still
-    // paid Claude/MCP initialization. Prewarm the replacement with a read-only
-    // control request while keeping compact+window debt for the real next turn.
-    await replacement.prewarm();
-    console.warn(`[chat ${cli}] context rotated and prewarmed for ${key}`);
-    return false;
+  /** The durable compact is for recovery, not a reason to kill a healthy
+   * persistent process. Claude/xAI retain their live context and native
+   * auto-compaction; the next genuine process start receives compact+window.
+   * Returning true clears obsolete rotation debt without a handoff gap. */
+  private keepWarmAfterCompact(): boolean {
+    if (sessions.get(this.key) !== this || !this.isAlive()) return false;
+    console.warn(`[chat ${this.cli}] compact saved; keeping warm session ${this.key}`);
+    return true;
   }
 
   private resolveStartupWaiters(state: 'initialized' | 'closed'): void {

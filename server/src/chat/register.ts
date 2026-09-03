@@ -528,12 +528,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // The CLI process is dead. Drop the stale promise + subscription so
         // the next send can rebind via getOrCreateSession, which resumes from
         // the saved session id when possible.
-        if (busy) {
+        if (busy && !sev.intentional) {
           // Mid-turn death is a real failure — tell the client.
           safeSend({ type: 'sessionClosed', code: sev.code, seq: se.seq });
         } else {
-          // Idle exit: swallow it. Next `send` will respawn transparently.
-          console.log(`[chat ws#${wsId}] swallowed idle session close (code=${sev.code})`);
+          // Idle/intentional replacement: swallow it. The current send path
+          // resolves the lane owner again before writing.
+          console.log(`[chat ws#${wsId}] swallowed ${sev.intentional ? 'intentional' : 'idle'} session close (code=${sev.code})`);
         }
         sessionPromise = null;
         busy = false;
@@ -972,30 +973,51 @@ export async function registerChat(app: express.Express, server: Server): Promis
             // one rather than crashing on `null.send`.
             session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
           }
-          const wasBusy = Boolean(session && (session as { isBusy?: () => boolean }).isBusy?.() === true);
+          const initiallyBusy = Boolean(session && (session as { isBusy?: () => boolean }).isBusy?.() === true);
+
+          // Persistent CLIs (claude/assistant): reconcile the spawned model/effort
+          // with the current pick before an idle turn. An attach-only lookup on
+          // every idle send also resolves a replacement made by another socket;
+          // recycleOnMismatch remains explicit, so stale device defaults cannot
+          // cause replacement themselves.
+          if (!initiallyBusy && isClaudeFamilyCli(cliKind) && repoPath) {
+            const reconciled = await getOrCreateSession({
+              cli: cliKind,
+              repoPath,
+              chatId,
+              model: msg.model,
+              effort: msg.effort,
+              recycleOnMismatch: selectionChangeRequested,
+            });
+            if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
+            if (selectionChangeRequested) {
+              selectionApplied = true;
+            } else {
+              const spawned = claudeSpawnOf(session);
+              if (spawned && (spawned.model !== msg.model || spawned.effort !== msg.effort)) {
+                console.log(
+                  `[chat ws#${wsId}] preserving warm ${cliKind} session across device-local model/effort mismatch`,
+                );
+              }
+            }
+          }
+          if (session && (session as { isAlive?: () => boolean }).isAlive?.() === false) {
+            session = repoPath && cliKind
+              ? await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort }))
+              : null;
+          }
+          if (!session) throw new Error('session unavailable, please retry');
+          // Recompute after every awaited owner/rebind operation. Another send
+          // may have started this session while we yielded.
+          const wasBusy = (session as { isBusy?: () => boolean }).isBusy?.() === true;
           busy = wasBusy;
           if (!wasBusy) {
             busy = true;
             safeSend({ type: 'turnStart' });
+          } else if (cliKind === 'codex') {
+            safeSend({ type: 'error', message: 'codex is on a turn - wait for the result' });
+            return;
           }
-
-          // Persistent CLIs (claude/assistant): reconcile the spawned model/effort
-          // with the current pick before an idle turn. getOrCreateSession recycles
-          // an IDLE session whose model/effort differ (busy sessions left intact),
-          // preserving session_id so the replacement --resumes the conversation.
-          if (!wasBusy && selectionChangeRequested && isClaudeFamilyCli(cliKind) && repoPath) {
-            const reconciled = await getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort, recycleOnMismatch: true });
-            if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
-            selectionApplied = true;
-          } else if (!wasBusy && !selectionChangeRequested && isClaudeFamilyCli(cliKind)) {
-            const spawned = claudeSpawnOf(session);
-            if (spawned && (spawned.model !== msg.model || spawned.effort !== msg.effort)) {
-              console.log(
-                `[chat ws#${wsId}] preserving warm ${cliKind} session across device-local model/effort mismatch`,
-              );
-            }
-          }
-          if (!session) throw new Error('session unavailable, please retry');
           if (chatQuiesced) {
             safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
             safeSend({ type: 'turnEnd' });
