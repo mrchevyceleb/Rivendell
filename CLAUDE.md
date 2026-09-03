@@ -1,91 +1,74 @@
-# Rivendell
+# Rivendell contributor guide
 
-Local always-on office app for Bag End. Runs on the DGX Spark "Moria" (Ubuntu) at `http://localhost:8091` as a `systemd --user` service (`rivendell.service`) and is exposed inside the tailnet via `tailscale serve`.
+## Project
+
+Rivendell is a local-first, always-on multi-agent office. It serves a React PWA and an Express/WebSocket backend from one Node process. There is no app-layer authentication; loopback or a trusted private proxy is the security boundary.
 
 ## Stack
 
-- **Frontend**: React 19 + Vite 8 + TypeScript, Tailwind v4, TanStack Query, react-markdown. Dev server on `:5173` proxies API + WebSocket traffic to the API on `:8091`.
-- **Server**: Express 5 + `ws` over a single Node HTTP server, run via `tsx`. Workspace at `server/`.
-- **Persistence**: Supabase (`@supabase/supabase-js`, service role) for the durable job queue and Scribe events. Local JSON stores under `~/.rivendell/` for pins, tasks, room state.
-- **Auth**: None at the app layer. Tailscale ACLs are the auth boundary.
+- React 19, Vite 8, TypeScript, Tailwind v4, TanStack Query, react-markdown.
+- Express 5 and `ws`, run through `tsx`.
+- Local JSON/JSONL state under `~/.rivendell`; optional Supabase queue/event persistence.
 
-## Commands (bash / Linux)
+## Commands
 
 ```bash
 npm install
-npm run dev           # concurrently: server (tsx watch) + vite
-npm run build         # tsc -b && vite build && server tsc build
+npm run dev
 npm run typecheck
-npm start             # production server (serves dist/ from STATIC_DIR)
+npm test
+npm run build
+npm start
 ```
 
-Production on Moria (systemd `--user`, enabled + auto-restart):
+The development frontend runs on `:5173` and proxies API/WebSocket traffic to `127.0.0.1:8091`. Production serves `dist/` from the Express server.
 
-```bash
-systemctl --user status rivendell
-systemctl --user restart rivendell    # after a rebuild
-journalctl --user -u rivendell -f     # live logs
-./scripts/tailscale-serve.sh          # exposes :8091 on the tailnet
-```
-
-The unit (`~/.config/systemd/user/rivendell.service`) runs `~/bin/start-rivendell-moria`, which sources the shared Doppler env (`~/.config/moria-services/doppler.env` → project `assistant-mcp`, config `prd`) and launches `./scripts/start.sh` under `doppler run`. The in-repo `scripts/install-launchd.sh` + `com.matt.rivendell.plist` are the legacy macOS path, kept for reference only.
+Never restart a live Rivendell service while `/api/health` reports `busyTurns > 0` unless interruption is explicitly intended.
 
 ## Layout
 
-```
-src/                    React app
-  App.tsx               shell switch: GrokApp (default) or Studio (/studio)
-  grok/                 Grok-style shell (GrokApp, GrokSidebar, GrokChat,
-                        GrokConversation, GrokLogo, history.ts, grok.css)
-  rooms/                one component per room (hosted in the Grok sidebar)
-  shell/Studio.tsx      classic IDE shell: tabs + file tree (legacy, intact)
-  shell/studio/         FileTree, FileTab, ChatTab, types, studio.css
-  chat/                 chat client pieces (components, hooks, data, utils)
-  data/                 api.ts, mock.ts, types.ts (RoomKey lives here)
-  hooks/                useRoomData, useScribeSocket
-  theme/, components/   primitives + ornaments
+```text
+src/
+  grok/                    default teammate shell
+  chat/                    chat transport, transcript, pickers, composer
+  rooms/                   task/calendar/mail/workspace/operations rooms
+  shell/                   classic Studio at /studio
+  voice/, jarvis/          realtime voice and wake-word clients
 server/src/
-  index.ts              express app, mounts /api/*, registers chat + scribe ws, starts worker queue
-  config.ts             env resolution (PORT, STATE_DIR, SUPABASE_*, WORKER_*, MCP_*)
-  routes/               one router per /api/* surface (tasks, calendar, email, family,
-                        docs, pl, pins, cron, messages, weavings, scribe, summary)
-  chat/                 chat server: register, runner, sessions, codex-runner, chronicle,
-                        history (GET /api/chat/history = sidebar index over event logs)
-  worker/               durable job queue (queue, runner, dispatchers, scribe, store)
-  lib/                  supabase, doppler, MCP bridge, JSON stores, room/task/pin stores,
-                        assistantAdmin/Data, workspace
-supabase/migrations/    SQL migrations (queue/events tables)
-scripts/                start.sh + tailscale-serve + legacy launchd plist/install (macOS)
+  index.ts                 app lifecycle and route mounting
+  chat/                    runners, sessions, durable logs, compaction, team bus
+  routes/                  /api/* and local control surfaces
+  worker/                  optional queue and Scribe stream
+  lib/                     persistence, workspace, integrations
+jarvis-agent/              optional standalone LiveKit voice worker
+supabase/migrations/       optional queue/event schema
+scripts/                   startup, Tailscale, PWA assets, Windows handler
 ```
 
-Shells: `/` is the Grok Bot-style teammates app (left rail: personas = real companion lanes with home threads + history from `/api/chat/history` (titles + previews), Plugins → rooms; center: bubble chat with Thoughts pods + Jarvis mic composer; right pane: artifact desk + Routines + Session meter). Persona scopes: each teammate carries `~/.rivendell/personas/<name>.md` (who they are / what they do — editable, hot-reloaded via mtime cache, seeded from `server/src/chat/personaPrompts.ts` defaults). The scope injects into every engine (claude-family `--append-system-prompt`, codex/banana per-turn preamble), follows the FACE across rebrains, and survives durable compaction plus genuine process restarts. Forever-threads: every 100 user turns, `server/src/chat/compaction.ts` auto-compacts the model context (juicy 3000–5000-word durable summary via Grok, saved to the savemem RAG vault via assistant-mcp `memory.save_memory`; persistent Claude-family sessions stay warm and the summary seeds the next genuine process start) — the visible event log is never wiped; the client renders a `Memory compacted` divider. `src/grok/grok.css` carries the extracted sand tokens and remaps --r-*. `/studio` is the classic Rivendell IDE, fully intact.
+## Architecture rules
 
-## Environment
+- TypeScript + ESM. Server-relative imports include `.ts`.
+- New HTTP APIs use `/api/<noun>`; WebSocket surfaces use `/ws/...` or the existing `/api/ws` chat transport.
+- Agent home threads use one engine-neutral durable event log. Native provider session IDs remain engine-specific.
+- Visible history is durable server state; browser cache is disposable.
+- Rolling compaction must never kill a healthy live process. It seeds only a genuine future process start.
+- Scheduled routines yield to visible human conversations.
+- Steering is non-destructive. Only explicit Stop may terminate a turn.
+- External side effects remain draft/review-first.
+- Use `lib/jsonStore.ts` helpers for state under `~/.rivendell`.
+- A new room belongs in `src/rooms/` and must be registered in the Grok shell/sidebar.
+- A new API belongs in `server/src/routes/`, is mounted in `server/src/index.ts`, and is mirrored in `src/data/api.ts`.
+- UI work should remain responsive, tactile, and accessible.
 
-See `.env.example`. Notable knobs:
+## Open-source safety
 
-- `PORT` (default `8091`), `HOST` (default `0.0.0.0`).
-- `ELROND_WORKSPACE_PATH` — defaults to `~/ASSISTANT-HUB` (Syncthing-managed; moved off OneDrive). Library/Studio reads this as a Notion-simple space tree (`inbox/`, `projects/`, `areas/`, `resources/`, `scratch/`, `Shares/`, `archive/`, `legacy/`). Hub write policy lives in `server/src/lib/hubPaths.ts` + hub `AGENTS.md`. Agents must not create top-level hub files.
-- `RIVENDELL_WORKER_ENABLED` (default `true`), `RIVENDELL_WORKER_RUNNER` (`dry-run` | `claude`), `RIVENDELL_WORKER_POLL_MS`. Keep `dry-run` unless you want jobs to spawn a real headless Claude Code process.
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — required for the durable queue and Scribe events.
-- `RAILWAY_MCP_URL`, `ASSISTANT_MCP_TOKEN` — Railway MCP bridge. Routes fall back to local mock data when unset.
-- `ASSISTANT_ADMIN_BASE_URL`, `ASSISTANT_ADMIN_TOKEN`, `ASSISTANT_MCP_ENV_PATH` — assistant-mcp admin backend. `MCP_AUTH_TOKEN` is read from the assistant-mcp `.env` automatically; only override if URL/token changes.
+- Keep the default bind address on loopback.
+- Never add personal service URLs, deployment IDs, emails, hostnames, absolute user paths, credentials, transcripts, or real workspace data.
+- Optional private integrations must be disabled until explicitly configured by environment variables.
+- Do not automatically borrow credentials from unrelated global CLIs or neighboring repositories.
+- Use synthetic data in documentation and screenshots.
+- Run a full-history secret scan before public releases.
 
-Secrets live in Doppler (per global rules). Never use the literal word `supabase` in a Doppler secret name — use `SB_` prefix.
+## Verification
 
-## Conventions
-
-- TypeScript everywhere. ESM (`"type": "module"`). Server imports use explicit `.ts` extensions (e.g. `./routes/tasks.ts`) — keep that style when adding routes.
-- API surface is `/api/<noun>`; WebSocket surface is `/ws/...`. The SPA fallback in `server/src/index.ts` skips both prefixes.
-- New room → add `src/rooms/<Name>.tsx`, register it in `src/grok/GrokApp.tsx` `ROOMS` + `src/grok/GrokSidebar.tsx` `ROOM_ENTRIES`.
-- New API surface → add `server/src/routes/<name>.ts` exporting a `Router`, mount it in `server/src/index.ts`. Mirror the call from `src/data/api.ts`.
-- New worker job type → add a dispatcher in `server/src/worker/dispatchers.ts`; queue persists through Supabase (`supabase/migrations/202605010001_rivendell_jobs.sql`).
-- Workers must stay draft/review-first for any external side effect — that's an explicit design constraint of this app.
-- JSON stores under `~/.rivendell/` are the source of truth for non-queue state; use `lib/jsonStore.ts` helpers, not ad-hoc `fs` calls.
-- Frontend follows the global "every UI feels like a toy" rule (favicon, click easter eggs, floating animations, tactile hovers, etc.). Don't ship a flat room.
-
-## Deploy / verify
-
-- Migrations: deploy via the Supabase MCP — don't wait to be asked.
-- After local changes, rebuild and restart: `npm run build && systemctl --user restart rivendell` (the service runs `npm start`, which serves the prebuilt `dist/` — it does not rebuild on its own).
-- Health check: `curl http://localhost:8091/api/health`.
+Run `npm run typecheck`, `npm test`, and `npm run build` before declaring work complete. Run the repository's Codex review workflow once after a complete task. Keep tests focused; do not add broad suites for small changes.

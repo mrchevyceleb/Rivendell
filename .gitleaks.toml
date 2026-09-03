@@ -1,0 +1,11 @@
+title = "Rivendell Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Public xAI OAuth client identifier (not a client secret)"
+regexTarget = "secret"
+regexes = [
+  '''^b1a00492-073a-47ea-816f-4c329264a828$'''
+]

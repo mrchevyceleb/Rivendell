@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run deadcode
+      - run: npm run build
+      - name: Validate optional Jarvis agent
+        run: |
+          npm ci --prefix jarvis-agent
+          npm audit --prefix jarvis-agent --audit-level=high
+          npm run typecheck --prefix jarvis-agent
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Scan the full Git history
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            zricethezav/gitleaks@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854 \
+            detect --source=/repo --config=/repo/.gitleaks.toml --log-opts=--all --redact=100 --no-banner
