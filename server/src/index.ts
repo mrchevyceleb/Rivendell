@@ -8,7 +8,7 @@ import { quiesceChat, registerChat } from './chat/register.ts';
 import { getOrCreateSession, isClaudeFamilyCli, type CliKind } from './chat/runner.ts';
 import { getSessionSelection } from './chat/sessions.ts';
 import { ensureAgents, listAgents } from './chat/agents.ts';
-import { cliForEngine } from './chat/teamBus.ts';
+import { cliForEngine, resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
 import { loadEventLogSync } from './chat/event-log-store.ts';
 import { lastEngineOf, threadLogKey } from './chat/threadKey.ts';
 import { ASSISTANT_HUB_PATH } from './chat/config.ts';
@@ -159,6 +159,11 @@ let agentPrewarm: Promise<void> | null = null;
 
 server.listen(PORT, HOST, () => {
   console.log(`rivendell listening on http://${HOST}:${PORT}`);
+  void resumeQueuedTeamDeliveries().then((count) => {
+    if (count > 0) console.log(`[team] resumed ${count} durable queued ${count === 1 ? 'delivery' : 'deliveries'}`);
+  }).catch((error) => {
+    console.warn('[team] could not resume durable delivery queue:', (error as Error).message);
+  });
   if (!PREWARM_AGENTS) {
     console.log('[chat prewarm] disabled (set RIVENDELL_PREWARM_AGENTS=true to opt in)');
     return;

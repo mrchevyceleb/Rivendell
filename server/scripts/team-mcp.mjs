@@ -33,8 +33,11 @@ const TOOLS = [
     name: 'team_message',
     description:
       'Send a message to a teammate by name. They receive it in their own thread, think, ' +
-      'and (by default) their reply is returned to you. Use this to delegate, ask, coordinate, ' +
-      'or hand off work. hop: pass 2 when replying to a message you received (chain depth guard).',
+      'and (by default) their reply is returned when they are immediately available. Busy teammates ' +
+      'are durably queued/steered in the background so this tool returns immediately; their result ' +
+      'arrives back through team_message. Never poll or retry. Use wait:false for an explicit ' +
+      'fire-and-forget handoff. hop: pass 2 when replying ' +
+      'to a message you received (chain depth guard).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -100,11 +103,14 @@ async function callTool(name, args, signal) {
       }),
     }, signal);
     if (!result.delivered) return `NOT DELIVERED: ${result.reason}`;
-    return result.reply
-      ? `Delivered to ${result.to}. Their reply:\n\n${result.reply}`
-      : result.reason
-        ? `Delivered to ${result.to}. ${result.reason}`
-        : `Delivered to ${result.to}.`;
+    if (result.reply) {
+      const queueNote = result.queued ? ' (waited for their current turn)' : '';
+      return `Delivered to ${result.to}${queueNote}. Their reply:\n\n${result.reply}`;
+    }
+    if (result.queued) return `Accepted for ${result.to}. ${result.reason ?? 'It will deliver automatically.'} Do not retry.`;
+    return result.reason
+      ? `Delivered to ${result.to}. ${result.reason}`
+      : `Delivered to ${result.to}.`;
   }
   if (name === 'team_recent') {
     const { messages } = await api(`/api/team/recent?name=${encodeURIComponent(args.name)}&limit=${args.limit ?? 8}`, undefined, signal);

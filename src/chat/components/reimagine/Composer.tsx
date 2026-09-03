@@ -145,19 +145,23 @@ export function Composer(props: ComposerProps) {
       return [];
     });
 
-  const submit = () => {
-    const v = props.value.trim();
+  const submit = (allowStop = false) => {
+    // Read the DOM value, not only the controlled prop. Android keyboards can
+    // fire Enter/pointer-up before React commits the final input event; the old
+    // stale empty prop took the Stop branch and killed the warm agent even
+    // though the user had plainly typed a reply.
+    const v = (taRef.current?.value ?? props.value).trim();
     const imgs = payload();
-    // While a turn streams, the button NEVER starts a new turn. Steer with the
-    // typed guidance (text is required; any attached images ride along), or, with
-    // nothing to steer, stop. This keeps the busy branch exhaustive so a caller
-    // without onSteer can never fall through to onSend and run a concurrent turn.
+    const hasLiveContent = Boolean(v || imgs?.length);
+    // While the backend still owns a turn, any text OR image is queued guidance.
+    // Only an explicit click/tap on an empty red Stop button may cancel.
+    // Keyboard Enter with an empty/stale draft is a no-op, never an interrupt.
     if (props.busy) {
-      if (v && props.onSteer) {
+      if (hasLiveContent && props.onSteer) {
         props.onSteer(v, imgs);
         props.onChange('');
         clearImages();
-      } else {
+      } else if (allowStop && !hasLiveContent) {
         props.onStop?.();
       }
       return;
@@ -197,26 +201,26 @@ export function Composer(props: ComposerProps) {
       }
     }
     if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       e.preventDefault();
-      submit();
+      submit(false);
     }
   };
 
   const trimmed = props.value.trim();
   const hasContent = trimmed.length > 0 || images.length > 0;
   const ready = hasContent && !props.busy;
-  // Steering is text-only (an image-only draft mid-stream can't steer, so the
-  // button stays STOP and keeps the attachment). Typing while busy flips the
-  // button to STEER; `submit()` routes it.
-  const canSteer = props.busy && trimmed.length > 0 && Boolean(props.onSteer);
+  // Text and image-only drafts both queue safely. An attached image must never
+  // leave the button in destructive Stop mode.
+  const canSteer = props.busy && hasContent && Boolean(props.onSteer);
 
   const sendBtn = (extraClass = '') => (
     <button
       ref={sendRef}
       type="button"
       className={`send${ready ? ' ready' : ''}${canSteer ? ' steer' : ''}${props.busy && !canSteer ? ' streaming' : ''} ${extraClass}`}
-      aria-label={canSteer ? 'Steer at the next safe point' : props.busy ? 'Stop generating' : 'Send'}
-      title={canSteer ? 'Steer at the next safe point' : props.busy ? 'Stop generating' : 'Send'}
+      aria-label={canSteer ? 'Send after the current response' : props.busy ? 'Stop generating' : 'Send'}
+      title={canSteer ? 'Send after the current response' : props.busy ? 'Stop generating' : 'Send'}
       onPointerDown={(e) => {
         if (e.pointerType !== 'touch') return;
         // iOS/Android blur the textarea first; the keyboard viewport resize can
@@ -241,14 +245,14 @@ export function Composer(props: ComposerProps) {
         if (!stayedPut || !inside) return;
         e.preventDefault();
         touchSubmittedAtRef.current = Date.now();
-        submit();
+        submit(true);
       }}
       onPointerCancel={(e) => {
         if (touchSubmitRef.current?.pointerId === e.pointerId) touchSubmitRef.current = null;
       }}
       onClick={() => {
         if (Date.now() - touchSubmittedAtRef.current < 1000) return;
-        submit();
+        submit(true);
       }}
     >
       <ArrowUp className="ic-send" />
@@ -269,7 +273,7 @@ export function Composer(props: ComposerProps) {
       {mobile && (props.modelChip || props.busy) ? (
         <div className="dock-meta">
           {props.modelChip}
-          {props.busy ? <span className="steer-cue">Steer at the next safe point ↪</span> : null}
+          {props.busy ? <span className="steer-cue">Reply will send next ↪</span> : null}
         </div>
       ) : null}
       {popOpen ? (
@@ -302,7 +306,7 @@ export function Composer(props: ComposerProps) {
           ref={taRef}
           rows={1}
           value={props.value}
-          placeholder={props.busy ? 'Steer at the next safe point…' : props.placeholder ?? phrases?.[phIdx] ?? 'Speak, friend…'}
+          placeholder={props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Speak, friend…'}
           aria-label="Message Elrond"
           onChange={(e) => {
             setPopDismissed(false);
@@ -354,7 +358,7 @@ export function Composer(props: ComposerProps) {
             ) : null}
             {props.modelChip}
             {props.busy ? (
-              <span className="hint steer-cue">Steer at the next safe point ↪</span>
+              <span className="hint steer-cue">Reply will send next ↪</span>
             ) : (
               props.hint ?? (
                 <span className="hint">

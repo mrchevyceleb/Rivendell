@@ -61,5 +61,5 @@ export const CODEX_PROMPTS_DIR =
 export const CLAUDE_PROJECTS_DIR = join(homedir(), '.claude', 'projects');
 
 // Where Rivendell persists its (repo,cli) -> claude session_id map.
-export const STATE_DIR = join(homedir(), '.rivendell');
+export const STATE_DIR = process.env.RIVENDELL_STATE_DIR || join(homedir(), '.rivendell');
 export const SESSIONS_FILE = join(STATE_DIR, 'chat-sessions.json');

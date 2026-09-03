@@ -10,7 +10,7 @@ import type { Event, PermissionRequest, PermissionRuleset } from '@opencode-ai/s
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { adaptImagesForTextModel, getVisionMode } from './vision-adapter.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, loadEventLogForCompactionSync, loadEventLogSync, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
 import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
@@ -26,6 +26,7 @@ import {
 } from './config.ts';
 import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
+import { ensureLocalLlmProxy, shutdownLocalLlmProxy } from './local-llm-proxy.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -67,6 +68,10 @@ type BananaSendOptions = {
   peerFromRole?: string;
   /** Visible peer_message body. Full `text` still goes to the model. */
   peerText?: string;
+  /** Correlates queued team delivery admission with its exact turn boundary. */
+  peerDeliveryId?: string;
+  /** Cancels a queued teammate send before it claims this turn. */
+  signal?: AbortSignal;
   autoContinueDepth?: number;
   blockedSideEffectContinueDepth?: number;
   /** Deprecated alias kept so an in-flight hidden continuation from older code
@@ -141,6 +146,8 @@ type BananaTurnState = {
    *  the window between this turn's state being created and its prompt being
    *  accepted, and would fake-complete the turn before the real answer streams. */
   promptAccepted: boolean;
+  /** Durable team outbox id acknowledged once Banana accepts this prompt. */
+  peerDeliveryId?: string;
   /** True when this prompt was prepended with an event-log recovery recap. */
   recoveryRecapUsed: boolean;
   /** True once this turn has actually emitted or observed a tool_use part. */
@@ -1690,15 +1697,17 @@ async function bananaConfigContent(opts: { projectPathHint?: string; cli?: CliKi
       },
     };
   }
-  // Local (vLLM) provider — DIRECT to the on-box OpenAI endpoint.
-  // Registered models are whatever vLLM currently has loaded; swapping the vLLM
-  // model + restarting the banana serve repopulates this list.
+  // Local provider. Banana exposes a large real tool surface; LM Studio's
+  // llama.cpp grammar compiler rejects validation-only bounds in those JSON
+  // schemas before inference. A loopback proxy strips only those bounds while
+  // preserving the tools themselves and their runtime MCP validation.
   const localModels = await localConfigModels();
   if (Object.keys(localModels).length) {
+    const localProxyBaseUrl = await ensureLocalLlmProxy(LOCAL_VLLM_BASE_URL);
     override.provider = override.provider || {};
     override.provider.local = {
-      name: 'Local (vLLM)',
-      options: { baseURL: LOCAL_VLLM_BASE_URL, apiKey: 'local' },
+      name: 'Local (LM Studio)',
+      options: { baseURL: localProxyBaseUrl, apiKey: 'local' },
       models: localModels,
     };
   }
@@ -2529,11 +2538,13 @@ export class BananaSession {
   /** Reserve and return the next seq (tombstone writes race a dying session's
    *  own emit path — never let two events share a seq). */
   reserveSeq(): number {
-    return this.nextSeq++;
+    const seq = reserveEventLogSeq(this.logKey, this.nextSeq);
+    this.nextSeq = seq + 1;
+    return seq;
   }
 
   latestSeq(): number {
-    return this.nextSeq - 1;
+    return latestEventLogSeq(this.logKey, this.nextSeq - 1);
   }
 
   isAlive(): boolean {
@@ -2671,11 +2682,16 @@ export class BananaSession {
   }
 
   async send(text: string, images?: ChatImage[], opts: BananaSendOptions = {}): Promise<void> {
+    if (opts.signal?.aborted) return;
     if (this.busy) {
-      this.emit({
-        type: 'error',
-        message: 'banana is still answering — wait for the current turn to finish',
-      });
+      // Internal team delivery retries at the natural boundary. Do not leak a
+      // transient admission race into the human transcript as a provider error.
+      if (!opts.peerFrom) {
+        this.emit({
+          type: 'error',
+          message: 'banana is still answering — wait for the current turn to finish',
+        });
+      }
       return;
     }
     this.busy = true;
@@ -2689,9 +2705,17 @@ export class BananaSession {
     // Internal auto-continues are intentionally hidden; they are just Rivendell
     // nudging Banana past an opencode compaction summary.
     if (opts.peerFrom) {
+      this.emit({ type: 'turnStart' });
       this.emit({
         type: 'event',
-        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
+        event: {
+          type: 'peer_message',
+          from: opts.peerFrom,
+          fromRole: opts.peerFromRole ?? '',
+          text: opts.peerText !== undefined ? opts.peerText : text,
+          ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
+          ts: Date.now(),
+        },
       });
     } else if (!opts.hidden) {
       this.emit({
@@ -2855,6 +2879,7 @@ export class BananaSession {
       bufferedDeltas: new Map(),
       assistantMessageId: null,
       promptAccepted: false,
+      peerDeliveryId: opts.peerDeliveryId,
       recoveryRecapUsed: false,
       sawToolUse: false,
       currentMessageVisibleContent: false,
@@ -3198,6 +3223,12 @@ export class BananaSession {
   }
 
   private markPromptAccepted(state: BananaTurnState): void {
+    if (!state.promptAccepted && state.peerDeliveryId) {
+      this.emit({
+        type: 'event',
+        event: { type: 'peer_delivery_accepted', deliveryId: state.peerDeliveryId, ts: Date.now() },
+      });
+    }
     state.promptAccepted = true;
     if (state.recoveryRecapUsed) {
       this.recoverContextOnNextTurn = false;
@@ -3832,7 +3863,7 @@ export class BananaSession {
   private emit(msg: SessionEvent): void {
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
     this.eventLog.push(se);
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
@@ -3960,7 +3991,18 @@ export async function getOrCreateBananaSession(opts: {
   const cli = opts.cli ?? 'banana';
   const key = keyOf(cli, cwd, chatId);
   const existing = bananaSessions.get(key);
-  if (existing && existing.isAlive()) return existing;
+  if (existing && existing.isAlive()) {
+    await flushEventLog(existing.logKey);
+    const priorEngine = lastEngineOf(loadEventLogSync(existing.logKey).events);
+    if (!existing.isBusy() && priorEngine && priorEngine !== cli) {
+      // Another brain advanced the shared thread. Recreate Banana so its next
+      // prompt seeds from that durable context instead of its stale session.
+      bananaSessions.delete(key);
+      existing.shutdown();
+    } else {
+      return existing;
+    }
+  }
 
   // Banana/opencode session ids are not reliable across `banana serve` or
   // Node process restarts. The session can still be returned by session.get
@@ -3993,6 +4035,7 @@ export function shutdownAllBananaSessions(): void {
   // The persistent serve process is shared by every session — tear it down
   // once all sessions are gone.
   bananaServer.shutdown();
+  shutdownLocalLlmProxy();
 }
 
 /** Kill the in-flight banana turn but keep the session id saved for resume. */

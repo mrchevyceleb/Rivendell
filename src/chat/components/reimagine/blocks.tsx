@@ -86,6 +86,50 @@ export function TypingBubble() {
   );
 }
 
+function ActiveTurnIndicator({ since }: { since?: number }) {
+  const hasKnownStart = Boolean(since && since > 0);
+  const startedAtRef = useRef(hasKnownStart ? since as number : Date.now());
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    startedAtRef.current = since && since > 0 ? since : Date.now();
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  const elapsed = Math.max(0, now - startedAtRef.current);
+  const seconds = Math.floor(elapsed / 1000);
+  const label = Math.floor(elapsed / 2800) % 2 === 0 ? 'Working' : 'Thinking';
+  const clock = hasKnownStart
+    ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+    : 'live';
+  return (
+    <div className="active-turn" role="status" aria-label="Agent is still working">
+      <StarSigil className="active-turn-star" aria-hidden="true" />
+      <span className="active-turn-label" aria-hidden="true">{label}</span>
+      <span className="active-turn-dots" aria-hidden="true"><i /><i /><i /></span>
+      <span className="active-turn-time" aria-hidden="true">{clock}</span>
+    </div>
+  );
+}
+
+function TurnCompleteIndicator() {
+  return (
+    <div className="turn-complete" role="status" aria-label="Turn complete">
+      <span aria-hidden="true">✓</span>
+      <span>Turn complete</span>
+    </div>
+  );
+}
+
+function ConnectionStateIndicator({ reconnecting }: { reconnecting: boolean }) {
+  return (
+    <div className="connection-state" role="status">
+      <StarSigil className="connection-state-star" aria-hidden="true" />
+      <span>{reconnecting ? 'Reconnecting…' : 'Connection interrupted'}</span>
+    </div>
+  );
+}
+
 export type ThreadPin = {
   pinnedBlockIds: string[];
   onToggle: (target: { blockId: string; text: string; ts: number }) => void | Promise<void>;
@@ -238,20 +282,105 @@ export function ToolCard({ block }: { block: Extract<ChatBlock, { kind: 'tool' }
   );
 }
 
-// ── compaction marker — the forever-thread's "context rotated" line ────
-function PeerBubble({ block }: { block: Extract<ChatBlock, { kind: 'peer' }> }) {
+// ── teammate message (collapsed by default so long handoffs stay available
+//    without taking over the conversation feed) ───────────────────────────
+const PEER_PREVIEW_CHARS = 180;
+
+export function cleanPeerMessageText(raw: string): string {
+  return raw
+    .replace(/^\[message from teammate[^\]]*\]\n?/, '')
+    // Older events stored the model-only reply instruction in the visible
+    // peer payload. New deliveries use peerText and never persist it, but keep
+    // replay of existing forever-threads clean too.
+    .replace(/\n\n\(Reply inline (?:in this turn|for the thread)[\s\S]*\)\s*$/, '')
+    .trim();
+}
+
+function peerPreview(text: string): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= PEER_PREVIEW_CHARS) return oneLine;
+  return `${oneLine.slice(0, PEER_PREVIEW_CHARS).trimEnd()}…`;
+}
+
+function PeerBubble({
+  block,
+  responseBlocks,
+  responseActive,
+  streaming,
+  mobile,
+  collapseSteps,
+  pin,
+}: {
+  block: Extract<ChatBlock, { kind: 'peer' }>;
+  responseBlocks: AssistantBlock[];
+  responseActive: boolean;
+  streaming: boolean;
+  mobile: boolean;
+  collapseSteps: boolean;
+  pin?: ThreadPin;
+}) {
+  const [open, setOpen] = useState(false);
   const initial = (block.from || '?').trim().slice(0, 1).toUpperCase();
   const routineResult = block.fromRole === 'automation-result';
-  // Strip the team-bus envelope line so the bubble shows just the words.
-  const text = block.text.replace(/^\[message from teammate[^\]]*\]\n?/, '');
+  const text = cleanPeerMessageText(block.text);
+  const bodyId = `peer-message-${block.id}`;
+  const hasResponse = responseBlocks.length > 0;
+  // The peer boundary, not individual content-block open flags, owns progress.
+  // Providers can briefly close one block before opening the next; the exchange
+  // must not flicker to "done" while its turn is still running.
+  const responseBusy = responseActive || responseBlocks.some(
+    (item) => (item.kind === 'text' && item.open) || (item.kind === 'tool' && item.running),
+  );
+  const role = routineResult
+    ? 'routine update'
+    : block.fromRole
+      ? `${block.fromRole} · to you`
+      : 'to you';
+  const subject = hasResponse ? 'exchange' : 'message';
+
   return (
-    <div className={`bt-peer${routineResult ? ' routine-result' : ''}`}>
-      <span className="bt-peer-head">
-        <span className="bt-peer-disc">{initial}</span>
-        <span className="bt-peer-name">{block.from}</span>
-        <span className="bt-peer-role">{routineResult ? 'routine update' : '→ to you'}</span>
-      </span>
-      <div className="bt-peer-body">{text}</div>
+    <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="bt-peer-toggle"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-controls={bodyId}
+      >
+        <span className="bt-peer-head">
+          <span className="bt-peer-disc">{initial}</span>
+          <span className="bt-peer-name">{block.from}</span>
+          <span className="bt-peer-role">{role}</span>
+          {hasResponse || responseBusy ? (
+            <span className={`bt-peer-status${responseBusy ? ' working' : ''}`} role="status" aria-live="polite">
+              <i aria-hidden="true" /> {responseBusy ? 'working' : 'done'}
+            </span>
+          ) : null}
+          <span className="bt-peer-action">{open ? 'hide' : 'show'} {subject}</span>
+          <ChevronDown className="bt-peer-chev" />
+        </span>
+        {!open ? <span className="bt-peer-preview">{peerPreview(text)}</span> : null}
+      </button>
+      {open ? (
+        <div className="bt-peer-body" id={bodyId}>
+          <section className="bt-peer-turn">
+            <span className="bt-peer-turn-label">{block.from}</span>
+            <div className="bt-peer-turn-text">{text}</div>
+          </section>
+          {hasResponse ? (
+            <section className="bt-peer-turn bt-peer-response">
+              <span className="bt-peer-turn-label">Reply</span>
+              <ElrondGroup
+                blocks={responseBlocks}
+                streaming={streaming}
+                mobile={mobile}
+                collapseSteps={collapseSteps}
+                pin={pin}
+              />
+            </section>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -383,7 +512,13 @@ function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) 
         </span>
       ) : null}
       <div className="bubble">{block.text}</div>
-      <span className="when">{timeLabel(block.ts)}</span>
+      {block.deliveryState ? (
+        <span className={`delivery-state ${block.deliveryState}`} role={block.deliveryState === 'failed' ? 'alert' : 'status'}>
+          {block.deliveryState === 'queued' ? 'Queued · will run next' : 'Not delivered'}
+        </span>
+      ) : (
+        <span className="when">{timeLabel(block.ts)}</span>
+      )}
     </div>
   );
 }
@@ -479,6 +614,20 @@ function planCollapsedSteps(
   if (!collapseSteps) return { finalTextId: null, stepBlocks: [] };
   const textBlocks = blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
   if (textBlocks.length === 0) return { finalTextId: null, stepBlocks: [] };
+
+  // While any tool-backed turn is still live, none of its prose is a proven
+  // final answer. Fold status narration ("I'm on it", "checking…") and tools
+  // into Thoughts until the real turnEnd. Otherwise one early sentence looks
+  // complete, the user replies normally, and the hidden old turn surprises
+  // them by treating that reply as mid-turn guidance.
+  if (streaming && blocks.some((block) => block.kind === 'tool')) {
+    return {
+      finalTextId: null,
+      stepBlocks: blocks.filter((block): block is StepBlock => (
+        block.kind === 'tool' || (block.kind === 'text' && isAnswerProse(block))
+      )),
+    };
+  }
 
   const answerTexts = textBlocks.filter(isAnswerProse);
   const nonempty = textBlocks.filter(hasVisibleProse);
@@ -647,12 +796,14 @@ export type ChatThreadProps = {
   typingBubble?: boolean;
   /** Suppress the typing indicator entirely (silent automation turn running). */
   suppressTyping?: boolean;
+  /** Wall-clock start of the active turn, used for visible proof-of-life time. */
+  workingSince?: number;
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
 // Elrond groups (tool cards + streaming prose), and the thinking indicator
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin, typingBubble = false, suppressTyping = false }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin, typingBubble = false, suppressTyping = false, workingSince }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -673,13 +824,24 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
   const currentBlocks = activeTurnId
     ? blocks.filter((b) => 'turnId' in b && b.turnId === activeTurnId)
     : blocks.slice(currentTurnStart);
-  const hasVisible = currentBlocks.some((b) =>
-    (b.kind === 'text' && b.text.trim().length > 0)
-    || b.kind === 'tool'
-    || b.kind === 'doc-link'
-    || b.kind === 'folder-link'
-    || b.kind === 'artifact'
-    || b.kind === 'terminal-error');
+  const currentBoundary = currentTurnStart > 0 ? blocks[currentTurnStart - 1] : undefined;
+  const activePeerId = streaming && currentBoundary?.kind === 'peer' ? currentBoundary.id : null;
+  const hasCurrentTerminalFailure = currentBlocks.some((block) => block.kind === 'terminal-error');
+  const latestQueued = [...blocks].reverse().find((block) => (
+    block.kind === 'user' && block.deliveryState === 'queued'
+  ));
+  let lastUserIndex = -1;
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (blocks[index].kind === 'user') {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  const hasAssistantAfterLastUser = lastUserIndex >= 0 && blocks.slice(lastUserIndex + 1).some((block) => (
+    (block.kind === 'text' && block.text.trim().length > 0)
+    || block.kind === 'tool'
+    || block.kind === 'terminal-error'
+  ));
 
   // Group consecutive assistant blocks (same turnId) and user blocks.
   const groups: Array<
@@ -689,8 +851,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     | { type: 'restart'; block: Extract<ChatBlock, { kind: 'restart' }>; day: string }
     | { type: 'terminal-error'; block: Extract<ChatBlock, { kind: 'terminal-error' }>; day: string }
     | { type: 'switch'; block: Extract<ChatBlock, { kind: 'switch' }>; day: string }
-    | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; day: string }
+    | { type: 'peer'; block: Extract<ChatBlock, { kind: 'peer' }>; responseBlocks: AssistantBlock[]; responseTurnId?: string | null; day: string }
   > = [];
+  type PeerGroup = Extract<(typeof groups)[number], { type: 'peer' }>;
+  const peerGroupsById = new Map<string, PeerGroup>();
   let lastDay = '';
   for (const b of blocks) {
     const day = dayLabel(b.ts);
@@ -713,10 +877,35 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     if (b.kind === 'user') {
       groups.push({ type: 'user', block: b, day });
     } else if (b.kind === 'peer') {
-      groups.push({ type: 'peer', block: b, day });
+      const peerGroup: PeerGroup = { type: 'peer', block: b, responseBlocks: [], day };
+      groups.push(peerGroup);
+      peerGroupsById.set(b.id, peerGroup);
     } else if (b.kind === 'text' || b.kind === 'tool' || b.kind === 'doc-link' || b.kind === 'folder-link' || b.kind === 'artifact') {
       const last = groups[groups.length - 1];
+      // Reducer-stamped peerId is the authoritative association. Native
+      // steering can create more than one provider message_start inside the
+      // same outer turn, so turnId/adjoining position alone is not enough.
+      const peerId = 'peerId' in b ? b.peerId : undefined;
+      const peerGroup = peerId ? peerGroupsById.get(peerId) : undefined;
+      if (peerGroup) {
+        peerGroup.responseBlocks.push(b);
+        peerGroup.day = day;
+        continue;
+      }
+      // Legacy cached blocks predate peerId. Keep the conservative adjacent,
+      // same-turn fallback so old exchanges do not suddenly expand the feed.
       const turnId = (b as { turnId?: string }).turnId;
+      if (
+        peerId === undefined
+        && last?.type === 'peer'
+        && !isAutomationPeer(last.block.from, last.block.fromRole, last.block.text)
+        && (last.responseTurnId === undefined || last.responseTurnId === (turnId ?? null))
+      ) {
+        last.responseTurnId = turnId ?? null;
+        last.responseBlocks.push(b);
+        last.day = day;
+        continue;
+      }
       // Grok mode (collapseSteps): one user prompt → one assistant response.
       // Assistant turns in Rivendell exist ONLY as replies to a user send or
       // as automation narrative — so consecutive assistant blocks with no user
@@ -792,14 +981,34 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     } else if (g.type === 'switch') {
       nodes.push(<SwitchDivider key={g.block.id} block={g.block} />);
     } else if (g.type === 'peer') {
-      nodes.push(<PeerBubble key={g.block.id} block={g.block} />);
+      nodes.push(
+        <PeerBubble
+          key={g.block.id}
+          block={g.block}
+          responseBlocks={g.responseBlocks}
+          responseActive={activePeerId === g.block.id}
+          streaming={streaming}
+          mobile={mobile}
+          collapseSteps={collapseSteps}
+          pin={pin}
+        />,
+      );
     } else {
       nodes.push(<ElrondGroup key={g.blocks[0].id} blocks={g.blocks} streaming={streaming} mobile={mobile} collapseSteps={collapseSteps} pin={pin} />);
     }
   }
 
-  if (streaming && !hasVisible && !hideThinking && !pendingAutomation && !suppressTyping) {
-    nodes.push(typingBubble ? <TypingBubble key="thinking" /> : <ThinkingIndicator key="thinking" phrases={phrases} />);
+  if (streaming && !hasCurrentTerminalFailure && !hideThinking && !pendingAutomation && !suppressTyping) {
+    // Never make the user infer liveness from a Stop button. Keep one animated
+    // proof-of-life row visible for the ENTIRE turn, even after prose, Thoughts,
+    // or completed tool cards have appeared.
+    nodes.push(<ActiveTurnIndicator key="active-turn" since={workingSince} />);
+  } else if (!latestQueued && status === 'ready' && hasAssistantAfterLastUser && !hasCurrentTerminalFailure) {
+    // Absence of animation must mean something explicit. This permanent,
+    // low-emphasis terminal marker distinguishes "finished" from "stalled".
+    nodes.push(<TurnCompleteIndicator key="turn-complete" />);
+  } else if ((status === 'connecting' || status === 'closed' || status === 'error') && blocks.length > 0) {
+    nodes.push(<ConnectionStateIndicator key="connection-state" reconnecting={status !== 'error'} />);
   }
 
   return (

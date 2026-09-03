@@ -25,3 +25,62 @@ if ('serviceWorker' in navigator) {
       .catch(() => { /* best effort - nothing to retire */ });
   });
 }
+
+// A long-lived Rivendell tab used to stay on its already-loaded JavaScript
+// forever after a local deploy. That made fixes appear broken even though the
+// server was serving a new hashed bundle. Revalidate the shell on wake/focus
+// and periodically; reload only when its entry asset actually changed. Defer
+// while the user has an unsent draft so an update can never eat their words.
+const bootEntryAsset = Array.from(document.scripts)
+  .map((script) => script.getAttribute('src') ?? '')
+  .find((src) => /\/assets\/index-[^/]+\.js(?:\?|$)/.test(src));
+
+if (bootEntryAsset) {
+  let checkingBuild = false;
+  const checkForBuildUpdate = async () => {
+    if (checkingBuild || document.visibilityState !== 'visible') return;
+    checkingBuild = true;
+    try {
+      const response = await fetch(window.location.pathname, {
+        cache: 'no-store',
+        headers: { 'x-rivendell-version-check': '1' },
+      });
+      if (!response.ok) return;
+      const html = await response.text();
+      const match = html.match(/(?:src=["'])([^"']*\/assets\/index-[^"'?]+\.js(?:\?[^"']*)?)["']/i);
+      if (!match || match[1] === bootEntryAsset) return;
+      const draftSelector = [
+        'textarea',
+        '[contenteditable="true"]',
+        'input:not([type])',
+        'input[type="text"]',
+        'input[type="email"]',
+        'input[type="url"]',
+        'input[type="tel"]',
+        'input[type="number"]',
+        'input[type="date"]',
+        'input[type="datetime-local"]',
+        'input[type="time"]',
+        'input[type="password"]',
+      ].join(',');
+      const hasDraft = Array.from(document.querySelectorAll(draftSelector)).some((node) => {
+        if (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement) {
+          return !node.disabled && !node.readOnly && Boolean(node.value.trim());
+        }
+        return Boolean(node.textContent?.trim());
+      });
+      if (hasDraft) return;
+      window.location.reload();
+    } catch {
+      // Offline/restarting is handled by chat reconnect state; retry later.
+    } finally {
+      checkingBuild = false;
+    }
+  };
+  window.addEventListener('focus', () => { void checkForBuildUpdate(); });
+  window.addEventListener('pageshow', () => { void checkForBuildUpdate(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') void checkForBuildUpdate();
+  });
+  window.setInterval(() => { void checkForBuildUpdate(); }, 30_000);
+}

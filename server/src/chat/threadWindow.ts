@@ -156,9 +156,16 @@ export function extractVisibleTurns(events: Seqish[]): VisibleTurn[] {
 
     if (t === '_user_echo' && typeof inner.text === 'string') {
       flushAssistant();
-      const text = inner.text.trim();
+      const message = inner.text.trim();
+      const imageCount = typeof inner.imageCount === 'number' && inner.imageCount > 0
+        ? Math.floor(inner.imageCount)
+        : 0;
+      const imageRecoveryNote = imageCount > 0
+        ? `[${imageCount} image${imageCount === 1 ? ' was' : 's were'} attached to this message. ${imageCount === 1 ? 'Its' : 'Their'} visual contents are unavailable in recovered text history; do not infer them from earlier conversation.]`
+        : '';
+      const text = [message, imageRecoveryNote].filter(Boolean).join('\n\n');
       if (!text) continue;
-      if (isRoutinePromptText(text)) {
+      if (isRoutinePromptText(message)) {
         afterAutomation = true;
         continue;
       }

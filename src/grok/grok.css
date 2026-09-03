@@ -1081,34 +1081,98 @@
 .bt-conv:hover .bt-row-edit { display: grid; }
 .bt-row-edit:hover { background: var(--r-line); color: var(--r-ink); }
 
-/* peer (agent-to-agent) message */
+/* peer (agent-to-agent) message — compact by default, fully readable on open */
 .bt-peer {
-  margin: 10px 0 10px 0;
-  max-width: min(680px, 86%);
+  margin: 6px 0;
+  width: min(560px, 86%);
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--r-line-strong);
+  border-radius: 14px;
+  background: var(--r-bg-card);
+  animation: bt-msg-in 0.25s ease both;
 }
-.bt-peer-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.bt-peer-toggle {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  border-radius: inherit;
+  transition: background 0.15s ease;
+}
+.bt-peer-toggle:hover { background: var(--r-bg-hover); }
+.bt-peer-toggle:focus-visible { outline: 2px solid var(--r-elf-blue); outline-offset: -2px; }
+.bt-peer-head { display: flex; align-items: center; gap: 8px; width: 100%; }
 .bt-peer-disc {
   width: 20px; height: 20px; border-radius: 50%;
   display: grid; place-items: center;
+  flex: none;
   background: #2F2F2F; color: #FCFCFC;
   font-size: 11px; font-weight: 600;
   border: 1px solid rgba(119,119,119,0.35);
 }
 .bt-peer-name { font-size: 12.5px; font-weight: 600; color: var(--r-ink); }
-.bt-peer-role { font-size: 11px; color: var(--r-ink-faint); }
-.bt-peer-body {
-  background: #1C1C1C;
-  border: 1px solid rgba(119,119,119,0.22);
-  border-radius: 14px;
-  border-top-left-radius: 4px;
-  padding: 10px 14px;
-  font-size: 14px;
-  line-height: 1.55;
-  color: var(--r-ink);
-  white-space: pre-wrap;
+.bt-peer-role { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--r-ink-faint); }
+.bt-peer-status { display: inline-flex; align-items: center; gap: 4px; flex: none; font-family: var(--r-mono); font-size: 9.5px; color: var(--r-ink-faint); }
+.bt-peer-status i { width: 5px; height: 5px; border-radius: 50%; background: var(--r-emerald); }
+.bt-peer-status.working { color: var(--r-ink-mute); }
+.bt-peer-status.working i { background: var(--r-amber); animation: bt-typing-bounce 1.2s ease-in-out infinite; }
+.bt-peer-action { margin-left: auto; flex: none; font-family: var(--r-mono); font-size: 10px; color: var(--r-ink-faint); }
+.bt-peer-chev { width: 14px; height: 14px; flex: none; color: var(--r-ink-faint); transition: transform 0.22s ease; }
+.bt-peer.open .bt-peer-chev { transform: rotate(180deg); }
+.bt-peer-preview {
+  display: -webkit-box;
+  margin: 7px 2px 0 28px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--r-ink-mute);
+  font-size: 12.5px;
+  line-height: 1.4;
   word-break: break-word;
 }
+.bt-peer-body {
+  max-height: min(52vh, 440px);
+  overflow-y: auto;
+  border-top: 1px solid var(--r-line);
+  padding: 11px 14px 13px 40px;
+  background: #1C1C1C;
+  color: var(--r-ink);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: thin;
+  scrollbar-color: var(--r-line-strong) transparent;
+}
+.bt-peer-turn + .bt-peer-turn { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--r-line); }
+.bt-peer-turn-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--r-ink-faint);
+  font-family: var(--r-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.bt-peer-turn-text { white-space: pre-wrap; }
+.bt-peer-response .m-elrond,
+.bot-app .rc .bt-peer-response .m-elrond { max-width: none; padding: 0; background: transparent; }
+.bt-peer-response .m-elrond .prose,
+.bot-app .rc .bt-peer-response .m-elrond .prose { font-size: 13px; line-height: 1.55; }
+.bt-peer-response .m-elrond .acts { margin-bottom: 0; }
 [data-theme='light'] .bt-peer-body { background: #F4F4F4; }
+@media (max-width: 600px) {
+  .bt-peer { width: 92%; }
+  .bt-peer-action { display: none; }
+  .bt-peer-status { margin-left: auto; }
+  .bt-peer-body { padding-left: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bt-peer-status.working i { animation: none; }
+}
 
 /* agent avatar disc images */
 .bt-disc { overflow: hidden; }

@@ -1,5 +1,5 @@
 import { appendFile, mkdir, rm } from 'node:fs/promises';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { STATE_DIR } from './config.ts';
 import type { SessionEvent } from './runner.ts';
@@ -121,6 +121,32 @@ const PARSED_CACHE_MAX = 128;
 const PARSED_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 let parsedCacheBytes = 0;
 
+// Agent home threads are engine-neutral, so several native session objects can
+// write the same durable log over their lifetime. Sequence allocation must be
+// shared process-wide; a stale Codex session must never resume below events a
+// GLM/Claude/Banana session appended in the meantime.
+const nextSeqByLogKey = new Map<string, number>();
+
+function observeNextSeq(key: string, nextSeq: number): number {
+  const next = Math.max(1, nextSeqByLogKey.get(key) ?? 1, nextSeq);
+  nextSeqByLogKey.set(key, next);
+  return next;
+}
+
+export function reserveEventLogSeq(key: string, localFloor = 1): number {
+  let next = nextSeqByLogKey.get(key);
+  if (next === undefined) next = loadEventLogSync(key).nextSeq;
+  const seq = Math.max(next, localFloor);
+  nextSeqByLogKey.set(key, seq + 1);
+  return seq;
+}
+
+export function latestEventLogSeq(key: string, localFloor = 0): number {
+  let next = nextSeqByLogKey.get(key);
+  if (next === undefined) next = loadEventLogSync(key).nextSeq;
+  return Math.max(localFloor, next - 1);
+}
+
 // Map iteration is insertion-ordered and a cache hit re-inserts, so the front
 // of the map is the least recently used entry.
 function evictParsedCache(): void {
@@ -146,20 +172,20 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
     mtimeMs = st.mtimeMs;
     size = st.size;
   } catch {
-    return { events: [], nextSeq: 1 };
+    return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
   }
   const cached = parsedCache.get(path);
   if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
     // Re-insert so eviction order is least-recently-USED, not first-inserted.
     parsedCache.delete(path);
     parsedCache.set(path, cached);
-    return { events: cached.events.slice(), nextSeq: cached.nextSeq };
+    return { events: cached.events.slice(), nextSeq: observeNextSeq(key, cached.nextSeq) };
   }
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
   } catch {
-    return { events: [], nextSeq: 1 };
+    return { events: [], nextSeq: nextSeqByLogKey.get(key) ?? 1 };
   }
   const events: PersistedEvent[] = [];
   // Source-text length of each kept event, so the cache can charge itself the
@@ -211,7 +237,97 @@ export function loadEventLogSync(key: string): { events: PersistedEvent[]; nextS
   // A single log bigger than the whole budget evicts itself here: callers still
   // get their data, it just is not retained.
   evictParsedCache();
-  return { events: trimmed.slice(), nextSeq };
+  return { events: trimmed.slice(), nextSeq: observeNextSeq(key, nextSeq) };
+}
+
+export function normalizeEventLogSequence(lines: readonly string[]): {
+  lines: string[];
+  repaired: boolean;
+  latestSeq: number;
+} {
+  const originalMax = lines.reduce((max, line) => {
+    try {
+      const seq = JSON.parse(line)?.seq;
+      return typeof seq === 'number' && Number.isFinite(seq) ? Math.max(max, seq) : max;
+    } catch {
+      return max;
+    }
+  }, 0);
+  let previous = 0;
+  let repairCursor = originalMax;
+  let repaired = false;
+  let repairingTail = false;
+  const normalized = lines.map((line) => {
+    if (!line) return line;
+    try {
+      const record = JSON.parse(line);
+      if (typeof record?.seq !== 'number' || !Number.isFinite(record.seq)) return line;
+      if (!repairingTail && record.seq > previous) {
+        previous = record.seq;
+        return line;
+      }
+      // Once chronology regresses, move the ENTIRE remaining tail above the
+      // old file maximum. A browser already at that old maximum will then
+      // receive every repaired event instead of silently discarding one that
+      // merely collided with an existing cursor value.
+      repairingTail = true;
+      const next = ++repairCursor;
+      previous = next;
+      repaired = true;
+      return JSON.stringify({ ...record, seq: next });
+    } catch {
+      return line;
+    }
+  });
+  return { lines: normalized, repaired, latestSeq: previous };
+}
+
+/** Repair sequence regressions left by older per-engine allocators.
+ *
+ * File order is the durable chronology. Keep every already-monotonic number and
+ * bump only a duplicate/regression above its predecessor, so existing client
+ * cursors remain valid and previously hidden late events become replayable.
+ */
+export function repairEventLogSequenceSync(key: string): { repaired: boolean; latestSeq: number } {
+  const path = logPath(key);
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return { repaired: false, latestSeq: latestEventLogSeq(key) };
+  }
+
+  const normalized = normalizeEventLogSequence(raw.split('\n'));
+  if (normalized.repaired) {
+    const temporaryPath = `${path}.seq-repair-${process.pid}.tmp`;
+    let fd = -1;
+    try {
+      mkdirSync(EVENT_LOG_DIR, { recursive: true });
+      fd = openSync(temporaryPath, 'w');
+      writeFileSync(fd, normalized.lines.join('\n'), 'utf8');
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = -1;
+      renameSync(temporaryPath, path);
+    } catch (error) {
+      if (fd >= 0) {
+        try { closeSync(fd); } catch { /* already closed */ }
+      }
+      try { unlinkSync(temporaryPath); } catch { /* absent */ }
+      throw error;
+    }
+    const cached = parsedCache.get(path);
+    if (cached) parsedCacheBytes -= cached.bytes;
+    parsedCache.delete(path);
+    if (parsedCacheBytes < 0) parsedCacheBytes = 0;
+    bumpEventLogRevision();
+  }
+
+  // Advance the allocator, but report the DURABLE repaired boundary. The
+  // process allocator may already be higher because of memory-only events; a
+  // replay must not mistake those newer events for stale session-buffer data.
+  observeNextSeq(key, normalized.latestSeq + 1);
+  return { repaired: normalized.repaired, latestSeq: normalized.latestSeq };
 }
 
 /** Full durable HOT log for forever-thread assembly/compaction. Unlike
@@ -270,6 +386,7 @@ export function flushAllEventChains(): Promise<void> {
  *  synchronously. No write-chain dedupe — written once at teardown by the
  *  markBusy*LanesRestarting helpers only. */
 export function appendEventLogSync(key: string, persisted: PersistedEvent): boolean {
+  observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return true;
   try {
     mkdirSync(EVENT_LOG_DIR, { recursive: true });
@@ -283,6 +400,7 @@ export function appendEventLogSync(key: string, persisted: PersistedEvent): bool
 }
 
 export function appendEventLog(key: string, persisted: PersistedEvent): void {
+  observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return;
   const path = logPath(key);
   const line = JSON.stringify(persisted) + '\n';
@@ -369,6 +487,7 @@ export async function clearEventLog(key: string): Promise<void> {
         // A fresh start resets the whole thread, so the overflow archive goes
         // too — otherwise the next trim would splice pre-reset turns back in.
         await rm(archivePath(key), { force: true });
+        nextSeqByLogKey.delete(key);
         bumpEventLogRevision();
       } catch (err) {
         console.warn('[event-log-store] clear failed', key, (err as Error).message);

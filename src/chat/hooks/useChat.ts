@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatBlock, ChatImagePreview, CompanionId, Repo } from '../data/types';
 import { contextWindowForCodexModel } from '../codexModels';
 import { automationTurnInFlight, automationTurnPending, filterAutomationNoise } from '../utils/automationNoise';
+import { isAutomationPeer } from '../utils/routineNoise';
 
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
@@ -93,7 +94,9 @@ function isSyntheticApiErrorEvent(ev: any): boolean {
 // Pure reducer — all per-turn state lives on the blocks themselves
 // (turnId + cbIndex). This keeps it safe under React Strict Mode, which
 // invokes reducers twice for purity-checking.
-function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): ChatBlock[] {
+type ReducerCursor = { current: string; peerId?: string };
+
+function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlock[] {
   if (!ev || typeof ev !== 'object') return blocks;
 
   if ((ev.type === 'stream_event' || ev.type === 'event') && ev.event) {
@@ -148,6 +151,8 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
   // its open/running blocks too — otherwise a dead tool card ticks "working"
   // forever after replay.
   if ((ev.type === 'assistant' && ev._serviceRestart) || ev.type === '_service_restart') {
+    turnIdRef.current = '';
+    turnIdRef.peerId = undefined;
     const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
     const reason = typeof ev.reason === 'string' ? ev.reason : undefined;
     const closed = blocks.map((b) => {
@@ -160,11 +165,24 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
 
   // Agent-to-agent delivery: a teammate's message landing in this thread.
   if (ev.type === 'peer_message' && typeof ev.text === 'string') {
+    const from = typeof ev.from === 'string' ? ev.from : 'Teammate';
+    const fromRole = typeof ev.fromRole === 'string' ? ev.fromRole : undefined;
+    const deliveryId = typeof ev.deliveryId === 'string' ? ev.deliveryId : undefined;
+    const existing = deliveryId
+      ? blocks.find((block) => block.kind === 'peer' && block.deliveryId === deliveryId)
+      : undefined;
+    if (existing?.kind === 'peer') {
+      turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : existing.id;
+      return blocks;
+    }
+    const blockId = id();
+    turnIdRef.peerId = isAutomationPeer(from, fromRole, ev.text) ? undefined : blockId;
     return [...blocks, {
       kind: 'peer',
-      id: id(),
-      from: typeof ev.from === 'string' ? ev.from : 'Teammate',
-      fromRole: typeof ev.fromRole === 'string' ? ev.fromRole : undefined,
+      id: blockId,
+      from,
+      fromRole,
+      deliveryId,
       text: ev.text,
       ts: typeof ev.ts === 'number' ? ev.ts : Date.now(),
     }];
@@ -173,6 +191,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
   // Server-injected echo of the user's prompt — keeps the user's message in
   // the visible thread when a client reconnects and replays the buffer.
   if (ev.type === '_user_echo' && typeof ev.text === 'string') {
+    turnIdRef.peerId = undefined;
     const attachments: Array<{ id: string; mediaType: string }> = Array.isArray(ev.attachments) ? ev.attachments : [];
     const echoImages = attachments.length
       ? attachments.map((a) => ({ mediaType: a.mediaType, dataUrl: `/api/chat/attachments/${a.id}` }))
@@ -187,13 +206,23 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
       ? blocks.find((b) => b.kind === 'user' && b.clientMsgId === cmid)
       : [...blocks].reverse().find((b) => b.kind === 'user' && b.text === ev.text);
     if (match && match.kind === 'user' && (cmid || match.text === ev.text)) {
-      if (echoImages && !match.images?.some((i) => i.dataUrl.startsWith('/'))) {
-        return blocks.map((b) => (b.id === match.id ? { ...b, images: echoImages } : b));
-      }
-      if (imageCountFlag(ev) && Array.isArray(ev.attachments) && ev.attachments.length === 0 && !match.attachmentsLost) {
-        return blocks.map((b) => (b.id === match.id ? { ...b, attachmentsLost: true } : b));
-      }
-      return blocks;
+      // A queued steer becomes genuinely delivered only when the runner emits
+      // its durable user echo. Fold that acknowledgement into the optimistic
+      // bubble instead of adding a duplicate.
+      const nextMatch: Extract<ChatBlock, { kind: 'user' }> = {
+        ...match,
+        deliveryState: undefined,
+        ...(echoImages && !match.images?.some((i) => i.dataUrl.startsWith('/')) ? { images: echoImages } : {}),
+        ...(imageCountFlag(ev) && Array.isArray(ev.attachments) && ev.attachments.length === 0
+          ? { attachmentsLost: true }
+          : {}),
+      };
+      if (
+        match.deliveryState === undefined
+        && nextMatch.images === match.images
+        && nextMatch.attachmentsLost === match.attachmentsLost
+      ) return blocks;
+      return blocks.map((b) => (b.id === match.id ? nextMatch : b));
     }
     const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
     const imageCount = typeof ev.imageCount === 'number' && ev.imageCount > 0 ? ev.imageCount : undefined;
@@ -219,21 +248,55 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
 
   // Turn over (result) or killed (interrupted): nothing stays open/running.
   if (ev.type === 'result' || ev.type === '_interrupted') {
-    return blocks.map((b) => {
+    const finalTurnId = turnIdRef.current || `t${nextId++}`;
+    const finalPeerId = turnIdRef.peerId;
+    turnIdRef.current = '';
+    turnIdRef.peerId = undefined;
+    const closed = blocks.map((b) => {
       if (b.kind === 'text' && b.open) return { ...b, open: false };
       if (b.kind === 'tool' && (b.open || b.running)) return { ...b, open: false, running: false };
       return b;
     });
+    // `result.result` is the provider's canonical final answer. A mobile tab
+    // can reconnect after message_start but before the final assistant event;
+    // its cursor then resumes inside the turn with no reducer turnId. The old
+    // fallback compared against every legacy `turnId:""` block and silently
+    // discarded that final response. Recover it from the terminal result when
+    // no identical text block made it into the visible transcript.
+    const finalText = ev.type === 'result' && ev.is_error !== true && typeof ev.result === 'string'
+      ? ev.result.trim()
+      : '';
+    const finalTurnParts = closed
+      .filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text' && b.turnId === finalTurnId)
+      .map((b) => b.text);
+    const finalAlreadyRendered = finalTurnParts.some((part) => part.trim() === finalText)
+      || ['', '\n', '\n\n'].some((separator) => finalTurnParts.join(separator).trim() === finalText);
+    if (finalText && !finalAlreadyRendered) {
+      return [...closed, {
+        kind: 'text',
+        id: id(),
+        text: finalText,
+        ts: Date.now(),
+        turnId: finalTurnId,
+        peerId: finalPeerId,
+        cbIndex: -1,
+        open: false,
+      }];
+    }
+    return closed;
   }
 
   if (ev.type === 'content_block_start') {
     const idx: number = ev.index;
     const cb = ev.content_block;
+    // Reconnect may resume after message_start. Never correlate new content to
+    // the empty legacy turn id shared by old cached blocks.
+    if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
     if (cb?.type === 'text') {
       const block: ChatBlock = {
         kind: 'text', id: id(), text: '', ts: Date.now(),
-        turnId, cbIndex: idx, open: true,
+        turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
       };
       return [...blocks, block];
     }
@@ -242,7 +305,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
         kind: 'tool', id: id(),
         toolUseId: cb.id, tool: cb.name, args: '',
         running: true, ts: Date.now(),
-        turnId, cbIndex: idx, open: true,
+        turnId, peerId: turnIdRef.peerId, cbIndex: idx, open: true,
       };
       return [...blocks, block];
     }
@@ -304,6 +367,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
   // blank bubble. Guard on "no text yet for this turn" so delta-backed
   // backends never double-render.
   if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
+    if (!turnIdRef.current) turnIdRef.current = `t${nextId++}`;
     const turnId = turnIdRef.current;
     const fullText = (ev.message.content as Array<any>)
       .filter((c) => c?.type === 'text' && typeof c.text === 'string')
@@ -313,7 +377,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: { current: string }): C
       if (isSyntheticApiErrorEvent(ev)) return blocks;
       const hasText = blocks.some((b) => b.kind === 'text' && b.turnId === turnId && b.text !== '');
       if (!hasText) {
-        return [...blocks, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, cbIndex: -1, open: false }];
+        return [...blocks, { kind: 'text', id: id(), text: fullText, ts: Date.now(), turnId, peerId: turnIdRef.peerId, cbIndex: -1, open: false }];
       }
     }
     return blocks;
@@ -631,9 +695,13 @@ export function useChat(opts: {
   const restoreKeyRef = useRef(restoreKey);
   if (restoreKeyRef.current !== restoreKey) {
     restoreKeyRef.current = restoreKey;
-    queuedSteerRef.current = null;
-    pendingSendRef.current = false;
-    setBlocks(initialStoredBlocks(enabled, repo, cli, chatId));
+    const restored = initialStoredBlocks(enabled, repo, cli, chatId);
+    const queued = [...restored].reverse().find((block) => (
+      block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
+    ));
+    queuedSteerRef.current = queued?.kind === 'user' ? queued.clientMsgId ?? null : null;
+    pendingSendRef.current = Boolean(queuedSteerRef.current);
+    setBlocks(restored);
   }
   const [status, setStatus] = useState<Status>('idle');
   // Mirror status into a ref so WS handlers can read the latest value
@@ -655,12 +723,22 @@ export function useChat(opts: {
    *  watchdog uses it to detect a silently stalled turn, and the live "working"
    *  banner uses it to show "last token Ns ago". */
   const lastMessageAtRef = useRef<number>(Date.now());
-  /** When the current turn started — drives the live elapsed timer. */
+  /** When the current turn started — ref powers watchdog math; state powers UI. */
   const turnStartRef = useRef<number>(0);
+  const [turnStartedAt, setTurnStartedAt] = useState(0);
+  const markTurnStarted = (at = Date.now(), force = false) => {
+    if (!force && turnStartRef.current > 0) return;
+    turnStartRef.current = at;
+    setTurnStartedAt(at);
+  };
+  const clearTurnStarted = () => {
+    turnStartRef.current = 0;
+    setTurnStartedAt(0);
+  };
   /** True while the CLI is compacting context (a quiet phase that would
    *  otherwise look like a hang). */
   const compactingRef = useRef<boolean>(false);
-  const turnIdRef = useRef('');
+  const turnIdRef = useRef('') as ReducerCursor;
   /** Set by the connection effect so the returned `reconnect()` can force a
    *  close-and-reopen even when auto-reconnect is mid-backoff. */
   const forceReconnectRef = useRef<() => void>(() => {});
@@ -677,6 +755,27 @@ export function useChat(opts: {
    *  empty initial state on the first render after repos load. */
   const restoredKeyRef = useRef<string | null>(null);
   const flushOutboundRef = useRef<() => void>(() => {});
+  /** Reconcile optimistic queued bubbles with the server's lane-owned IDs.
+   * Older servers omit the field, so only an explicit array is authoritative. */
+  const reconcileQueuedState = (rawIds: unknown, serverBusy: boolean) => {
+    if (!Array.isArray(rawIds)) return;
+    const ids = new Set(rawIds.filter((value): value is string => typeof value === 'string'));
+    setBlocks((prev) => prev.map((block) => (
+      block.kind === 'user'
+      && block.deliveryState === 'queued'
+      && block.clientMsgId
+      && !ids.has(block.clientMsgId)
+        ? { ...block, deliveryState: 'failed' as const }
+        : block
+    )));
+    const current = queuedSteerRef.current;
+    if (current && !ids.has(current)) {
+      queuedSteerRef.current = null;
+      pendingSendRef.current = false;
+      setError('Queued guidance was not retained by the server. Please send it again.');
+      if (!serverBusy) setStatus('ready');
+    }
+  };
   const flushOutbound = () => {
     if (!repo) return;
     const ws = wsRef.current;
@@ -686,7 +785,7 @@ export function useChat(opts: {
     if (!item) return;
     pendingSendRef.current = true;
     setError(null);
-    turnStartRef.current = Date.now();
+    markTurnStarted();
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');
@@ -779,7 +878,14 @@ export function useChat(opts: {
     const snapshot = readStoredSnapshot(cli, repo.path, chatId);
     const stored = restoreBlocksWithUniqueIds(snapshot?.blocks ?? []);
     setBlocks(stored);
+    const restoredQueued = [...stored].reverse().find((block) => (
+      block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
+    ));
+    queuedSteerRef.current = restoredQueued?.kind === 'user' ? restoredQueued.clientMsgId ?? null : null;
+    pendingSendRef.current = Boolean(queuedSteerRef.current);
     turnIdRef.current = '';
+    turnIdRef.peerId = undefined;
+    clearTurnStarted();
     reconnectAttemptRef.current = 0;
     // The atomic envelope distinguishes a valid, fully-filtered empty thread
     // from a missing/corrupt cache. Missing v5 state asks for a full replay;
@@ -858,11 +964,14 @@ export function useChat(opts: {
         }
         if (msg.type === 'working') {
           // Transport keepalive while the engine is on a tool/think pause.
-          // lastMessageAtRef was already bumped; nothing to render.
+          // It also carries authoritative queued-steer ownership so a cached
+          // bubble cannot remain "will run next" after a lost operation.
+          reconcileQueuedState(msg.queuedClientMsgIds, msg.busy === true);
           return;
         }
         if (msg.type === 'ready') {
           socketReady = true;
+          reconcileQueuedState(msg.queuedClientMsgIds, msg.busy === true);
           // If the server says we attached to a busy session (Sam is mid-turn
           // because the user reconnected from a phone unlock or tab switch),
           // jump straight to 'streaming' so the UI shows tending instead of
@@ -892,10 +1001,15 @@ export function useChat(opts: {
             setStatus('streaming');
             flushOutboundRef.current();
           } else {
-            setStatus(msg.busy ? 'streaming' : 'ready');
-            if (!msg.busy) {
+            // A server-owned steer can outlive the socket that accepted it.
+            // Keep its visible queued state across reconnect; the durable
+            // _user_echo will clear it when the next turn is actually admitted.
+            const steerQueued = queuedSteerRef.current !== null;
+            setStatus(msg.busy || steerQueued ? 'streaming' : 'ready');
+            if (!msg.busy && !steerQueued) {
               pendingSendRef.current = false;
               compactingRef.current = false;
+              clearTurnStarted();
             }
           }
         }
@@ -904,13 +1018,33 @@ export function useChat(opts: {
             appliedSelectionRevisionRef.current = msg.selectionRevision;
           }
         }
+        else if (msg.type === 'replayReset') {
+          // Server detected an impossible browser cursor (usually an older
+          // cross-engine sequence regression) and is about to replay the
+          // durable thread from its beginning. Drop the stale cached rendering
+          // first so lower historical seqs are accepted exactly once.
+          setBlocks([]);
+          setUsage(null);
+          setError(null);
+          turnIdRef.current = '';
+          turnIdRef.peerId = undefined;
+          clearTurnStarted();
+          lastSeqRef.current = 0;
+          writeStoredState(cli, repo.path, chatId, [], 0);
+        }
         else if (msg.type === 'sessionRebound') {
           lastSeqRef.current = 0;
           setError(null);
         }
         else if (msg.type === 'turnStart') {
           if (!socketReady) return; // replayed control message from the hello buffer
-          if (msg.clientMsgId && queuedSteerRef.current === msg.clientMsgId) queuedSteerRef.current = null;
+          const beginsQueuedSteer = Boolean(
+            msg.clientMsgId && queuedSteerRef.current === msg.clientMsgId,
+          );
+          if (beginsQueuedSteer) queuedSteerRef.current = null;
+          if (beginsQueuedSteer || statusRef.current !== 'streaming' || turnStartRef.current === 0) {
+            markTurnStarted(Date.now(), true);
+          }
           if (initialSendInFlightRef.current) {
             initialSendInFlightRef.current = false;
             initialMessageRef.current = null;
@@ -932,6 +1066,7 @@ export function useChat(opts: {
             setStatus('streaming');
             return;
           }
+          clearTurnStarted();
           pendingSendRef.current = false;
           const leftover = outboundQueue.get(conversationKey(cli, repo.path, chatId));
           if (leftover && leftover.length > 0) {
@@ -964,6 +1099,8 @@ export function useChat(opts: {
           setError(null);
           setStatus('ready');
           turnIdRef.current = '';
+          turnIdRef.peerId = undefined;
+          clearTurnStarted();
           lastSeqRef.current = 0;
           if (repo) {
             writeStoredState(cli, repo.path, chatId, [], 0);
@@ -975,6 +1112,7 @@ export function useChat(opts: {
           // a dead-looking "asleep" banner — re-bind transparently, exactly
           // like samwise-2. bindSession replies with a fresh ready/streaming.
           pendingSendRef.current = false;
+          clearTurnStarted();
           setError(null);
           setStatus('closed');
           window.setTimeout(() => forceReconnectRef.current(), 250);
@@ -1085,6 +1223,13 @@ export function useChat(opts: {
           }
         }
         else if (msg.type === 'steerRejected') {
+          if (typeof msg.clientMsgId === 'string') {
+            setBlocks((prev) => prev.map((block) => (
+              block.kind === 'user' && block.clientMsgId === msg.clientMsgId
+                ? { ...block, deliveryState: 'failed' as const }
+                : block
+            )));
+          }
           if (typeof msg.clientMsgId === 'string' && queuedSteerRef.current === msg.clientMsgId) {
             queuedSteerRef.current = null;
             pendingSendRef.current = false;
@@ -1109,7 +1254,16 @@ export function useChat(opts: {
             statusRef.current === 'connecting' ||
             pendingSendRef.current;
           if (inFlight) {
-            if (msg.code === 'STEER_REJECTED' && (!msg.clientMsgId || queuedSteerRef.current === msg.clientMsgId)) queuedSteerRef.current = null;
+            if (msg.code === 'STEER_REJECTED' && (!msg.clientMsgId || queuedSteerRef.current === msg.clientMsgId)) {
+              queuedSteerRef.current = null;
+              if (typeof msg.clientMsgId === 'string') {
+                setBlocks((prev) => prev.map((block) => (
+                  block.kind === 'user' && block.clientMsgId === msg.clientMsgId
+                    ? { ...block, deliveryState: 'failed' as const }
+                    : block
+                )));
+              }
+            }
             pendingSendRef.current = false;
             setError(msg.message);
           } else {
@@ -1123,11 +1277,13 @@ export function useChat(opts: {
         // orphan closing later must not open yet another connection.
         if (wsRef.current && wsRef.current !== ws) return;
         if (initialSendInFlightRef.current) initialSendInFlightRef.current = false;
-        if (queuedSteerRef.current !== null) {
-          queuedSteerRef.current = null;
-          pendingSendRef.current = false;
-          setError('Queued guidance was canceled by the connection change — send it again.');
-        }
+        // Queued guidance is owned by the server after acceptance and survives
+        // this transport. Do not falsely mark it canceled when a phone sleeps
+        // or the user visits another teammate.
+        // We no longer know the server-side start time after a transport break.
+        // Keep the proof-of-life indicator, but label its clock "live" rather
+        // than showing a confidently wrong elapsed value on reconnect.
+        clearTurnStarted();
         const keepStreaming =
           (statusRef.current === 'streaming' || pendingSendRef.current) &&
           reconnectAttemptRef.current < 3;
@@ -1341,7 +1497,7 @@ export function useChat(opts: {
     enqueueOutbound(key, { text, images, clientMsgId });
     pendingSendRef.current = true;
     setError(null);
-    turnStartRef.current = Date.now();
+    if (!inFlight) markTurnStarted(Date.now(), true);
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');
@@ -1379,7 +1535,15 @@ export function useChat(opts: {
 
   const stop = () => {
     if (!repo) return;
+    if (queuedSteerRef.current !== null) {
+      setBlocks((prev) => prev.map((block) => (
+        block.kind === 'user' && block.deliveryState === 'queued'
+          ? { ...block, deliveryState: 'failed' as const }
+          : block
+      )));
+    }
     queuedSteerRef.current = null;
+    pendingSendRef.current = false;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: 'stop', cli, repo: repo.path, chatId }));
@@ -1403,14 +1567,26 @@ export function useChat(opts: {
       return;
     }
     const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
-    // Do not render guidance as delivered until the server actually writes it
-    // after the current turn. If the wait is superseded/closed/times out there
-    // is no ghost user bubble claiming the agent saw text it never received.
+    // Show the user's words immediately, but label them honestly as queued
+    // until the runner's durable _user_echo proves the model received them.
+    // The echo dedupes by clientMsgId and clears deliveryState.
+    setBlocks((prev) => [
+      ...prev,
+      {
+        kind: 'user',
+        id: id(),
+        text,
+        images: imagePreviews(images),
+        imageCount: images?.length,
+        clientMsgId,
+        deliveryState: 'queued',
+        ts: Date.now(),
+      },
+    ]);
     queuedSteerRef.current = clientMsgId;
     pendingSendRef.current = true;
     setError(null);
     ws.send(JSON.stringify({ type: 'steer', cli, repo: repo.path, chatId, text, images: payloadImages(images), clientMsgId, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
-    turnStartRef.current = Date.now();
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');
@@ -1425,6 +1601,7 @@ export function useChat(opts: {
 
   return {
     blocks: visibleBlocks, status, error, send, steer, freshStart, stop, reconnect, usage, automationBusy,
+    turnStartedAt,
     lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,
   };
 }

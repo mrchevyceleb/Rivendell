@@ -62,7 +62,7 @@ export type ChatImagePreview = {
 // `turnId` + `cbIndex` correlate a block back to claude's content_block_*
 // stream events so the reducer stays pure (no out-of-band Maps).
 export type ChatBlock =
-  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean }
+  | { kind: 'user'; id: string; text: string; ts: number; images?: ChatImagePreview[]; imageCount?: number; clientMsgId?: string; attachmentsLost?: boolean; deliveryState?: 'queued' | 'failed' }
   | {
       /** Agent-to-agent delivery (team bus): a teammate's message arriving in
        *  this thread — rendered with the SENDER's identity, not as a user turn. */
@@ -70,6 +70,8 @@ export type ChatBlock =
       id: string;
       from: string;
       fromRole?: string;
+      /** Stable durable delivery id; retries reuse it and render only once. */
+      deliveryId?: string;
       text: string;
       ts: number;
     }
@@ -120,6 +122,8 @@ export type ChatBlock =
       ts: number;
       folio?: string;
       turnId?: string;
+      /** Teammate message this response belongs to, when applicable. */
+      peerId?: string;
       cbIndex?: number;
       open?: boolean;
     }
@@ -133,6 +137,8 @@ export type ChatBlock =
       running: boolean;
       ts: number;
       turnId?: string;
+      /** Teammate message this tool activity belongs to, when applicable. */
+      peerId?: string;
       cbIndex?: number;
       open?: boolean;
     }

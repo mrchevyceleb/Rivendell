@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { TEAM_MCP_SCRIPT } from '../config.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, loadEventLogForCompactionSync, loadEventLogSync, type PersistedEvent } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
 import { crashTombstoneEvent, crashTombstoneText , restartMarkerEvent } from './crashTombstone.ts';
 import { maybeAutoCompact, noteUserTurn, bankRotation, isRotationOwed, clearRotation, peekEnginePrimerThroughSeq, clearThreadMemory, compactedThroughSeq } from './compaction.ts';
 import { extractVisibleTurns, WINDOW_TURNS } from './threadWindow.ts';
@@ -17,6 +17,7 @@ import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/f
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { resolveCodexSelection } from './codex-models.ts';
+import { codexImageArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 
@@ -150,6 +151,21 @@ export type Listener = (e: SeqEvent) => void;
 let nextSyntheticId = 1;
 const synth = (prefix: string) => `${prefix}_${nextSyntheticId++}`;
 type ChatImage = { mediaType: string; base64: string };
+type CodexSendOptions = {
+  model?: unknown;
+  effort?: unknown;
+  peerFrom?: string;
+  peerFromRole?: string;
+  peerText?: string;
+  peerDeliveryId?: string;
+  signal?: AbortSignal;
+  clientMsgId?: string;
+  skipAttachments?: boolean;
+  /** Internal one-shot recovery after a truly empty, side-effect-free exit. */
+  emptyRetryDepth?: number;
+  suppressEcho?: boolean;
+  seedOverride?: string;
+};
 type CodexSessionOptions = {
   recoverContextOnNextTurn?: boolean;
   cli?: CliKind;
@@ -347,11 +363,13 @@ export class CodexSession {
   /** Reserve and return the next seq (tombstone writes race a dying session's
    *  own emit path — never let two events share a seq). */
   reserveSeq(): number {
-    return this.nextSeq++;
+    const seq = reserveEventLogSeq(this.logKey, this.nextSeq);
+    this.nextSeq = seq + 1;
+    return seq;
   }
 
   latestSeq(): number {
-    return this.nextSeq - 1;
+    return latestEventLogSeq(this.logKey, this.nextSeq - 1);
   }
 
   isAlive(): boolean {
@@ -421,12 +439,17 @@ export class CodexSession {
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
   }
 
-  async send(text: string, images?: ChatImage[], opts: { model?: unknown; effort?: unknown; peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
+    if (opts.signal?.aborted) return;
     if (this.busy) {
-      this.emit({
-        type: 'error',
-        message: 'codex is still answering — wait for the current turn to finish',
-      });
+      // Internal team delivery retries at the natural boundary. Do not leak a
+      // transient admission race into the human transcript as a Codex error.
+      if (!opts.peerFrom) {
+        this.emit({
+          type: 'error',
+          message: 'codex is still answering — wait for the current turn to finish',
+        });
+      }
       return;
     }
     const { model: codexModel, effort: codexEffort } = resolveCodexSelection(
@@ -441,12 +464,20 @@ export class CodexSession {
     const fallbackHistory = this.eventLog.slice();
     // Echo for reconnect replay (codex's events don't re-emit the user prompt).
     // peerFrom marks a team-bus delivery: sender-tagged bubble, no compaction tick.
-    if (opts.peerFrom) {
+    if (opts.peerFrom && !opts.suppressEcho) {
+      this.emit({ type: 'turnStart' });
       this.emit({
         type: 'event',
-        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
+        event: {
+          type: 'peer_message',
+          from: opts.peerFrom,
+          fromRole: opts.peerFromRole ?? '',
+          text: opts.peerText !== undefined ? opts.peerText : text,
+          ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
+          ts: Date.now(),
+        },
       });
-    } else {
+    } else if (!opts.suppressEcho) {
       this.emit({
         type: 'event',
         event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments: opts.skipAttachments ? [] : await saveChatAttachments(images), clientMsgId: opts.clientMsgId, ts: Date.now() },
@@ -474,7 +505,7 @@ export class CodexSession {
       if (imageTempDir) void rm(imageTempDir, { recursive: true, force: true });
     };
 
-    const imageArgs: string[] = [];
+    const imagePaths: string[] = [];
     try {
       if (images?.length) {
         imageTempDir = await mkdtemp(join(tmpdir(), 'samwise-codex-images-'));
@@ -484,7 +515,7 @@ export class CodexSession {
           }
           const path = join(imageTempDir, `image-${index + 1}.${imageExtension(image.mediaType)}`);
           await writeFile(path, Buffer.from(image.base64, 'base64'));
-          imageArgs.push('--image', path);
+          imagePaths.push(path);
         }
       }
     } catch (e) {
@@ -495,16 +526,22 @@ export class CodexSession {
       return;
     }
 
-    const seedWindow = this.consumeWindowSeed() || recoverContextThisTurn;
-    const seed = seedWindow
-      ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
-      : '';
+    const imageArgs = codexImageArgs(imagePaths);
+    const hasSeedOverride = typeof opts.seedOverride === 'string';
+    const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
+    const seed = hasSeedOverride
+      ? opts.seedOverride as string
+      : seedWindow
+        ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
+        : '';
     if (seed) {
       this.recoverContextOnNextTurn = false;
-      this.emit({
-        type: 'event',
-        event: { type: '_context_recovered', chars: seed.length, ts: Date.now() },
-      });
+      if (!hasSeedOverride) {
+        this.emit({
+          type: 'event',
+          event: { type: '_context_recovered', chars: seed.length, ts: Date.now() },
+        });
+      }
     } else if (recoverContextThisTurn) {
       this.recoverContextOnNextTurn = false;
     }
@@ -603,7 +640,19 @@ export class CodexSession {
     // almost no stderr, which used to leave Rivendell with only a silent
     // error_during_execution result and no chat-visible reason.
     let producedAgentMessage = false;
+    let sawActionableItem = false;
     let sawTurnCompleted = false;
+    let peerAdmissionSettled = false;
+    let settlePeerAdmission: (accepted: boolean) => void = () => {};
+    const peerAdmission = opts.peerDeliveryId
+      ? new Promise<boolean>((resolve) => {
+          settlePeerAdmission = (accepted) => {
+            if (peerAdmissionSettled) return;
+            peerAdmissionSettled = true;
+            resolve(accepted);
+          };
+        })
+      : null;
     const stderrChunks: string[] = [];
     let transientProjectConfigError: string | null = null;
 
@@ -621,30 +670,50 @@ export class CodexSession {
       return true;
     };
 
+    const handleStdoutLine = (raw: string) => {
+      const line = raw.trim();
+      if (!line) return;
+      try {
+        const ev = JSON.parse(line);
+        if (ev?.type === 'turn.started' && opts.peerDeliveryId && !peerAdmissionSettled) {
+          this.emit({
+            type: 'event',
+            event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
+          });
+          settlePeerAdmission(true);
+        }
+        if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
+          producedAgentMessage = true;
+        }
+        if (
+          (ev?.type === 'item.started' || ev?.type === 'item.completed')
+          && typeof ev?.item?.type === 'string'
+          && !['reasoning', 'agent_message', 'error'].includes(ev.item.type)
+        ) {
+          sawActionableItem = true;
+        }
+        if (ev?.type === 'turn.completed') sawTurnCompleted = true;
+        this.handleCodexEvent(ev, turnState);
+      } catch {
+        // Non-JSON line — ignore.
+      }
+    };
     let buf = '';
+    const flushStdout = () => {
+      if (buf.trim()) handleStdoutLine(buf);
+      buf = '';
+    };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       buf += chunk;
       let nl = buf.indexOf('\n');
       while (nl !== -1) {
-        const line = buf.slice(0, nl).trim();
+        handleStdoutLine(buf.slice(0, nl));
         buf = buf.slice(nl + 1);
         nl = buf.indexOf('\n');
-        if (!line) continue;
-        try {
-          const ev = JSON.parse(line);
-          if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
-            producedAgentMessage = true;
-          }
-          if (ev?.type === 'turn.completed') {
-            sawTurnCompleted = true;
-          }
-          this.handleCodexEvent(ev, turnState);
-        } catch {
-          // Non-JSON line — ignore.
-        }
       }
     });
+    child.stdout.on('end', flushStdout);
 
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
@@ -662,9 +731,14 @@ export class CodexSession {
       }
     });
 
-    child.on('exit', async (code, signal) => {
+    let childTerminalHandled = false;
+    child.on('close', async (code, signal) => {
+      if (childTerminalHandled) return;
+      childTerminalHandled = true;
+      flushStdout();
+      settlePeerAdmission(false);
       console.log(
-        `[chat codex] child exit cwd=${this.cwd} code=${code} threadId=${this.threadId ?? '-'}`,
+        `[chat codex] child close cwd=${this.cwd} code=${code} threadId=${this.threadId ?? '-'}`,
       );
       // Keep busy=true until the matching turnEnd is ready to emit. Clearing it
       // here allowed team delivery to start during the persistence awaits below;
@@ -704,6 +778,49 @@ export class CodexSession {
       // Without an explicit error event the UI just drops out of "thinking".
       const emptyTurn =
         !producedAgentMessage && !transientProjectConfigError && (code !== 0 || !sawTurnCompleted);
+      const retryEmptyTurn = !opts.signal?.aborted && shouldRetryEmptyCodexTurn({
+        code,
+        signal,
+        producedAgentMessage,
+        sawActionableItem,
+        sawTurnCompleted,
+        stderr: stderrText,
+        transientProjectConfigError: Boolean(transientProjectConfigError),
+        retryDepth: opts.emptyRetryDepth ?? 0,
+      });
+      if (retryEmptyTurn) {
+        const failedThread = this.threadId;
+        this.threadId = null;
+        await setSessionId(this.cli, this.cwd, '', this.chatId);
+        let retrySeed = seed;
+        if (!retrySeed) {
+          retrySeed = await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory).catch(() => '');
+        }
+        this.seedWindowOnNextTurn = false;
+        this.recoverContextOnNextTurn = false;
+        this.busy = false;
+        console.warn(`[chat codex] empty exit from ${failedThread ?? 'new thread'} — retrying once on a fresh thread`);
+        try {
+          await this.send(text, images, {
+            ...opts,
+            emptyRetryDepth: (opts.emptyRetryDepth ?? 0) + 1,
+            suppressEcho: true,
+            seedOverride: retrySeed,
+            skipAttachments: true,
+          });
+        } catch (error) {
+          this.busy = false;
+          this.emit({ type: 'error', message: `Codex retry failed before starting: ${(error as Error).message}` });
+          this.emitClaudeEvent({
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            session_id: this.threadId ?? undefined,
+          });
+          this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+        }
+        return;
+      }
       if (emptyTurn) {
         const detail = stderrText
           ? stderrText.slice(0, 500)
@@ -760,6 +877,10 @@ export class CodexSession {
     });
 
     child.on('error', (err) => {
+      if (childTerminalHandled) return;
+      childTerminalHandled = true;
+      flushStdout();
+      settlePeerAdmission(false);
       this.busy = false;
       this.currentChild = null;
       cleanupImages();
@@ -767,6 +888,8 @@ export class CodexSession {
       this.emit({ type: 'error', message: `codex spawn failed: ${err.message}` });
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
     });
+
+    if (peerAdmission) await peerAdmission;
   }
 
   // ── private ────────────────────────────────────────────────
@@ -774,7 +897,7 @@ export class CodexSession {
   private emit(msg: SessionEvent): void {
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
     this.eventLog.push(se);
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
@@ -1051,7 +1174,18 @@ export async function getOrCreateCodexSession(opts: {
   const cli = opts.cli ?? 'codex';
   const key = keyOf(cli, cwd, chatId);
   const existing = codexSessions.get(key);
-  if (existing && existing.isAlive()) return existing;
+  if (existing && existing.isAlive()) {
+    await flushEventLog(existing.logKey);
+    const priorEngine = lastEngineOf(loadEventLogSync(existing.logKey).events);
+    if (!existing.isBusy() && priorEngine && priorEngine !== cli) {
+      // This Codex rollout predates turns written by another brain. Resuming it
+      // would answer from stale context even though the UI thread is shared.
+      codexSessions.delete(key);
+      await existing.shutdown();
+    } else {
+      return existing;
+    }
+  }
 
   const threadId = (await getSessionId(cli, cwd, chatId)) ?? null;
   const logKey = logKeyFor(cli, cwd, chatId);

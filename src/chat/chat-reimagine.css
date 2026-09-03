@@ -163,6 +163,72 @@
 .rc .think .dots span { display: inline-block; width: 3px; height: 3px; margin-left: 4px; border-radius: 50%; background: var(--muted); animation: rc-hop 1.2s ease-in-out infinite; }
 .rc .think .dots span:nth-child(2) { animation-delay: .15s; } .rc .think .dots span:nth-child(3) { animation-delay: .3s; }
 
+/* Persistent proof of life. Unlike the cold-start typing bubble, this remains
+   visible after prose/tools appear and only leaves on the real turn boundary. */
+.rc .active-turn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 8px;
+  width: fit-content;
+  min-height: 34px;
+  padding: 7px 11px;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--surface-soft) 92%, transparent);
+  color: var(--fg-soft);
+  animation: rc-breathe 2.2s ease-in-out infinite;
+}
+.rc .active-turn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent 30%, var(--accent-soft) 50%, transparent 70%);
+  background-size: 220% 100%;
+  animation: rc-sheen 2.4s linear infinite;
+}
+.rc .active-turn-star { width: 14px; height: 14px; flex: none; color: var(--accent-glow); animation: rc-spin 2.4s linear infinite; }
+.rc .active-turn-label { min-width: 52px; font-size: 12.5px; font-weight: 600; }
+.rc .active-turn-dots { display: inline-flex; align-items: center; gap: 3px; }
+.rc .active-turn-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent-glow); animation: rc-hop 1.2s ease-in-out infinite; }
+.rc .active-turn-dots i:nth-child(2) { animation-delay: .15s; }
+.rc .active-turn-dots i:nth-child(3) { animation-delay: .3s; }
+.rc .active-turn-time { min-width: 31px; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); text-align: right; }
+
+/* Explicit terminal/transport states: no animation means "finished", never
+   "maybe dead." Kept deliberately quiet so they clarify without becoming a
+   second assistant bubble. */
+.rc .turn-complete,
+.rc .connection-state {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 7px;
+  width: fit-content;
+  min-height: 28px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.rc .turn-complete {
+  color: var(--emerald);
+  border: 1px solid color-mix(in oklch, var(--emerald) 26%, var(--border));
+  background: color-mix(in oklch, var(--emerald) 7%, transparent);
+}
+.rc .connection-state {
+  color: var(--amber);
+  border: 1px solid color-mix(in oklch, var(--amber) 28%, var(--border));
+  background: color-mix(in oklch, var(--amber) 7%, transparent);
+}
+.rc .connection-state-star { width: 12px; height: 12px; animation: rc-spin 2.4s linear infinite; }
+.rc .delivery-state { font-family: var(--font-mono); font-size: 10px; opacity: 1; }
+.rc .delivery-state.queued { color: var(--amber); animation: rc-breathe 1.8s ease-in-out infinite; }
+.rc .delivery-state.failed { color: #ef4444; }
+
 /* ── tool card (collapsible working card) — §3.5 ───────────────── */
 .rc .tool { position: relative; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-soft); max-width: 560px; }
 .rc .tool.running::after { content: ''; position: absolute; inset: 0; pointer-events: none;

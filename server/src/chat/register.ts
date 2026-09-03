@@ -22,7 +22,7 @@ import {
   type AnySession,
   type CliKind,
 } from './runner.ts';
-import { loadEventLogSync } from './event-log-store.ts';
+import { flushEventLog, loadEventLogSync, repairEventLogSequenceSync } from './event-log-store.ts';
 import {
   activeCodexSessions,
   pruneIdleCodexSessions,
@@ -100,6 +100,9 @@ function waitForNaturalTurnEnd(session: AnySession, signal: AbortSignal, timeout
         if (se.ev?.type === 'turnEnd') done('turn-complete');
         else if (se.ev?.type === 'closed') done('closed');
       }, -1, false);
+      // Close the check/subscribe race: the result can land after the first
+      // isBusy read but before the listener is attached.
+      if (!sessionHasActiveBoundary(session)) done('turn-complete');
     } catch {
       done('timeout');
     }
@@ -373,7 +376,28 @@ export async function registerChat(app: express.Express, server: Server): Promis
   // steer awaiting natural turn completion must not write after being superseded.
   const laneGenerations = new Map<string, number>();
   const laneWaiters = new Map<string, AbortController>();
+  // Authoritative server ownership for human guidance waiting behind a turn.
+  // Reconnects receive these ids in ready/working so a cached "queued" bubble
+  // can never remain optimistic forever after a timeout or process restart.
+  const pendingSteers = new Map<string, Set<string>>();
   const laneGenKey = (cli: CliKind, repo: string, chatId: string) => `${cli}|${repo}|${chatId}`;
+  const addPendingSteer = (key: string, clientMsgId: string | undefined) => {
+    if (!clientMsgId) return;
+    const ids = pendingSteers.get(key) ?? new Set<string>();
+    ids.add(clientMsgId);
+    pendingSteers.set(key, ids);
+  };
+  const deletePendingSteer = (key: string | null, clientMsgId: string | undefined) => {
+    if (!key || !clientMsgId) return;
+    const ids = pendingSteers.get(key);
+    if (!ids) return;
+    ids.delete(clientMsgId);
+    if (ids.size === 0) pendingSteers.delete(key);
+  };
+  const pendingSteerIds = (cli: CliKind | null, repo: string | null, id: string): string[] => {
+    if (!cli || !repo) return [];
+    return [...(pendingSteers.get(laneGenKey(cli, repo, id)) ?? [])];
+  };
   const bumpLaneGen = (cli: CliKind, repo: string, chatId: string): number => {
     const k = laneGenKey(cli, repo, chatId);
     laneWaiters.get(k)?.abort();
@@ -383,6 +407,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
     return n;
   };
 
+  // A repaired durable log can coexist with an older warm session buffer.
+  // Remember exactly how far that buffer is stale so every later socket skips
+  // only the renumbered prefix while still replaying newer memory-only events.
+  const repairedSessionThrough = new WeakMap<AnySession, number>();
   const wss = new WebSocketServer({ noServer: true });
   let wsCounter = 0;
   // Backstop for a client that leaks sockets: a long-lived tab whose orphaned
@@ -445,6 +473,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
     // cannot feed grok-4.6 into a live Codex turn (Claude-family uses spawnModel).
     let lastTurnModel: string | undefined;
     let lastTurnEffort: string | undefined;
+    /** Last authoritative queue set sent to this socket. Keepalive sends one
+     * empty transition after cancellation even when the lane just became idle. */
+    let lastQueuedSignature = '';
     // Duplicate-hello suppression (see HELLO_DEDUPE_MS).
     let lastHelloSig = '';
     let lastHelloAt = 0;
@@ -476,8 +507,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
     const keepalive = setInterval(() => {
       if (ws.readyState !== ws.OPEN) return;
-      if (!busy) return;
-      safeSend({ type: 'working' });
+      const queuedClientMsgIds = pendingSteerIds(cliKind, repoPath, chatId);
+      const signature = queuedClientMsgIds.join('\u0000');
+      const queueChanged = signature !== lastQueuedSignature;
+      if (!busy && !queueChanged) return;
+      safeSend({ type: 'working', busy, queuedClientMsgIds });
+      lastQueuedSignature = signature;
     }, TURN_KEEPALIVE_MS);
     keepalive.unref();
 
@@ -556,19 +591,58 @@ export async function registerChat(app: express.Express, server: Server): Promis
       sessionPromise = promise;
       const session = await promise;
       unsubscribe?.();
-      const replay: DispatchSeqEvent[] = [];
-      let replaying = sinceSeq >= 0;
+
+      // The durable thread, not an engine's potentially stale in-memory tail,
+      // owns replay. Older builds let a resumed Codex session allocate below a
+      // Banana/GLM tail; repair those regressions in file chronology before
+      // comparing the browser cursor or subscribing to new live events.
+      await flushEventLog(session.logKey);
+      const repair = repairEventLogSequenceSync(session.logKey);
+      if (repair.repaired) {
+        repairedSessionThrough.set(
+          session,
+          Math.max(repairedSessionThrough.get(session) ?? 0, repair.latestSeq),
+        );
+        console.warn(`[chat ws#${wsId}] repaired non-monotonic event sequence for ${session.logKey}`);
+      }
+      const { events } = loadEventLogSync(session.logKey);
+      const durableLatest = events.reduce((max, event) => Math.max(max, event.seq), 0);
+      const latest = Math.max(durableLatest, session.latestSeq());
+      const resetReplay = sinceSeq >= 0 && sinceSeq > latest;
+      const replaySince = resetReplay ? 0 : sinceSeq;
+      if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest });
+
+      const liveReplay: DispatchSeqEvent[] = [];
+      let replaying = replaySince >= 0;
       const listener = (se: DispatchSeqEvent) => {
         if (replaying) {
-          replay.push(se);
+          liveReplay.push(se);
           return;
         }
         dispatch(se);
       };
-      unsubscribe = session.subscribe(listener, sinceSeq);
+      // Replay the session's in-memory tail too. Durable appends deliberately
+      // fail soft; subscribing only above the disk high-water would discard a
+      // valid buffered reply whose mirror write failed. The one exception is a
+      // sequence repair: that session buffer still carries the pre-repair seqs,
+      // so disk is authoritative through `latest` and only newer live events
+      // may join the replay.
+      const staleSessionThrough = repairedSessionThrough.get(session) ?? 0;
+      unsubscribe = session.subscribe(listener, Math.max(replaySince, staleSessionThrough));
       if (replaying) {
+        const durableReplay: DispatchSeqEvent[] = events
+          .filter((event) => event.seq > replaySince)
+          .map((event) => ({ seq: event.seq, ev: event.ev as any }));
+        const seenSeq = new Set<number>();
+        const merged = [...durableReplay, ...liveReplay]
+          .sort((a, b) => a.seq - b.seq)
+          .filter((event) => {
+            if (seenSeq.has(event.seq)) return false;
+            seenSeq.add(event.seq);
+            return true;
+          });
         replaying = false;
-        for (const se of filterReplayEvents(replay)) dispatch(se);
+        for (const se of filterReplayEvents(merged)) dispatch(se);
       }
       return session;
     };
@@ -576,19 +650,28 @@ export async function registerChat(app: express.Express, server: Server): Promis
     /** Replay a lane's durable event log straight to this socket, with no
      *  engine process involved. Same shape and same replay filtering as
      *  bindSession, so a cold attach renders identically to a warm one. */
-    const replayFromEventLog = (
+    const replayFromEventLog = async (
       cli: CliKind,
       repo: string,
       id: string,
       sinceSeq: number,
-    ): number => {
-      const { events } = loadEventLogSync(laneLogKey(cli, repo, id));
+    ): Promise<number> => {
+      const logKey = laneLogKey(cli, repo, id);
+      await flushEventLog(logKey);
+      const repair = repairEventLogSequenceSync(logKey);
+      if (repair.repaired) {
+        console.warn(`[chat ws#${wsId}] repaired non-monotonic cold event sequence for ${logKey}`);
+      }
+      const { events } = loadEventLogSync(logKey);
       let latest = 0;
-      for (const e of events) if (e.seq > latest) latest = e.seq;
-      if (sinceSeq >= 0) {
+      for (const event of events) if (event.seq > latest) latest = event.seq;
+      const resetReplay = sinceSeq >= 0 && sinceSeq > latest;
+      const replaySince = resetReplay ? 0 : sinceSeq;
+      if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest });
+      if (replaySince >= 0) {
         const pending: DispatchSeqEvent[] = events
-          .filter((e) => e.seq > sinceSeq)
-          .map((e) => ({ seq: e.seq, ev: e.ev as any }));
+          .filter((event) => event.seq > replaySince)
+          .map((event) => ({ seq: event.seq, ev: event.ev as any }));
         for (const se of filterReplayEvents(pending)) dispatch(se);
       }
       return latest;
@@ -692,12 +775,22 @@ export async function registerChat(app: express.Express, server: Server): Promis
             // lane's transcript - and `send` would reuse the stale
             // sessionPromise instead of starting the lane that was asked for.
             detachCurrentSession();
-            const coldLatestSeq = replayFromEventLog(msg.cli, msg.repo, chatId, sinceSeq);
+            const coldLatestSeq = await replayFromEventLog(msg.cli, msg.repo, chatId, sinceSeq);
             lastTurnModel = msg.model;
             lastTurnEffort = msg.effort;
             busy = false;
             console.log(`[chat ws#${wsId}] attached cold ${laneLogKey(msg.cli, msg.repo, chatId)} latestSeq=${coldLatestSeq} (no spawn)`);
-            safeSend({ type: 'ready', cli: msg.cli, repo: msg.repo, chatId, latestSeq: coldLatestSeq, busy: false });
+            const queuedClientMsgIds = pendingSteerIds(msg.cli, msg.repo, chatId);
+            lastQueuedSignature = queuedClientMsgIds.join('\u0000');
+            safeSend({
+              type: 'ready',
+              cli: msg.cli,
+              repo: msg.repo,
+              chatId,
+              latestSeq: coldLatestSeq,
+              busy: false,
+              queuedClientMsgIds,
+            });
             return;
           }
           const session = await bindSession(
@@ -711,7 +804,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const sessionBusy = (session as any).isBusy?.() === true;
           busy = sessionBusy;
           console.log(`[chat ws#${wsId}] session ready key=${session.key} latestSeq=${session.latestSeq()} busy=${sessionBusy}`);
-          safeSend({ type: 'ready', cli: msg.cli, repo: msg.repo, chatId, latestSeq: session.latestSeq(), busy: sessionBusy });
+          const queuedClientMsgIds = pendingSteerIds(msg.cli, msg.repo, chatId);
+          lastQueuedSignature = queuedClientMsgIds.join('\u0000');
+          safeSend({
+            type: 'ready',
+            cli: msg.cli,
+            repo: msg.repo,
+            chatId,
+            latestSeq: session.latestSeq(),
+            busy: sessionBusy,
+            queuedClientMsgIds,
+          });
           return;
         }
 
@@ -760,8 +863,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
-          // Own cancellation from the very first await through the final stdin
-          // write. Socket close, Stop, Fresh, or a newer steer aborts this path.
+          // Own cancellation from the first await through the final stdin
+          // write. Stop, Fresh, or a newer steer aborts this path. A socket
+          // close does NOT: accepted guidance must survive tab switches and
+          // reconnects, and its durable echo will reach whichever socket binds.
           const steerAborter = new AbortController();
           ownedSteerWaiters.add(steerAborter);
           let waitKey: string | null = null;
@@ -770,6 +875,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
           };
           const rejectSteer = (message = 'Queued guidance was superseded or canceled before delivery.') => {
+            deletePendingSteer(waitKey, msg.clientMsgId);
             safeSend({ type: 'steerRejected', clientMsgId: msg.clientMsgId, message, busy });
           };
           // Pin to the engine already bound on this socket. Counsel picker
@@ -785,6 +891,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           waitKey = laneGenKey(steerCli, steerRepo, chatId);
           let laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
           laneWaiters.set(waitKey, steerAborter);
+          addPendingSteer(waitKey, msg.clientMsgId);
           if (bound) {
             try {
               const current = await bound;
@@ -807,9 +914,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const resolvedKey = laneGenKey(steerCli, steerRepo, chatId);
           if (resolvedKey !== waitKey) {
             if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+            deletePendingSteer(waitKey, msg.clientMsgId);
             laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
             waitKey = resolvedKey;
             laneWaiters.set(waitKey, steerAborter);
+            addPendingSteer(waitKey, msg.clientMsgId);
           }
           console.warn(`[chat ws#${wsId}] steer from ${peer} cli=${steerCli} repo=${steerRepo} chatId=${chatId}`);
           // Lane-scoped supersession: recheck after every await so a stopped,
@@ -828,15 +937,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
             await session.prewarm().catch(() => {});
             if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
           }
-          // Claude Code's native stream-json input queues guidance inside the
-          // active turn and applies it immediately after the current tool. This
-          // is the same behavior as interactive Claude Code and requires no
-          // control interrupt. Exception: a scheduled automation never absorbs
-          // human input as mission guidance; it finishes naturally, then the
-          // human message starts its own turn. Codex/Banana already wait because
-          // they reject concurrent input.
+          // Claude Code's native stream-json input is trustworthy only while a
+          // tool is actively executing: guidance then lands before the next
+          // provider request. If inference has already begun, stdin still
+          // accepts and echoes the message but that request can silently ignore
+          // it. canAcceptNativeHumanSteer() exposes only the safe tool window;
+          // every other phase finishes naturally and starts a separate turn.
+          // Scheduled automation never absorbs human input as mission guidance.
           const nativeClaudeSteer = Boolean(
             session
+            && (!msg.images || msg.images.length === 0)
             && isClaudeFamilyCli(steerCli)
             && (session as { canAcceptNativeHumanSteer?: () => boolean })
               .canAcceptNativeHumanSteer?.() === true,
@@ -913,8 +1023,22 @@ export async function registerChat(app: express.Express, server: Server): Promis
           if (!nativeClaudeSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
           logChatTurn(wsId, 'steer', steerCli, steerRepo, chatId, msg.text);
           ++turnGeneration;
-          releaseSteer();
-          await (session as any).send(msg.text, msg.images, { model: steerModel, effort: steerEffort, clientMsgId: msg.clientMsgId });
+          try {
+            await (session as any).send(msg.text, msg.images, {
+              model: steerModel,
+              effort: steerEffort,
+              clientMsgId: msg.clientMsgId,
+              allowNativeHumanSteer: nativeClaudeSteer,
+              signal: steerAborter.signal,
+            });
+          } finally {
+            // Keep cross-device Stop/Fresh/newer guidance capable of aborting
+            // through attachment persistence and the vision adapter. The
+            // durable _user_echo is emitted before send resolves, so deleting
+            // authoritative ownership here cannot race ahead of acceptance.
+            deletePendingSteer(waitKey, msg.clientMsgId);
+            releaseSteer();
+          }
           lastTurnModel = steerModel;
           lastTurnEffort = steerEffort;
           // Guidance is never auto-resubmitted after acceptance: a cross-device
@@ -933,6 +1057,24 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'error', message: 'chat tab changed - reconnect before sending' });
             return;
           }
+          if (!cliKind || !repoPath) {
+            safeSend({ type: 'error', message: 'no session - send hello first' });
+            return;
+          }
+          const sendCli = cliKind;
+          const sendRepo = repoPath;
+          const sendKey = laneGenKey(sendCli, sendRepo, chatId);
+          const sendAborter = new AbortController();
+          const sendLaneGeneration = bumpLaneGen(sendCli, sendRepo, chatId);
+          laneWaiters.set(sendKey, sendAborter);
+          ownedSteerWaiters.add(sendAborter);
+          const sendCanceled = () => sendAborter.signal.aborted
+            || laneGenerations.get(sendKey) !== sendLaneGeneration;
+          const releaseSend = () => {
+            ownedSteerWaiters.delete(sendAborter);
+            if (laneWaiters.get(sendKey) === sendAborter) laneWaiters.delete(sendKey);
+          };
+          try {
           if (!sessionPromise && cliKind && repoPath) {
             // Claim the turn BEFORE the spawn. The client arms its 90s silence
             // watchdog the moment it sends, and the `working` keepalive below is
@@ -956,6 +1098,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 model: msg.model,
                 effort: msg.effort,
               }));
+              if (sendCanceled()) return;
             } finally {
               busy = false;
             }
@@ -976,11 +1119,13 @@ export async function registerChat(app: express.Express, server: Server): Promis
           let selectionApplied = false;
           const generation = ++turnGeneration;
           let session: AnySession | null = await sessionPromise;
+          if (sendCanceled()) return;
 
           if (!session && cliKind && repoPath) {
             // sessionPromise resolved to a dead/null session — rebind a fresh
             // one rather than crashing on `null.send`.
             session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
+            if (sendCanceled()) return;
           }
           const initiallyBusy = Boolean(session && (session as { isBusy?: () => boolean }).isBusy?.() === true);
 
@@ -999,6 +1144,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               recycleOnMismatch: selectionChangeRequested,
             });
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
+            if (sendCanceled()) return;
             if (selectionChangeRequested) {
               selectionApplied = true;
             } else {
@@ -1014,8 +1160,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             session = repoPath && cliKind
               ? await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort }))
               : null;
+            if (sendCanceled()) return;
           }
           if (!session) throw new Error('session unavailable, please retry');
+          if (sendCanceled()) return;
           // Recompute after every awaited owner/rebind operation. Another send
           // may have started this session while we yielded.
           const wasBusy = (session as { isBusy?: () => boolean }).isBusy?.() === true;
@@ -1033,13 +1181,22 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
-          await (session as any).send(msg.text, msg.images, { model: msg.model, effort: msg.effort, clientMsgId: msg.clientMsgId });
+          await (session as any).send(msg.text, msg.images, {
+            model: msg.model,
+            effort: msg.effort,
+            clientMsgId: msg.clientMsgId,
+            signal: sendAborter.signal,
+          });
+          if (sendCanceled()) return;
           if (selectionApplied) {
             safeSend({ type: 'selectionApplied', selectionRevision: requestedSelectionRevision });
           }
           lastTurnModel = msg.model;
           lastTurnEffort = msg.effort;
           void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort, msg.clientMsgId);
+          } finally {
+            releaseSend();
+          }
         }
       } catch (error) {
         busy = false;
@@ -1061,8 +1218,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
     ws.on('close', () => {
       clearInterval(heartbeat);
       clearInterval(keepalive);
-      for (const waiter of ownedSteerWaiters) waiter.abort();
-      ownedSteerWaiters.clear();
+      // Do not abort ownedSteerWaiters here. The server already accepted those
+      // messages; they must cross the natural turn boundary even if a mobile
+      // tab sleeps, navigates to another agent, or reconnects. releaseSteer()
+      // removes each waiter after delivery/rejection. Lane Stop/Fresh/new steer
+      // still aborts it through bumpLaneGen().
       unsubscribe?.();
       unsubscribe = null;
       const set = peerSockets.get(peerKey);

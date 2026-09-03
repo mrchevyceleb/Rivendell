@@ -94,6 +94,7 @@ export function useChatShell({ chat, picker }: ShellProps) {
     chronicle: chronicle.events,
     commands,
     busy,
+    workingSince: chat.turnStartedAt,
     send, steer, stop,
     fresh: chat.freshStart,
     pickChronicle,

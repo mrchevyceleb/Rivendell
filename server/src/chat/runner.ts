@@ -9,10 +9,10 @@ import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
-import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents } from './event-log-store.ts';
+import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, removeEventLogEvents, reserveEventLogSeq } from './event-log-store.ts';
 import { maybeAutoCompact, noteUserTurn, peekEnginePrimerThroughSeq, clearThreadMemory, clearRotation, isRotationOwed, compactedThroughSeq } from './compaction.ts';
 import { shouldSkipEngineResume } from './threadWindow.ts';
-import { isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
+import { isAgentThread, isThreadLogKey, lastEngineOf, logKeyFor } from './threadKey.ts';
 import { personaPromptFor } from './personaPrompts.ts';
 import { agentForChatId, noteAgentLane } from './agents.ts';
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
@@ -451,6 +451,19 @@ class ClaudeSession {
   /** True only while the active turn came from a scheduled routine. Human
    * input must wait for this turn's boundary instead of steering its mission. */
   private automationTurn = false;
+  /** Tool calls that Claude Code has handed to its executor but has not yet
+   * returned. Stream-json guidance is only reliably incorporated in this
+   * window. Writing while the provider is already generating its next message
+   * is accepted by stdin but can be silently ignored by that in-flight request. */
+  private activeToolIds = new Set<string>();
+  /** Explicit Stop uses Claude Code's control protocol, not SIGTERM. This flag
+   * prevents its expected canceled result from rendering as a provider failure. */
+  private userInterruptPending = false;
+  private interruptInFlight: Promise<boolean> | null = null;
+  /** A new image turn can spend time persisting/adapting before stdin. Stop
+   * aborts that preparation locally instead of interrupting an idle provider. */
+  private preparingTurnAborter: AbortController | null = null;
+  private turnPromptSubmitted = false;
   /** Boot/rotation warmup uses Claude's read-only `mcp_status` control request:
    * no model turn, no tool call, and no transcript event. */
   private mcpPrewarmed = false;
@@ -654,6 +667,9 @@ class ClaudeSession {
       // A dead process is never busy, however it got there.
       this.turnStartedAt = null;
       this.automationTurn = false;
+      this.activeToolIds.clear();
+      this.preparingTurnAborter = null;
+      this.turnPromptSubmitted = false;
       if (this.disposed) this.notifyClosed(code, signal);
       else this.emit({ type: 'closed', code, signal });
     });
@@ -696,12 +712,14 @@ class ClaudeSession {
   /** Reserve and return the next seq (tombstone writes race a dying session's
    *  own emit path — never let two events share a seq). */
   reserveSeq(): number {
-    return this.nextSeq++;
+    const seq = reserveEventLogSeq(this.logKey, this.nextSeq);
+    this.nextSeq = seq + 1;
+    return seq;
   }
 
   /** The latest sequence number (clients can send this on reconnect). */
   latestSeq(): number {
-    return this.nextSeq - 1;
+    return latestEventLogSeq(this.logKey, this.nextSeq - 1);
   }
 
   /** Most recent turn start (ms) — used for telegram-ping duration. */
@@ -758,14 +776,30 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
     // Every caller (human, teammate, routine) shares this admission barrier.
     // A read-only MCP control warmup can never reject or absorb a real message.
     if (this.warmupPromise) await this.warmupPromise.catch(() => {});
+    if (opts.signal?.aborted) return;
     if (this.child.exitCode !== null || this.disposed) {
       throw new Error('session has exited');
     }
     const startsNewTurn = this.turnStartedAt === null;
+    // Concurrent stdin is never implicit. Register/teamBus must opt into the
+    // native path after observing a tool window, and we revalidate that window
+    // here in the same event-loop slice as the eventual stdin.write. This shuts
+    // the check/write race that previously acknowledged guidance after provider
+    // inference had already begun.
+    if (!startsNewTurn) {
+      if (opts.peerFrom && !opts.allowNativePeerSteer) return;
+      if (!opts.peerFrom && !opts.allowNativeHumanSteer) {
+        throw new Error('the current turn must reach a safe boundary before guidance is delivered');
+      }
+      if (this.activeToolIds.size === 0) {
+        if (opts.peerFrom) return;
+        throw new Error('the native steering window closed before delivery');
+      }
+    }
     const automationRequest = opts.peerFromRole === 'automation';
     if (automationRequest && (!startsNewTurn || isThreadWatched(this.cwd, this.chatId))) {
       throw new Error('routine deferred because this thread is active');
@@ -775,28 +809,105 @@ class ClaudeSession {
       // here too so a race can reject, but never hijack, the routine mission.
       throw new Error('human message is waiting for the automation turn to finish');
     }
+    const preparationAborter = startsNewTurn ? new AbortController() : null;
+    const sendAborted = () => Boolean(opts.signal?.aborted || preparationAborter?.signal.aborted);
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
       this.automationTurn = automationRequest;
+      this.activeToolIds.clear();
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
       this.streamTextBlocks.clear();
+      this.preparingTurnAborter = preparationAborter;
+      this.turnPromptSubmitted = false;
     }
+    const abandonUnsentTurn = () => {
+      if (!startsNewTurn || this.preparingTurnAborter !== preparationAborter) return;
+      this.preparingTurnAborter = null;
+      this.turnPromptSubmitted = false;
+      if (this.turnStartedAt === null) return;
+      this.turnStartedAt = null;
+      this.automationTurn = false;
+      this.activeToolIds.clear();
+      if (!this.disposed) this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+    };
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
     const wantSeed = this.seedWindowOnNextTurn;
     const seed = wantSeed
       ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
       : '';
-    // Echo the user message into our event log so reconnecting clients can
-    // replay the full conversation, not just Sam's responses (claude doesn't
-    // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
-    // so the UI still shows the user's message and thumbnails even when the vision
-    // adapter rewrites the prompt below.
+    if (sendAborted()) {
+      abandonUnsentTurn();
+      return;
+    }
+
+    // Prepare durable attachments and any text-only vision adaptation BEFORE
+    // echoing acceptance. Stop/Fresh/newer guidance may abort these awaits; an
+    // echo must never claim the model received a message that never hit stdin.
+    let attachments: Array<{ id: string; mediaType: string }> = [];
+    try {
+      if (!opts.peerFrom && !opts.skipAttachments && images?.length) {
+        attachments = await saveChatAttachments(images);
+      }
+    } catch (error) {
+      abandonUnsentTurn();
+      throw error;
+    }
+    if (sendAborted()) {
+      abandonUnsentTurn();
+      return;
+    }
+
+    // Z.ai GLM models are text-only over the Anthropic-compatible endpoint, so a
+    // native image payload is dropped (or errors). Route pasted images through
+    // the local LM Studio vision model and inject a text description instead.
+    // claude/assistant keep full native vision — they never adapt.
+    let promptText = text;
+    let outImages = images;
+    let visionNote: string | undefined;
+    if (this.cli === 'zai' && images && images.length) {
+      const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
+      if (result.adapted) {
+        promptText = result.text;
+        outImages = undefined;
+        visionNote = result.note;
+      }
+      // shutdown()/interrupt during the (up to 90s) adapter await sets disposed
+      // but may leave exitCode null momentarily — don't write to a dying stdin.
+      if (sendAborted()) {
+        abandonUnsentTurn();
+        return;
+      }
+      if (this.disposed || this.child.exitCode !== null) {
+        abandonUnsentTurn();
+        this.emit({ type: 'error', message: 'session has exited' });
+        return;
+      }
+    }
+
+    // Revalidate native steering after every possible await. From this check
+    // through stdin.write there is no event-loop yield, so a completed tool
+    // cannot silently move us into provider inference between check and write.
+    if (!startsNewTurn && this.activeToolIds.size === 0) {
+      if (opts.peerFrom) return;
+      throw new Error('the native steering window closed before delivery');
+    }
+
+    // Echo only now: this is the durable admission boundary reconnecting
+    // clients and the team outbox trust.
     if (opts.peerFrom) {
+      if (startsNewTurn) this.emit({ type: 'turnStart' });
       this.emit({
         type: 'event',
-        event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
+        event: {
+          type: 'peer_message',
+          from: opts.peerFrom,
+          fromRole: opts.peerFromRole ?? '',
+          text: opts.peerText !== undefined ? opts.peerText : text,
+          ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
+          ts: Date.now(),
+        },
       });
     } else {
       this.emit({
@@ -805,7 +916,7 @@ class ClaudeSession {
           type: '_user_echo',
           text,
           imageCount: images?.length ?? 0,
-          attachments: opts.skipAttachments ? [] : await saveChatAttachments(images),
+          attachments,
           clientMsgId: opts.clientMsgId,
           ts: Date.now(),
         },
@@ -813,38 +924,35 @@ class ClaudeSession {
       noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
     }
-    // Z.ai GLM models are text-only over the Anthropic-compatible endpoint, so a
-    // native image payload is dropped (or errors). Route pasted images through
-    // the local LM Studio vision model and inject a text description instead.
-    // claude/assistant keep full native vision — they never adapt.
-    let promptText = text;
-    let outImages = images;
-    if (this.cli === 'zai' && images && images.length) {
-      const result = await adaptImagesForTextModel({ text, images, modelSupportsImages: false });
-      if (result.adapted) {
-        promptText = result.text;
-        outImages = undefined;
-        if (result.note) {
-          console.log(`[chat zai] vision adapter: ${result.note}`);
-          this.emit({
-            type: 'event',
-            event: { type: '_vision_adapter', images: images.length, note: result.note, ts: Date.now() },
-          });
-        }
-      }
-      // shutdown()/interrupt during the (up to 90s) adapter await sets disposed
-      // but may leave exitCode null momentarily — don't write to a dying stdin.
-      if (this.disposed || this.child.exitCode !== null) {
-        this.emit({ type: 'error', message: 'session has exited' });
-        return;
-      }
+    if (visionNote) {
+      console.log(`[chat zai] vision adapter: ${visionNote}`);
+      this.emit({
+        type: 'event',
+        event: { type: '_vision_adapter', images: images!.length, note: visionNote, ts: Date.now() },
+      });
     }
     // The model occasionally drops the body when a user message is
     // `/<skill> <body>` and invokes the Skill tool with empty args. Wrap any
     // body in `<command-args>` so the args are structurally obvious before the
     // text reaches claude stdin. The UI echo above keeps the original visible.
     const commandText = wrapSlashArgs(promptText);
-    const stdinText = seed ? `${seed}\n\n---\n\n${commandText}` : commandText;
+    // Claude Code emits system/init for every stream-json query, even though
+    // Rivendell deliberately keeps one warm process and one durable thread.
+    // Workspace instructions interpreted that as a brand-new session and made
+    // Max run `date`, reload session context, and narrate "I'm on it" on every
+    // ordinary follow-up. Supply the runtime fact inline so agent-home turns
+    // continue immediately instead of acting like cold starts.
+    const continuationText = isAgentThread(this.chatId)
+      ? [
+          '<rivendell-continuation>',
+          `This is a warm continuation of the existing conversation, not a new user-visible session. Host time: ${new Date().toString()}.`,
+          'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not announce startup or planned steps such as “I’m on it” or “checking now.” Rivendell already renders live progress. Work silently, then give the result.',
+          '</rivendell-continuation>',
+          '',
+          commandText,
+        ].join('\n')
+      : commandText;
+    const stdinText = seed ? `${seed}\n\n---\n\n${continuationText}` : continuationText;
     // Build claude's content array. Images come first so claude sees them
     // before the prompt.
     const content: Array<any> = [];
@@ -867,13 +975,41 @@ class ClaudeSession {
       },
     });
     try {
-      this.child.stdin.write(payload + '\n');
+      // Commit preparation to provider submission in one synchronous slice.
+      // An old canceled image-prep closure must never write after a newer turn
+      // has replaced its controller.
+      if (sendAborted() || (startsNewTurn && this.preparingTurnAborter !== preparationAborter)) {
+        abandonUnsentTurn();
+        return;
+      }
+      if (startsNewTurn) {
+        this.preparingTurnAborter = null;
+        this.turnPromptSubmitted = true;
+      }
+      await new Promise<void>((resolve, reject) => {
+        this.child.stdin.write(payload + '\n', (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
       if (wantSeed) {
         this.seedWindowOnNextTurn = false;
         if (seed) this.pendingSeedAck = true;
       }
+      if (opts.peerDeliveryId) {
+        this.emit({
+          type: 'event',
+          event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
+        });
+      }
     } catch (e) {
       if (wantSeed) this.seedWindowOnNextTurn = true;
+      if (startsNewTurn && this.turnStartedAt !== null) {
+        this.turnStartedAt = null;
+        this.automationTurn = false;
+        this.turnPromptSubmitted = false;
+        this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+      }
       this.emit({ type: 'error', message: `stdin write failed: ${(e as Error).message}` });
     }
   }
@@ -892,11 +1028,86 @@ class ClaudeSession {
     }, 3000).unref();
   }
 
-  /** Same as shutdown, but framed for the user's "stop" button — keeps the
-   *  saved session_id so the next message resumes the conversation. */
-  interrupt(reason = 'interrupt'): void {
-    this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
-    this.shutdown(reason);
+  /** Cancel only the active turn and keep the initialized CLI/MCP process warm.
+   * Claude Code's stream-json control protocol returns a normal canceled result
+   * and then accepts the next user message in the same process. Fall back to a
+   * process kill only if the control channel itself fails or never settles. */
+  interrupt(reason = 'interrupt'): Promise<boolean> {
+    if (this.interruptInFlight) return this.interruptInFlight;
+    if (this.turnStartedAt === null) return Promise.resolve(this.isAlive());
+
+    // An image may still be in attachment persistence or the text-only vision
+    // adapter, before the CLI has received any prompt. Cancel that local work
+    // and close the turn immediately; sending provider interrupt here would hit
+    // an idle session and the late preprocessing closure could otherwise write
+    // the prompt afterward.
+    if (this.preparingTurnAborter && !this.turnPromptSubmitted) {
+      this.preparingTurnAborter.abort();
+      this.preparingTurnAborter = null;
+      this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
+      this.turnStartedAt = null;
+      this.automationTurn = false;
+      this.activeToolIds.clear();
+      this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+      return Promise.resolve(this.isAlive());
+    }
+
+    const run = async (): Promise<boolean> => {
+      type Outcome = 'ended' | 'closed' | 'failed' | 'timeout';
+      let finish!: (outcome: Outcome) => void;
+      let settled = false;
+      let unsubscribe: () => void = () => {};
+      const outcome = new Promise<Outcome>((resolve) => {
+        const done = (value: Outcome) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          unsubscribe();
+          resolve(value);
+        };
+        finish = done;
+        const timer = setTimeout(() => done('timeout'), 12_000);
+        timer.unref?.();
+        unsubscribe = this.subscribe((event) => {
+          if (event.ev.type === 'turnEnd') done('ended');
+          else if (event.ev.type === 'closed') done('closed');
+        }, -1, false);
+      });
+
+      this.userInterruptPending = true;
+      this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
+      const requestId = `interrupt-${randomUUID()}`;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          this.child.stdin.write(JSON.stringify({
+            type: 'control_request',
+            request_id: requestId,
+            request: { subtype: 'interrupt' },
+          }) + '\n', (error) => error ? reject(error) : resolve());
+        });
+      } catch {
+        finish('failed');
+      }
+
+      const result = await outcome;
+      if (result === 'ended' && this.isAlive()) return true;
+
+      console.warn(`[chat ${this.cli}] warm interrupt ${result}; falling back to process stop (${reason})`);
+      this.userInterruptPending = false;
+      if (this.turnStartedAt !== null && !this.disposed) {
+        this.turnStartedAt = null;
+        this.automationTurn = false;
+        this.activeToolIds.clear();
+        this.preparingTurnAborter = null;
+        this.turnPromptSubmitted = false;
+        this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
+      }
+      this.shutdown(`${reason}-${result}`);
+      return false;
+    };
+
+    this.interruptInFlight = run().finally(() => { this.interruptInFlight = null; });
+    return this.interruptInFlight;
   }
 
   isAlive(): boolean {
@@ -945,9 +1156,13 @@ class ClaudeSession {
     return this.turnStartedAt !== null && this.automationTurn;
   }
 
-  /** One synchronous admission snapshot for register's native-steer decision. */
+  /** One synchronous admission snapshot for register's native-steer decision.
+   * Claude's stream-json stdin only behaves like interactive steering while a
+   * tool is executing. During provider inference it acknowledges the write but
+   * the model can finish without ever seeing it, so callers must queue a
+   * separate turn instead. */
   canAcceptNativeHumanSteer(): boolean {
-    return this.turnStartedAt !== null && !this.automationTurn;
+    return this.turnStartedAt !== null && !this.automationTurn && this.activeToolIds.size > 0;
   }
 
   sessionId(): string | null {
@@ -1076,7 +1291,7 @@ class ClaudeSession {
     // the retiring process. Do not allocate, persist, or deliver it.
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
-    const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
+    const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
     this.eventLog.push(se);
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
@@ -1168,6 +1383,26 @@ class ClaudeSession {
   }
 
   private handleEvent(ev: any): void {
+    // Track the one phase where Claude Code can incorporate realtime stdin
+    // without interrupting: after it emitted tool_use and before every matching
+    // tool_result came back. A user message written during message generation
+    // was observed to receive an echo yet be absent from every later response.
+    if (ev?.type === 'stream_event' && ev.event?.type === 'message_start') {
+      this.activeToolIds.clear();
+    } else if (ev?.type === 'assistant' && Array.isArray(ev.message?.content)) {
+      for (const block of ev.message.content) {
+        if (block?.type === 'tool_use' && typeof block.id === 'string') {
+          this.activeToolIds.add(block.id);
+        }
+      }
+    } else if (ev?.type === 'user' && Array.isArray(ev.message?.content)) {
+      for (const block of ev.message.content) {
+        if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+          this.activeToolIds.delete(block.tool_use_id);
+        }
+      }
+    }
+
     if (
       ev?.type === 'control_response'
       && ev.response?.request_id === this.warmupRequestId
@@ -1221,9 +1456,12 @@ class ClaudeSession {
       this.syntheticApiErrorSeen = true;
       this.scrubSyntheticStreamText();
     }
-    const providerTerminal = ev?.type === 'result' ? terminalProviderError(this.cli, ev) : null;
+    const expectedUserInterrupt = ev?.type === 'result' && this.userInterruptPending;
+    const providerTerminal = ev?.type === 'result' && !expectedUserInterrupt
+      ? terminalProviderError(this.cli, ev)
+      : null;
     const terminal = providerTerminal
-      ?? (ev?.type === 'result' ? terminalExecutionError(this.cli, ev) : null);
+      ?? (ev?.type === 'result' && !expectedUserInterrupt ? terminalExecutionError(this.cli, ev) : null);
     if (terminal) {
       // Never persist the raw failed result: provider payloads can include
       // request metadata or echoed prompt fragments. The normalized notice is
@@ -1271,6 +1509,10 @@ class ClaudeSession {
       // subscriber may immediately admit the next queued human turn.
       this.turnStartedAt = null;
       this.automationTurn = false;
+      this.activeToolIds.clear();
+      this.preparingTurnAborter = null;
+      this.turnPromptSubmitted = false;
+      this.userInterruptPending = false;
       this.emit({ type: 'turnEnd', sessionId: this.currentSessionId ?? undefined });
       const seeded = this.pendingSeedAck;
       const resultFailed = ev.is_error === true || typeof ev.api_error_status === 'number';
@@ -1367,6 +1609,15 @@ export async function getOrCreateSession(opts: {
     const ok = await existing.ready;
     if (sessions.get(key) !== existing) continue;
     if (ok && existing.isAlive()) {
+      await flushEventLog(existing.logKey);
+      const priorEngine = lastEngineOf(loadEventLogSync(existing.logKey).events);
+      if (!existing.isBusy() && priorEngine && priorEngine !== opts.cli) {
+        // This native session predates turns from another brain on the shared
+        // agent thread. Recreate it so the next turn seeds current context.
+        existing.shutdown('cross-engine context refresh');
+        sessions.delete(key);
+        continue;
+      }
       // Recycle only an IDLE, FULLY-INITIALIZED session whose model/effort
       // differs, and only when the caller explicitly opted in (a real user
       // turn). session_id is preserved so the replacement --resumes the same
@@ -1447,8 +1698,16 @@ export function peekClaudeSession(opts: {
 }): AnySession | null {
   if (!isClaudeFamilyCli(opts.cli)) return null;
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
-  const live = sessions.get(keyOf(opts.cli, cwd, opts.chatId || 'main'));
-  return live && live.isAlive() ? live : null;
+  const key = keyOf(opts.cli, cwd, opts.chatId || 'main');
+  const live = sessions.get(key);
+  if (!live || !live.isAlive()) return null;
+  const priorEngine = lastEngineOf(loadEventLogSync(live.logKey).events);
+  if (!live.isBusy() && priorEngine && priorEngine !== opts.cli) {
+    live.shutdown('cross-engine context refresh');
+    sessions.delete(key);
+    return null;
+  }
+  return live;
 }
 
 /** Durable event-log key for a lane - the same key its session would use, so a
@@ -1725,8 +1984,8 @@ export async function interruptSession(opts: { cli: CliKind; repoPath: string; c
   const key = keyOf(opts.cli, cwd, chatId);
   const s = sessions.get(key);
   if (s) {
-    s.interrupt('interruptSession');
-    sessions.delete(key);
+    const keptWarm = await s.interrupt('interruptSession');
+    if (!keptWarm && sessions.get(key) === s) sessions.delete(key);
   }
 }
 
