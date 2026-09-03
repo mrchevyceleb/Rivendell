@@ -19,6 +19,10 @@ interface AccountMap {
 const HOME = homedir();
 const MAP_PATH = process.env.RIVENDELL_ACCOUNT_MAP?.trim() || '';
 const DEFAULT_CLI_ACCOUNT = process.env.RIVENDELL_DEFAULT_CLI_ACCOUNT?.trim() || '';
+const claudeMaxRetries = () =>
+  process.env.RIVENDELL_CLAUDE_MAX_RETRIES?.trim()
+  || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
+  || '1';
 
 let cached: AccountMap | null = null;
 function loadMap(): AccountMap | null {
@@ -57,7 +61,10 @@ export function resolveAccount(cwd: string): string | null {
 export function accountEnvForAccount(account: string, cwd: string): NodeJS.ProcessEnv {
   const map = loadMap();
   const a = map ? map.accounts[account] : undefined;
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAUDE_CODE_MAX_RETRIES: claudeMaxRetries(),
+  };
   // Bill the SUBSCRIPTION selected below (CLAUDE_CONFIG_DIR for claude, CODEX_HOME
   // for codex), never a metered provider key. A present key silently overrides the
   // chosen subscription (this quietly billed metered API $ on every spawn), so
@@ -89,7 +96,10 @@ export function accountEnv(cwd: string): NodeJS.ProcessEnv {
   if (DEFAULT_CLI_ACCOUNT) return accountEnvForAccount(DEFAULT_CLI_ACCOUNT, cwd);
   const map = loadMap();
   const account = resolveAccount(cwd);
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAUDE_CODE_MAX_RETRIES: claudeMaxRetries(),
+  };
   // Bill the SUBSCRIPTION selected below (CLAUDE_CONFIG_DIR for claude, CODEX_HOME
   // for codex), never a metered provider key. A present key silently overrides the
   // chosen subscription (this quietly billed metered API $ on every spawn), so

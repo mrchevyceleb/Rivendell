@@ -74,6 +74,13 @@ export function terminalProviderError(cli: string, raw: unknown): TerminalProvid
   const code = status === undefined ? undefined : String(status);
 
   if (status === 429) {
+    if (cli === 'xai' && /\bmodel\s+is\s+currently\s+at\s+capacity\b/i.test(detail)) {
+      return {
+        message: `${provider} is temporarily at capacity. Try again in a few minutes or switch brains.`,
+        code,
+        retryable: true,
+      };
+    }
     if (/usage limit|quota|five[- ]?hour|5\s*hour/i.test(detail)) {
       return {
         message: `${provider}'s usage window is full, so this turn could not run. Switch brains or try again after the limit resets.`,

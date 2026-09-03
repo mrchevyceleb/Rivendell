@@ -266,6 +266,12 @@ function xaiEnv(): NodeJS.ProcessEnv {
   // 200K non-claude default); AUTO_COMPACT_WINDOW is the compact threshold.
   env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = XAI_COMPACT_WINDOW;
   env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = XAI_COMPACT_WINDOW;
+  // Capacity/quota windows do not improve during Claude Code's long default
+  // retry storm. Fail promptly so the user can switch brains or retry later.
+  env.CLAUDE_CODE_MAX_RETRIES =
+    process.env.RIVENDELL_XAI_MAX_RETRIES?.trim()
+    || process.env.CLAUDE_CODE_MAX_RETRIES?.trim()
+    || '1';
   env.SAMWISE_ACCOUNT = 'xai';
   return env;
 }
