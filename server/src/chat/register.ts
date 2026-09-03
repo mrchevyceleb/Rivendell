@@ -68,8 +68,7 @@ type ResumeWatchableSession = AnySession & {
 type SteerBoundary = 'turn-complete' | 'closed' | 'timeout' | 'aborted';
 
 function sessionHasActiveBoundary(session: AnySession): boolean {
-  return (session as { isBusy?: () => boolean }).isBusy?.() === true
-    || (session as { isPrewarming?: () => boolean }).isPrewarming?.() === true;
+  return (session as { isBusy?: () => boolean }).isBusy?.() === true;
 }
 
 /** Every engine finishes its current turn naturally before guidance is sent.
@@ -810,6 +809,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // turn naturally. No control interrupt and no process signal occurs.
           let session: AnySession | null = bound ? await bound.catch(() => null) : null;
           if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+          if (
+            session
+            && (session as { isPrewarming?: () => boolean }).isPrewarming?.() === true
+            && 'prewarm' in session
+            && typeof session.prewarm === 'function'
+          ) {
+            await session.prewarm().catch(() => {});
+            if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+          }
           // Claude Code's native stream-json input queues guidance inside the
           // active turn and applies it immediately after the current tool. This
           // is the same behavior as interactive Claude Code and requires no
@@ -959,14 +967,6 @@ export async function registerChat(app: express.Express, server: Server): Promis
           const generation = ++turnGeneration;
           let session: AnySession | null = await sessionPromise;
 
-          // Boot prewarm is a hidden real provider turn. If a user arrives in
-          // its tiny startup window, wait for that natural boundary, then admit
-          // the message as a normal turn rather than steering the warmup.
-          if (session && (session as { isPrewarming?: () => boolean }).isPrewarming?.() === true) {
-            const boundary = await waitForNaturalTurnEnd(session, new AbortController().signal, 120_000);
-            if (boundary === 'timeout') throw new Error('Max is still warming — try again in a moment');
-            if (boundary === 'closed') session = null;
-          }
           if (!session && cliKind && repoPath) {
             // sessionPromise resolved to a dead/null session — rebind a fresh
             // one rather than crashing on `null.send`.

@@ -454,9 +454,10 @@ class ClaudeSession {
   /** True only while the active turn came from a scheduled routine. Human
    * input must wait for this turn's boundary instead of steering its mission. */
   private automationTurn = false;
-  /** Boot warmup is a real hidden provider round-trip. It never enters the
-   * transcript, and human input waits for its natural result boundary. */
-  private hiddenTurn = false;
+  /** Boot/rotation warmup uses Claude's read-only `mcp_status` control request:
+   * no model turn, no tool call, and no transcript event. */
+  private mcpPrewarmed = false;
+  private warmupRequestId: string | null = null;
   private warmupPromise: Promise<void> | null = null;
   private finishWarmupWait: ((error?: Error) => void) | null = null;
   private warmupTimer: NodeJS.Timeout | null = null;
@@ -616,8 +617,7 @@ class ClaudeSession {
 
     this.child.on('exit', (code, signal) => {
       this.flushStderr();
-      const hiddenAtExit = this.hiddenTurn;
-      if (hiddenAtExit) {
+      if (this.warmupPromise) {
         this.finishWarmupWait?.(new Error(`Max warmup process exited (${code ?? signal ?? 'unknown'})`));
       }
       const idleMs = Date.now() - this.lastActivityAtMs;
@@ -635,7 +635,7 @@ class ClaudeSession {
       // would then read a blank window and report that it did nothing, while the
       // work it actually finished sits on disk. `disposed` is set first by
       // shutdown()/interrupt(), so a deliberate stop stays quiet.
-      if (this.turnStartedAt !== null && !this.disposed && !hiddenAtExit) {
+      if (this.turnStartedAt !== null && !this.disposed) {
         const ranMs = Date.now() - this.turnStartedAt;
         console.warn(
           `[chat ${this.cli}] mid-turn death after ${ranMs}ms — writing crash tombstone (code=${code} signal=${signal ?? '-'})`,
@@ -657,7 +657,6 @@ class ClaudeSession {
       // A dead process is never busy, however it got there.
       this.turnStartedAt = null;
       this.automationTurn = false;
-      this.hiddenTurn = false;
       this.emit({ type: 'closed', code, signal });
     });
 
@@ -710,12 +709,15 @@ class ClaudeSession {
   /** Most recent turn start (ms) — used for telegram-ping duration. */
   private turnStartedAt: number | null = null;
 
-  /** Force the lazy Claude CLI through one complete hidden provider round-trip
-   * so Max's first real message never pays process/MCP initialization. */
+  /** Initialize Claude plus every configured MCP without invoking the model or
+   * exposing any tool. `mcp_status` is a read-only stream-json control request. */
   async prewarm(): Promise<void> {
     if (this.warmupPromise) return this.warmupPromise;
-    if (this.initSeen || this.turnStartedAt !== null) return;
+    if (this.mcpPrewarmed || this.initSeen || this.turnStartedAt !== null) return;
+    if (this.child.exitCode !== null || this.disposed) throw new Error('cannot prewarm an exited session');
 
+    const requestId = `prewarm-${randomUUID()}`;
+    this.warmupRequestId = requestId;
     let settled = false;
     const boundary = new Promise<void>((resolve, reject) => {
       this.finishWarmupWait = (error) => {
@@ -730,70 +732,62 @@ class ClaudeSession {
     });
     this.warmupPromise = boundary;
     this.warmupTimer = setTimeout(() => {
-      this.finishWarmupWait?.(new Error('Max warmup timed out'));
+      this.finishWarmupWait?.(new Error('Max MCP warmup timed out'));
       this.shutdown('prewarm-timeout');
     }, 120_000);
     this.warmupTimer.unref?.();
 
     try {
-      await this.send(
-        '[Rivendell internal boot warmup. Do not call tools. Reply with exactly READY.]',
-        undefined,
-        { hidden: true },
-      );
+      this.child.stdin.write(JSON.stringify({
+        type: 'control_request',
+        request_id: requestId,
+        request: { subtype: 'mcp_status' },
+      }) + '\n');
       await boundary;
     } catch (err) {
       this.finishWarmupWait?.(err as Error);
-      await boundary;
+      throw err;
     } finally {
+      this.warmupRequestId = null;
       this.warmupPromise = null;
     }
   }
 
   isPrewarming(): boolean {
-    return this.hiddenTurn;
+    return this.warmupPromise !== null;
   }
 
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean; hidden?: boolean } = {}): Promise<void> {
-    if (this.child.exitCode !== null) {
-      if (opts.hidden) throw new Error('cannot prewarm an exited session');
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
+    // Every caller (human, teammate, routine) shares this admission barrier.
+    // A read-only MCP control warmup can never reject or absorb a real message.
+    if (this.warmupPromise) await this.warmupPromise.catch(() => {});
+    if (this.child.exitCode !== null || this.disposed) {
       this.emit({ type: 'error', message: 'session has exited' });
       return;
     }
     const startsNewTurn = this.turnStartedAt === null;
     const automationRequest = opts.peerFromRole === 'automation';
-    const hiddenRequest = opts.hidden === true;
-    if (hiddenRequest && !startsNewTurn) {
-      throw new Error('cannot prewarm a session that already has a turn');
-    }
     if (automationRequest && (!startsNewTurn || isThreadWatched(this.cwd, this.chatId))) {
       throw new Error('routine deferred because this thread is active');
     }
-    if (!startsNewTurn && (this.automationTurn || this.hiddenTurn)) {
-      // Register normally waits for these internal boundaries. Keep this
-      // admission guard here too so a race can reject, but never hijack, them.
-      throw new Error(this.hiddenTurn
-        ? 'human message is waiting for Max to finish warming'
-        : 'human message is waiting for the automation turn to finish');
+    if (!startsNewTurn && this.automationTurn) {
+      // Register normally waits for this boundary. Keep this admission guard
+      // here too so a race can reject, but never hijack, the routine mission.
+      throw new Error('human message is waiting for the automation turn to finish');
     }
     if (startsNewTurn) {
       this.turnStartedAt = Date.now();
       this.automationTurn = automationRequest;
-      this.hiddenTurn = hiddenRequest;
       this.terminalNoticeEmitted = false;
       this.syntheticApiErrorSeen = false;
       this.streamTextBlocks.clear();
     }
     const historyThroughSeq = this.latestSeq();
     const fallbackHistory = this.eventLog.slice();
-    // Warm the process/provider without replaying conversation context or
-    // consuming rotation debt. The first real user turn still receives the
-    // complete compact+window seed, so a restart marker can never make hidden
-    // warmup resume side effects from an interrupted task.
-    const wantSeed = this.seedWindowOnNextTurn && !hiddenRequest;
+    const wantSeed = this.seedWindowOnNextTurn;
     const seed = wantSeed
       ? await peekEnginePrimerThroughSeq(this.logKey, historyThroughSeq, fallbackHistory)
       : '';
@@ -802,10 +796,7 @@ class ClaudeSession {
     // re-emit the user turn in its stream). Echo the ORIGINAL text + image count
     // so the UI still shows Matt's message and thumbnails even when the vision
     // adapter rewrites the prompt below.
-    if (hiddenRequest) {
-      // A warmup exists only inside the native provider session. It does not
-      // become a visible/durable Rivendell conversation turn.
-    } else if (opts.peerFrom) {
+    if (opts.peerFrom) {
       this.emit({
         type: 'event',
         event: { type: 'peer_message', from: opts.peerFrom, fromRole: opts.peerFromRole ?? '', text: opts.peerText !== undefined ? opts.peerText : text, ts: Date.now() },
@@ -886,13 +877,6 @@ class ClaudeSession {
       }
     } catch (e) {
       if (wantSeed) this.seedWindowOnNextTurn = true;
-      if (hiddenRequest) {
-        this.turnStartedAt = null;
-        this.hiddenTurn = false;
-        this.emitHiddenTurnEnd();
-        this.finishWarmupWait?.(e as Error);
-        throw e;
-      }
       this.emit({ type: 'error', message: `stdin write failed: ${(e as Error).message}` });
     }
   }
@@ -952,10 +936,7 @@ class ClaudeSession {
 
   /** True while this session is actively processing a turn (between user send and result event). */
   isBusy(): boolean {
-    // Boot warmup is internal readiness work, not a user/automation turn. The
-    // send path has an explicit isPrewarming wait, so clients stay ready and
-    // their first message is admitted normally after the hidden boundary.
-    return this.turnStartedAt !== null && !this.hiddenTurn;
+    return this.turnStartedAt !== null;
   }
 
   /** Scheduled turns yield to human messages at their natural boundary. */
@@ -965,7 +946,7 @@ class ClaudeSession {
 
   /** One synchronous admission snapshot for register's native-steer decision. */
   canAcceptNativeHumanSteer(): boolean {
-    return this.turnStartedAt !== null && !this.automationTurn && !this.hiddenTurn;
+    return this.turnStartedAt !== null && !this.automationTurn;
   }
 
   sessionId(): string | null {
@@ -1080,18 +1061,8 @@ class ClaudeSession {
     });
   }
 
-  private emitHiddenTurnEnd(): void {
-    // Internal waiters need a boundary, but it must not consume/persist a seq or
-    // make Max look recently active in the conversation list after every boot.
-    const se: SeqEvent = {
-      seq: this.latestSeq(),
-      ev: { type: 'turnEnd', sessionId: this.currentSessionId ?? undefined },
-    };
-    for (const fn of this.listeners) fn(se);
-  }
-
   private emit(msg: SessionEvent): void {
-    if (this.hiddenTurn || isPlumbingEvent(msg)) return;
+    if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.nextSeq++, ev: msg };
     this.eventLog.push(se);
@@ -1138,8 +1109,12 @@ class ClaudeSession {
     this.shutdown('compaction-rotate');
     sessions.delete(key);
     await setSessionId(cli, cwd, '', chatId); // fresh CLI session — first send seeds the forever-window
-    await spawnSession(cli, cwd, chatId, null, key, 0, model, effort, true);
-    console.warn(`[chat ${cli}] context rotated with compaction primer for ${key}`);
+    const replacement = await spawnSession(cli, cwd, chatId, null, key, 0, model, effort, true);
+    // Rotation used to create only a quiet-ready process; the next human still
+    // paid Claude/MCP initialization. Prewarm the replacement with a read-only
+    // control request while keeping compact+window debt for the real next turn.
+    await replacement.prewarm();
+    console.warn(`[chat ${cli}] context rotated and prewarmed for ${key}`);
     return false;
   }
 
@@ -1197,6 +1172,27 @@ class ClaudeSession {
   }
 
   private handleEvent(ev: any): void {
+    if (
+      ev?.type === 'control_response'
+      && ev.response?.request_id === this.warmupRequestId
+    ) {
+      const servers = Array.isArray(ev.response?.response?.mcpServers)
+        ? ev.response.response.mcpServers
+        : [];
+      const statuses = new Map<string, string>(servers.map((server: any) => [
+        typeof server?.name === 'string' ? server.name : '',
+        typeof server?.status === 'string' ? server.status : '',
+      ]));
+      const required = ['assistant-mcp', 'rivendell-browser', 'rivendell-team'];
+      const unavailable = required.filter((name) => statuses.get(name) !== 'connected');
+      const succeeded = ev.response?.subtype === 'success' && unavailable.length === 0;
+      this.mcpPrewarmed = succeeded;
+      this.finishWarmupWait?.(succeeded
+        ? undefined
+        : new Error(`Max MCP warmup incomplete: ${unavailable.join(', ') || 'status request failed'}`));
+      return;
+    }
+
     // Detect init + silent-resume-failure.
     if (ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
       const pending = this.pendingResumeId;
@@ -1221,27 +1217,6 @@ class ClaudeSession {
         && ev.session_id !== this.currentSessionId) {
       this.currentSessionId = ev.session_id;
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
-    }
-
-    if (this.hiddenTurn) {
-      if (ev?.type === 'result') {
-        const failed = ev.is_error === true || typeof ev.api_error_status === 'number';
-        const seeded = this.pendingSeedAck;
-        if (seeded) this.pendingSeedAck = false;
-        if (failed) this.seedWindowOnNextTurn = true;
-        this.turnStartedAt = null;
-        this.automationTurn = false;
-        this.hiddenTurn = false;
-        this.streamTextBlocks.clear();
-        if (!failed) this.persistAppliedSelection();
-        // Unblock an immediate human message that arrived during boot warmup
-        // without creating a fake durable transcript event.
-        this.emitHiddenTurnEnd();
-        if (seeded && !failed) void clearRotation(this.logKey);
-        this.finishWarmupWait?.(failed ? new Error('Max warmup provider turn failed') : undefined);
-        if (ev.api_error_status === 401) this.failAuth();
-      }
-      return;
     }
 
     this.trackStreamText(ev);
