@@ -57,7 +57,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "concurrently": "^9.2.1",
-    "knip": "^5.88.1",
+    "knip": "^6.33.0",
     "sharp": "^0.35.4",
     "tailwindcss": "^4.1.0",
     "typescript": "~6.0.2",
