@@ -160,7 +160,7 @@ const VALID_CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 // so every GLM turn collapsed to High and Max was unreachable. Accept the full
 // claude range (Z.ai collapses it); the UI offers just High and Max.
 const VALID_ZAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-const VALID_ZAI_MODELS = new Set([ZAI_GLM53_MODEL, ZAI_GLM52_MODEL, ZAI_GLM51_MODEL]);
+const VALID_ZAI_MODELS = new Set([ZAI_GLM53_MODEL, ZAI_GLM53_FLASH_MODEL, ZAI_GLM52_MODEL, ZAI_GLM51_MODEL]);
 const VALID_MODEL_ID = /^[A-Za-z0-9._-]+$/;
 function normalizeZaiModelId(model?: string): string | undefined {
   const trimmed = model?.trim();
