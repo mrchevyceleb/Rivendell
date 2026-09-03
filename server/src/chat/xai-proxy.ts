@@ -35,6 +35,17 @@ import { getXaiAuth } from '../routes/xai-oauth.ts';
 // every xAI chat session (xaiEnv points ANTHROPIC_BASE_URL at it).
 
 const XAI_UPSTREAM = process.env.RIVENDELL_XAI_UPSTREAM?.trim() || 'https://api.x.ai';
+const configuredFastRetries = Number(process.env.RIVENDELL_XAI_FAST_RETRIES ?? 2);
+const XAI_FAST_RETRIES = Number.isInteger(configuredFastRetries)
+  ? Math.min(3, Math.max(0, configuredFastRetries))
+  : 2;
+const MAX_RETRY_BODY_BYTES = 1024 * 1024;
+
+export function isTransientXaiCapacity(status: number, body: string): boolean {
+  // A capacity 429 explicitly rejected the request before generation. Do not
+  // replay ambiguous 5xx responses that may have accepted billable work.
+  return status === 429 && /\bmodel\s+is\s+currently\s+at\s+capacity\b/i.test(body);
+}
 
 // Per-process credential. xaiEnv() seeds the child's ANTHROPIC_AUTH_TOKEN with
 // THIS instead of a real token, which is what makes the whole scheme work:
@@ -181,6 +192,9 @@ function startServer(): Promise<string> {
         const headers: Record<string, string> = {
           'content-type': req.headers['content-type'] || 'application/json',
           'content-length': Buffer.byteLength(outBody).toString(),
+          // Capacity 429s are inspected before forwarding. Keep those small
+          // error bodies deterministic instead of negotiating gzip/Brotli.
+          'accept-encoding': 'identity',
         };
         // Forward auth + anthropic version headers claude set; drop hop-by-hop.
         if (req.headers['authorization']) headers['authorization'] = String(req.headers['authorization']);
@@ -214,28 +228,82 @@ function startServer(): Promise<string> {
         // Anything else (the GROK_PERSONAL_API_KEY path, or the
         // RIVENDELL_XAI_BASE_URL override) forwards its own header untouched.
 
-        upstream = https.request(
-          XAI_UPSTREAM + (req.url || ''),
-          { method: req.method, headers },
-          (up) => {
-            try { res.writeHead(up.statusCode ?? 200, up.headers); } catch { cleanup(); return; }
-            up.on('error', () => cleanup());
-            up.pipe(res);
-          },
-        );
-        upstream.on('error', (err) => {
-          console.warn(`[xai-proxy] upstream error: ${(err as Error).message}`);
-          // Headers may already be sent (mid-stream) — only write a 502 body if
-          // the response is still writable and unset.
-          if (!res.headersSent) {
-            try { res.writeHead(502, { 'content-type': 'application/json' }); } catch {}
-            try { res.end(JSON.stringify({ error: { code: 502, message: 'xAI proxy upstream error' } })); } catch {}
-          } else {
-            try { res.destroy(); } catch {}
-          }
-        });
-        upstream.on('aborted', () => cleanup());
-        try { upstream.write(outBody); upstream.end(); } catch { cleanup(); }
+        const sendAttempt = (attempt: number) => {
+          if (aborted || res.writableEnded) return;
+          upstream = https.request(
+            XAI_UPSTREAM + (req.url || ''),
+            { method: req.method, headers },
+            (up) => {
+              const status = up.statusCode ?? 200;
+              if (status !== 429) {
+                try { res.writeHead(status, up.headers); } catch { cleanup(); return; }
+                up.on('error', () => cleanup());
+                up.pipe(res);
+                return;
+              }
+
+              const retryChunks: Buffer[] = [];
+              let retrySize = 0;
+              let settled = false;
+              let ended = false;
+              const responseTimer = setTimeout(() => {
+                failBufferedResponse('xAI proxy: timed out reading upstream capacity response');
+              }, 10_000);
+              responseTimer.unref();
+              const failBufferedResponse = (message: string) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(responseTimer);
+                try { up.destroy(); } catch {}
+                if (!res.headersSent) fail(502, message);
+                else try { res.destroy(); } catch {}
+              };
+              up.on('data', (chunk: Buffer) => {
+                if (settled) return;
+                retrySize += chunk.length;
+                if (retrySize > MAX_RETRY_BODY_BYTES) {
+                  failBufferedResponse('xAI proxy: upstream error response was too large');
+                  return;
+                }
+                retryChunks.push(chunk);
+              });
+              up.once('error', () => failBufferedResponse('xAI proxy: upstream capacity response failed'));
+              up.once('aborted', () => failBufferedResponse('xAI proxy: upstream capacity response aborted'));
+              up.once('close', () => {
+                if (!ended) failBufferedResponse('xAI proxy: upstream capacity response closed early');
+              });
+              up.once('end', () => {
+                ended = true;
+                if (settled || aborted || res.writableEnded) return;
+                settled = true;
+                clearTimeout(responseTimer);
+                const body = Buffer.concat(retryChunks).toString('utf8');
+                if (attempt < XAI_FAST_RETRIES && isTransientXaiCapacity(status, body)) {
+                  const waitMs = 500 * (attempt + 1);
+                  console.warn(`[xai-proxy] transient upstream ${status}; fast retry ${attempt + 1}/${XAI_FAST_RETRIES} in ${waitMs}ms`);
+                  setTimeout(() => sendAttempt(attempt + 1), waitMs).unref();
+                  return;
+                }
+                try { res.writeHead(status, up.headers); } catch { cleanup(); return; }
+                try { res.end(Buffer.concat(retryChunks)); } catch { cleanup(); }
+              });
+            },
+          );
+          upstream.on('error', (err) => {
+            console.warn(`[xai-proxy] upstream error: ${(err as Error).message}`);
+            // Headers may already be sent (mid-stream) — only write a 502 body if
+            // the response is still writable and unset.
+            if (!res.headersSent) {
+              try { res.writeHead(502, { 'content-type': 'application/json' }); } catch {}
+              try { res.end(JSON.stringify({ error: { code: 502, message: 'xAI proxy upstream error' } })); } catch {}
+            } else {
+              try { res.destroy(); } catch {}
+            }
+          });
+          upstream.on('aborted', () => cleanup());
+          try { upstream.write(outBody); upstream.end(); } catch { cleanup(); }
+        };
+        sendAttempt(0);
       };
       // handleEnd is async, and 'end' is an EventEmitter callback — a rejection
       // escaping it would be an unhandledRejection, which kills the whole

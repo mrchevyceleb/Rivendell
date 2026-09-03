@@ -654,15 +654,32 @@ export type ChatThreadProps = {
 // while a turn is live but no content has landed yet.
 export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin, typingBubble = false, suppressTyping = false }: ChatThreadProps) {
   const streaming = status === 'streaming';
-  // The indicator lives until something VISIBLE is on screen — an open block
-  // with empty text (the window between content_block_start and the first
-  // token) renders as a bare caret, which reads as "the indicator vanished".
-  const hasVisible = blocks.some(
-    (b) =>
-      (b.kind === 'text' && (b as Extract<ChatBlock, { kind: 'text' }>).open && (b as Extract<ChatBlock, { kind: 'text' }>).text.trim().length > 0) ||
-      (b.kind === 'tool' && (b as Extract<ChatBlock, { kind: 'tool' }>).running) ||
-      b.kind === 'terminal-error',
+  // The indicator lives until something VISIBLE lands in the CURRENT turn.
+  // Looking across the whole transcript made any historical terminal-error or
+  // stale open block suppress every future thinking indicator.
+  let currentTurnStart = 0;
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    if (blocks[i].kind === 'user' || blocks[i].kind === 'peer') {
+      currentTurnStart = i + 1;
+      break;
+    }
+  }
+  const activeBlock = [...blocks.slice(currentTurnStart)].reverse().find(
+    (b) => 'turnId' in b && b.turnId && (
+      (b.kind === 'text' && b.open) || (b.kind === 'tool' && (b.open || b.running))
+    ),
   );
+  const activeTurnId = activeBlock && 'turnId' in activeBlock ? activeBlock.turnId : undefined;
+  const currentBlocks = activeTurnId
+    ? blocks.filter((b) => 'turnId' in b && b.turnId === activeTurnId)
+    : blocks.slice(currentTurnStart);
+  const hasVisible = currentBlocks.some((b) =>
+    (b.kind === 'text' && b.text.trim().length > 0)
+    || b.kind === 'tool'
+    || b.kind === 'doc-link'
+    || b.kind === 'folder-link'
+    || b.kind === 'artifact'
+    || b.kind === 'terminal-error');
 
   // Group consecutive assistant blocks (same turnId) and user blocks.
   const groups: Array<
