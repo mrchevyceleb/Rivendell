@@ -81,7 +81,14 @@ export async function getSessionSelection(
   repoPath: string,
   chatId = 'main',
 ): Promise<SessionSelection | null> {
-  const stored = (await load())[key(cli, repoPath, chatId)];
+  const all = await load();
+  const storageKey = key(cli, repoPath, chatId);
+  const stored = all[storageKey] ?? Object.entries(all)
+    .filter(([candidate]) => candidate.startsWith(`${storageKey}__acct__`))
+    .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)[0]?.[1];
+  // Account-suffixed chat IDs were removed from public defaults. Preserve the
+  // most recent model/effort during that one-time key migration without ever
+  // reusing the old profile-specific native session ID.
   if (!stored) return null;
   const model = typeof stored.model === 'string' && stored.model ? stored.model : undefined;
   const effort = typeof stored.effort === 'string' && stored.effort ? stored.effort : undefined;
