@@ -473,13 +473,31 @@ function enqueueOutbound(key: string, item: QueuedOutbound): void {
   outboundQueue.set(key, q);
 }
 
-function shiftOutbound(key: string): QueuedOutbound | undefined {
+function peekOutbound(key: string): QueuedOutbound | undefined {
+  return outboundQueue.get(key)?.[0];
+}
+
+/** Remove only the item whose durable `_user_echo` proved server admission.
+ * Keeping the head until that acknowledgement lets a reconnect safely retry a
+ * send that raced an engine-switch handshake instead of losing it. */
+function acknowledgeOutbound(key: string, clientMsgId: string): void {
   const q = outboundQueue.get(key);
-  if (!q?.length) return undefined;
-  const item = q.shift();
+  if (!q?.length) return;
+  const index = q.findIndex((item) => item.clientMsgId === clientMsgId);
+  if (index < 0) return;
+  q.splice(index, 1);
   if (!q.length) outboundQueue.delete(key);
   else outboundQueue.set(key, q);
-  return item;
+}
+
+function hasOutbound(key: string, clientMsgId: string): boolean {
+  return outboundQueue.get(key)?.some((item) => item.clientMsgId === clientMsgId) === true;
+}
+
+function cancelOutbound(key: string): QueuedOutbound[] {
+  const queued = outboundQueue.get(key) ?? [];
+  outboundQueue.delete(key);
+  return queued;
 }
 
 // v6 discards snapshots that may predate durable synthetic-error scrubbing.
@@ -676,9 +694,26 @@ export function useChat(opts: {
   const appliedSelectionRevisionRef = useRef(selectionRevision ?? 0);
   const selectionLane = `${cli}|${repo?.path ?? ''}|${chatId}`;
   const selectionLaneRef = useRef(selectionLane);
+  /** A WebSocket being OPEN is not enough: after an engine/tab switch the
+   * server must finish its hello/replay and answer `ready` before sends can use
+   * that socket. Invalidate synchronously during render so a fast click cannot
+   * leak through the prior lane before the connection effect cleans it up. */
+  const socketReadyRef = useRef(false);
+  const sentOutboundRef = useRef<{ key: string; clientMsgId: string } | null>(null);
+  /** The server may temporarily keep this thread attached to a still-busy
+   * previous engine after the picker changes. Stop must target that owner. */
+  const serverCliRef = useRef<CompanionId>(cli);
+  const serverThreadRef = useRef(`${repo?.path ?? ''}|${chatId}`);
+  const serverThread = `${repo?.path ?? ''}|${chatId}`;
+  if (serverThreadRef.current !== serverThread) {
+    serverThreadRef.current = serverThread;
+    serverCliRef.current = cli;
+  }
   if (selectionLaneRef.current !== selectionLane) {
     selectionLaneRef.current = selectionLane;
     appliedSelectionRevisionRef.current = selectionRevisionRef.current;
+    socketReadyRef.current = false;
+    sentOutboundRef.current = null;
   }
   const selectionIntent = () => ({
     selectionRevision: selectionRevisionRef.current,
@@ -745,6 +780,7 @@ export function useChat(opts: {
   // Mirror the initial message into a ref so the WS onmessage handler can
   // read the latest value without re-subscribing every render.
   const initialMessageRef = useRef<string | null>(initialMessage ?? null);
+  const initialClientMsgIdRef = useRef<string | null>(null);
   const initialSendInFlightRef = useRef(false);
   const onInitialMessageSentRef = useRef(onInitialMessageSent);
   onInitialMessageSentRef.current = onInitialMessageSent;
@@ -755,6 +791,14 @@ export function useChat(opts: {
    *  empty initial state on the first render after repos load. */
   const restoredKeyRef = useRef<string | null>(null);
   const flushOutboundRef = useRef<() => void>(() => {});
+  const settleInitialMessage = (clientMsgId?: string) => {
+    if (!initialSendInFlightRef.current) return;
+    if (clientMsgId && initialClientMsgIdRef.current !== clientMsgId) return;
+    initialSendInFlightRef.current = false;
+    initialMessageRef.current = null;
+    initialClientMsgIdRef.current = null;
+    onInitialMessageSentRef.current?.();
+  };
   /** Reconcile optimistic queued bubbles with the server's lane-owned IDs.
    * Older servers omit the field, so only an explicit array is authoritative. */
   const reconcileQueuedState = (rawIds: unknown, serverBusy: boolean) => {
@@ -777,30 +821,72 @@ export function useChat(opts: {
     }
   };
   const flushOutbound = () => {
-    if (!repo) return;
+    if (!repo || !socketReadyRef.current) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const key = conversationKey(cli, repo.path, chatId);
-    const item = shiftOutbound(key);
-    if (!item) return;
+    const item = peekOutbound(key);
+    if (!item || sentOutboundRef.current?.clientMsgId === item.clientMsgId) return;
     pendingSendRef.current = true;
     setError(null);
     markTurnStarted();
     lastMessageAtRef.current = Date.now();
     compactingRef.current = false;
     setStatus('streaming');
-    ws.send(JSON.stringify({
-      type: 'send',
-      chatId,
-      text: item.text,
-      images: payloadImages(item.images),
-      clientMsgId: item.clientMsgId,
-      model: modelRef.current,
-      effort: effortRef.current,
-      ...selectionIntent(),
-    }));
+    // Do not dequeue until the durable _user_echo arrives. A socket can be OPEN
+    // before its asynchronous hello/replay is ready; retaining this item makes
+    // a handshake rejection or disconnect safely retryable.
+    sentOutboundRef.current = { key, clientMsgId: item.clientMsgId };
+    try {
+      ws.send(JSON.stringify({
+        type: 'send',
+        cli,
+        repo: repo.path,
+        chatId,
+        sinceSeq: lastSeqRef.current,
+        text: item.text,
+        images: payloadImages(item.images),
+        clientMsgId: item.clientMsgId,
+        model: modelRef.current,
+        effort: effortRef.current,
+        ...selectionIntent(),
+      }));
+    } catch {
+      sentOutboundRef.current = null;
+      socketReadyRef.current = false;
+      window.setTimeout(() => forceReconnectRef.current(), 0);
+    }
   };
   flushOutboundRef.current = flushOutbound;
+
+  const rejectOutbound = (clientMsgId: string, message: string, serverBusy: boolean): boolean => {
+    if (!repo) return false;
+    const key = conversationKey(cli, repo.path, chatId);
+    const owned = hasOutbound(key, clientMsgId)
+      || sentOutboundRef.current?.clientMsgId === clientMsgId
+      || initialClientMsgIdRef.current === clientMsgId;
+    if (!owned) return false;
+    acknowledgeOutbound(key, clientMsgId);
+    if (sentOutboundRef.current?.clientMsgId === clientMsgId) sentOutboundRef.current = null;
+    settleInitialMessage(clientMsgId);
+    setBlocks((prev) => prev.map((block) => (
+      block.kind === 'user' && block.clientMsgId === clientMsgId
+        ? { ...block, deliveryState: 'failed' as const }
+        : block
+    )));
+    const hasMore = Boolean(peekOutbound(key));
+    pendingSendRef.current = hasMore || queuedSteerRef.current !== null;
+    setError(message);
+    if (serverBusy || hasMore || queuedSteerRef.current !== null) {
+      markTurnStarted();
+      setStatus('streaming');
+      if (!serverBusy && hasMore) window.setTimeout(() => flushOutboundRef.current(), 0);
+    } else {
+      clearTurnStarted();
+      setStatus('ready');
+    }
+    return true;
+  };
 
   useEffect(() => {
     const nextWindow = windowForCli(cli, model, contextWindowTokens);
@@ -817,35 +903,42 @@ export function useChat(opts: {
   }, [cli, model, contextWindowTokens]);
 
   useEffect(() => {
-    if (initialMessage) {
-      initialMessageRef.current = initialMessage;
-      initialSendInFlightRef.current = false;
-
-      // The send-on-`ready` path inside ws.onmessage only fires once per
-      // connection. When the user clicks an EmptyChat suggestion AFTER the
-      // WS already said `ready`, that handler never re-runs, so we'd sit
-      // forever with a pending message and no send. Fire it here instead.
-      const ws = wsRef.current;
-      if (
-        ws &&
-        ws.readyState === WebSocket.OPEN &&
-        (status === 'ready' || status === 'idle')
-      ) {
-        initialSendInFlightRef.current = true;
-        setBlocks((prev) => {
-          const lastUser = [...prev].reverse().find((b) => b.kind === 'user');
-          if (lastUser && lastUser.kind === 'user' && lastUser.text === initialMessage) return prev;
-          return [
-            ...prev,
-            { kind: 'user', id: id(), text: initialMessage, ts: Date.now() },
-          ];
-        });
-        ws.send(JSON.stringify({ type: 'send', chatId, text: initialMessage, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
+    if (!initialMessage) {
+      if (!initialSendInFlightRef.current) {
+        initialMessageRef.current = null;
+        initialClientMsgIdRef.current = null;
       }
-    } else if (!initialSendInFlightRef.current) {
-      initialMessageRef.current = null;
+      return;
     }
-  }, [chatId, initialMessage, status]);
+    if (!repo) return;
+    if (initialMessageRef.current !== initialMessage) {
+      initialMessageRef.current = initialMessage;
+      initialClientMsgIdRef.current = null;
+      initialSendInFlightRef.current = false;
+    }
+    if (initialSendInFlightRef.current) return;
+
+    // Suggestions/threshold initial prompts use the exact same stable-ID,
+    // durable-echo admission path as composer sends. A reconnect can retry the
+    // same ID, never invent a second user turn.
+    const clientMsgId = initialClientMsgIdRef.current
+      ?? `cm-${Date.now().toString(36)}-${nextId++}`;
+    initialClientMsgIdRef.current = clientMsgId;
+    initialSendInFlightRef.current = true;
+    const key = conversationKey(cli, repo.path, chatId);
+    if (!hasOutbound(key, clientMsgId)) {
+      enqueueOutbound(key, { text: initialMessage, clientMsgId });
+    }
+    setBlocks((prev) => {
+      if (prev.some((block) => block.kind === 'user' && block.clientMsgId === clientMsgId)) return prev;
+      return [...prev, { kind: 'user', id: id(), text: initialMessage, clientMsgId, ts: Date.now() }];
+    });
+    pendingSendRef.current = true;
+    markTurnStarted(Date.now(), true);
+    setError(null);
+    setStatus('streaming');
+    flushOutboundRef.current();
+  }, [chatId, cli, initialMessage, repo?.path]);
 
   // Save to localStorage whenever blocks change, so a refresh restores them.
   // CRITICAL: skip until the read-and-restore effect below has run for the
@@ -929,6 +1022,8 @@ export function useChat(opts: {
       // Replay guard lives at effect scope (declared below connect) — see
       // reconcileNow for the second hello path.
       socketReady = false;
+      socketReadyRef.current = false;
+      sentOutboundRef.current = null;
       lastMessageAtRef.current = Date.now();
 
       ws.onopen = () => {
@@ -967,10 +1062,23 @@ export function useChat(opts: {
           // It also carries authoritative queued-steer ownership so a cached
           // bubble cannot remain "will run next" after a lost operation.
           reconcileQueuedState(msg.queuedClientMsgIds, msg.busy === true);
+          // Server busy state is authoritative. If a re-hello or transient
+          // transport error briefly painted this lane idle, restore liveness
+          // instead of leaving the user with no indicator while work continues.
+          if (typeof msg.activeCli === 'string') serverCliRef.current = msg.activeCli as CompanionId;
+          if (socketReady && msg.busy === true) {
+            setError(null);
+            markTurnStarted();
+            setStatus('streaming');
+          }
           return;
         }
         if (msg.type === 'ready') {
           socketReady = true;
+          socketReadyRef.current = true;
+          serverCliRef.current = typeof msg.activeCli === 'string'
+            ? msg.activeCli as CompanionId
+            : cli;
           reconcileQueuedState(msg.queuedClientMsgIds, msg.busy === true);
           // If the server says we attached to a busy session (Sam is mid-turn
           // because the user reconnected from a phone unlock or tab switch),
@@ -978,28 +1086,15 @@ export function useChat(opts: {
           // looking idle while events stream in via replay.
           setError(null);
           reconnectAttemptRef.current = 0;
-          // Send a pending first message (typed straight into the threshold)
-          // the moment the server says ready. Keep it pending until turnStart
-          // confirms the server accepted it, so startup reconnects do not lose
-          // threshold-entered prompts.
-          const pending = initialMessageRef.current;
+          // Every composer and threshold send waits in the same stable-ID FIFO
+          // until this ready boundary, then remains there until durable echo.
           const queued = outboundQueue.get(conversationKey(cli, repo.path, chatId));
-          if (pending && !initialSendInFlightRef.current && ws.readyState === WebSocket.OPEN) {
-            setStatus(msg.busy ? 'streaming' : 'ready');
-            initialSendInFlightRef.current = true;
-            const clientMsgId = `cm-${Date.now().toString(36)}-${nextId++}`;
-            setBlocks((prev) => {
-              const lastUser = [...prev].reverse().find((b) => b.kind === 'user');
-              if (lastUser && lastUser.kind === 'user' && lastUser.text === pending) return prev;
-              return [
-                ...prev,
-                { kind: 'user', id: id(), text: pending, clientMsgId, ts: Date.now() },
-              ];
-            });
-            ws.send(JSON.stringify({ type: 'send', chatId, text: pending, clientMsgId, model: modelRef.current, effort: effortRef.current, ...selectionIntent() }));
-          } else if (queued && queued.length > 0 && ws.readyState === WebSocket.OPEN) {
+          if (queued && queued.length > 0 && ws.readyState === WebSocket.OPEN) {
             setStatus('streaming');
-            flushOutboundRef.current();
+            // If the server is already busy, this may be the very send whose
+            // durable echo has not replayed yet. Wait for echo/turnEnd instead
+            // of submitting the same user message as mid-turn guidance.
+            if (!msg.busy) flushOutboundRef.current();
           } else {
             // A server-owned steer can outlive the socket that accepted it.
             // Keep its visible queued state across reconnect; the durable
@@ -1045,11 +1140,7 @@ export function useChat(opts: {
           if (beginsQueuedSteer || statusRef.current !== 'streaming' || turnStartRef.current === 0) {
             markTurnStarted(Date.now(), true);
           }
-          if (initialSendInFlightRef.current) {
-            initialSendInFlightRef.current = false;
-            initialMessageRef.current = null;
-            onInitialMessageSentRef.current?.();
-          }
+          settleInitialMessage(msg.clientMsgId);
           pendingSendRef.current = false;
           turnStartRef.current = Date.now();
           compactingRef.current = false;
@@ -1070,7 +1161,17 @@ export function useChat(opts: {
           pendingSendRef.current = false;
           const leftover = outboundQueue.get(conversationKey(cli, repo.path, chatId));
           if (leftover && leftover.length > 0) {
-            flushOutboundRef.current();
+            if (serverCliRef.current !== cli) {
+              // A prior engine owned the turn while the picker had already
+              // moved. Re-hello on the selected engine at the natural boundary,
+              // then flush the retained FIFO only after its ready frame.
+              socketReadyRef.current = false;
+              sentOutboundRef.current = null;
+              setStatus('streaming');
+              window.setTimeout(() => forceReconnectRef.current(), 0);
+            } else {
+              flushOutboundRef.current();
+            }
           } else {
             setStatus('ready');
           }
@@ -1129,11 +1230,30 @@ export function useChat(opts: {
           const ev = msg.event;
           const evType = ev?.type;
           if (evType === '_terminal_error') setError(null);
-          if (evType === '_user_echo' && ev?.clientMsgId && queuedSteerRef.current === ev.clientMsgId) {
-            queuedSteerRef.current = null;
-            pendingSendRef.current = false;
+          if (evType === '_user_echo' && typeof ev?.clientMsgId === 'string') {
+            const key = conversationKey(cli, repo.path, chatId);
+            acknowledgeOutbound(key, ev.clientMsgId);
+            if (sentOutboundRef.current?.clientMsgId === ev.clientMsgId) {
+              sentOutboundRef.current = null;
+            }
+            settleInitialMessage(ev.clientMsgId);
+            setError(null);
+            if (queuedSteerRef.current === ev.clientMsgId) {
+              queuedSteerRef.current = null;
+              pendingSendRef.current = false;
+            }
           }
           const innerType = evType === 'stream_event' ? ev?.event?.type : evType;
+          const provesActiveTurn = evType === '_user_echo'
+            || evType === 'assistant'
+            || innerType === 'message_start'
+            || innerType === 'content_block_start'
+            || innerType === 'content_block_delta';
+          if (socketReady && provesActiveTurn) {
+            setError(null);
+            markTurnStarted();
+            setStatus('streaming');
+          }
           if (evType === 'system' && ev?.subtype === 'status' && ev?.status === 'compacting') {
             compactingRef.current = true;
           } else if (
@@ -1222,6 +1342,49 @@ export function useChat(opts: {
             });
           }
         }
+        else if (msg.type === 'sendAdmission') {
+          if (typeof msg.activeCli === 'string') serverCliRef.current = msg.activeCli as CompanionId;
+          if (typeof msg.clientMsgId !== 'string') return;
+          const key = conversationKey(cli, repo.path, chatId);
+          const owned = hasOutbound(key, msg.clientMsgId)
+            || sentOutboundRef.current?.clientMsgId === msg.clientMsgId
+            || initialClientMsgIdRef.current === msg.clientMsgId;
+          if (!owned) return;
+          if (msg.state === 'pending') {
+            pendingSendRef.current = true;
+            setError(null);
+            markTurnStarted();
+            setStatus('streaming');
+            return;
+          }
+          if (msg.state === 'accepted') {
+            acknowledgeOutbound(key, msg.clientMsgId);
+            if (sentOutboundRef.current?.clientMsgId === msg.clientMsgId) {
+              sentOutboundRef.current = null;
+            }
+            settleInitialMessage(msg.clientMsgId);
+            setError(null);
+            const hasMore = Boolean(peekOutbound(key));
+            pendingSendRef.current = hasMore || queuedSteerRef.current !== null;
+            if (msg.busy === true || hasMore || queuedSteerRef.current !== null) {
+              markTurnStarted();
+              setStatus('streaming');
+              if (msg.busy !== true && hasMore) window.setTimeout(() => flushOutboundRef.current(), 0);
+            } else {
+              clearTurnStarted();
+              setStatus('ready');
+            }
+          }
+        }
+        else if (msg.type === 'sendRejected') {
+          if (typeof msg.clientMsgId === 'string') {
+            rejectOutbound(
+              msg.clientMsgId,
+              msg.message || 'The message was not delivered.',
+              msg.busy === true,
+            );
+          }
+        }
         else if (msg.type === 'steerRejected') {
           if (typeof msg.clientMsgId === 'string') {
             setBlocks((prev) => prev.map((block) => (
@@ -1238,12 +1401,41 @@ export function useChat(opts: {
           }
         }
         else if (msg.type === 'error') {
+          const handshakePending = msg.code === 'HANDSHAKE_PENDING'
+            || msg.message === 'no session - send hello first';
+          if (handshakePending) {
+            // Engine switches can leave an OPEN socket a few milliseconds ahead
+            // of its hello/replay. Keep the unacknowledged outbound item, hide
+            // the internal protocol error, and reconnect; ready will retry it.
+            const hadPendingSend = Boolean(sentOutboundRef.current || initialSendInFlightRef.current);
+            sentOutboundRef.current = null;
+            socketReadyRef.current = false;
+            setError(null);
+            if (hadPendingSend) {
+              pendingSendRef.current = true;
+              markTurnStarted();
+              setStatus('streaming');
+              window.setTimeout(() => forceReconnectRef.current(), 50);
+            }
+            return;
+          }
           // Claude Code writes this once per unknown model id per process.
           // xAI/Z.ai ids are off its registry by design; the turn still runs.
           if (typeof msg.message === 'string' && /^\s*\[claude-code:unrecognized_model\]/.test(msg.message)) {
             console.warn('[chat] ignored unrecognized_model warning');
             return;
           }
+          const outboundFailureId = typeof msg.clientMsgId === 'string'
+            ? msg.clientMsgId
+            : sentOutboundRef.current?.clientMsgId;
+          if (
+            outboundFailureId
+            && rejectOutbound(
+              outboundFailureId,
+              msg.message || 'The message was not delivered.',
+              msg.busy === true,
+            )
+          ) return;
           // Surface errors when a turn is in flight OR when the user just
           // sent and we're still waiting on the server to flip to
           // 'streaming' (covers respawn failures after an idle CLI close).
@@ -1273,10 +1465,11 @@ export function useChat(opts: {
       };
       ws.onclose = () => {
         if (!isCurrentConnection()) return;
+        socketReadyRef.current = false;
+        sentOutboundRef.current = null;
         // Only the socket currently owned by wsRef drives reconnects. An
         // orphan closing later must not open yet another connection.
         if (wsRef.current && wsRef.current !== ws) return;
-        if (initialSendInFlightRef.current) initialSendInFlightRef.current = false;
         // Queued guidance is owned by the server after acceptance and survives
         // this transport. Do not falsely mark it canceled when a phone sleeps
         // or the user visits another teammate.
@@ -1344,7 +1537,9 @@ export function useChat(opts: {
       ) return;
       if (live && live.readyState === WebSocket.OPEN) {
         try {
-          socketReady = false; // re-hello replay must not process as live
+          // Ignore replayed control events locally, but keep transport-ready:
+          // the server serializes any send behind this re-hello's completion.
+          socketReady = false;
           live.send(JSON.stringify({
             type: 'hello',
             cli,
@@ -1455,6 +1650,8 @@ export function useChat(opts: {
 
     return () => {
       teardownRef.current = true;
+      socketReadyRef.current = false;
+      sentOutboundRef.current = null;
       queuedSteerRef.current = null;
       pendingSendRef.current = false;
       forceReconnectRef.current = () => {};
@@ -1504,6 +1701,7 @@ export function useChat(opts: {
     const ws = wsRef.current;
     if (
       !inFlight
+      && socketReadyRef.current
       && ws
       && ws.readyState === WebSocket.OPEN
       && (statusRef.current === 'ready' || statusRef.current === 'closed')
@@ -1535,18 +1733,29 @@ export function useChat(opts: {
 
   const stop = () => {
     if (!repo) return;
-    if (queuedSteerRef.current !== null) {
+    const key = conversationKey(cli, repo.path, chatId);
+    const canceled = cancelOutbound(key);
+    const canceledIds = new Set(canceled.map((item) => item.clientMsgId));
+    if (initialClientMsgIdRef.current) canceledIds.add(initialClientMsgIdRef.current);
+    if (canceledIds.size > 0 || queuedSteerRef.current !== null) {
       setBlocks((prev) => prev.map((block) => (
-        block.kind === 'user' && block.deliveryState === 'queued'
+        block.kind === 'user'
+        && (block.deliveryState === 'queued' || Boolean(block.clientMsgId && canceledIds.has(block.clientMsgId)))
           ? { ...block, deliveryState: 'failed' as const }
           : block
       )));
     }
+    sentOutboundRef.current = null;
+    settleInitialMessage(initialClientMsgIdRef.current ?? undefined);
     queuedSteerRef.current = null;
     pendingSendRef.current = false;
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'stop', cli, repo: repo.path, chatId }));
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      clearTurnStarted();
+      setStatus('ready');
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'stop', cli: serverCliRef.current, repo: repo.path, chatId }));
   };
 
   /** Queue guidance through the server's non-destructive steer path. Claude-
@@ -1560,6 +1769,7 @@ export function useChat(opts: {
     const ws = wsRef.current;
     const key = conversationKey(cli, repo.path, chatId);
     const waiting = (outboundQueue.get(key)?.length ?? 0) > 0
+      || !socketReadyRef.current
       || !ws
       || ws.readyState !== WebSocket.OPEN;
     if (waiting) {

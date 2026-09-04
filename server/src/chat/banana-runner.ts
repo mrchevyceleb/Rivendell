@@ -2719,10 +2719,31 @@ export class BananaSession {
         },
       });
     } else if (!opts.hidden) {
-      this.emit({
-        type: 'event',
-        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments: opts.skipAttachments ? [] : await saveChatAttachments(images), clientMsgId: opts.clientMsgId, ts: Date.now() },
-      });
+      let attachments: Array<{ id: string; mediaType: string }>;
+      try {
+        attachments = opts.skipAttachments ? [] : await saveChatAttachments(images);
+      } catch (error) {
+        this.busy = false;
+        throw error;
+      }
+      if (opts.signal?.aborted || this.dead) {
+        this.busy = false;
+        return;
+      }
+      await flushEventLog(this.logKey);
+      if (opts.signal?.aborted || this.dead) {
+        this.busy = false;
+        return;
+      }
+      try {
+        this.emit({
+          type: 'event',
+          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() },
+        });
+      } catch (error) {
+        this.busy = false;
+        throw error;
+      }
       noteUserTurn(this.logKey); // compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
     }
@@ -3871,13 +3892,18 @@ export class BananaSession {
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
+    const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
+    if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
+      throw new Error('could not durably accept the user message');
+    }
     this.eventLog.push(se);
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
     // Don't persist events emitted after shutdown — late child-close output
     // must not repollute a freshly-cleared log (would resurrect a reset thread).
-    if (!this.dead) appendEventLog(this.logKey, { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) });
+    if (!durableUserEcho && !this.dead) appendEventLog(this.logKey, persisted);
     for (const fn of this.listeners) fn(se);
   }
 

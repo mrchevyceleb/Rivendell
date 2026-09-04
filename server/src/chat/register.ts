@@ -56,7 +56,7 @@ type ClientWatch = { type: 'watch'; visible?: boolean };
 // `model` / `effort` ride on send/steer. Banana and Codex apply them per turn.
 // Claude-family lanes (claude/assistant/zai/xai) apply them at spawn; a live
 // steer must reuse that spawn, not the Counsel picker's current id.
-type ClientSend = { type: 'send'; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string } & ClientSelection;
+type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string } & ClientSelection;
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string } & ClientSelection;
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
 type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string } & ClientSelection;
@@ -381,6 +381,69 @@ export async function registerChat(app: express.Express, server: Server): Promis
   // can never remain optimistic forever after a timeout or process restart.
   const pendingSteers = new Map<string, Set<string>>();
   const laneGenKey = (cli: CliKind, repo: string, chatId: string) => `${cli}|${repo}|${chatId}`;
+  type SendAdmission = {
+    state: 'pending' | 'accepted';
+    at: number;
+    cli: CliKind;
+    repo: string;
+    chatId: string;
+    logKey: string;
+    clientMsgId: string;
+  };
+  const sendAdmissions = new Map<string, SendAdmission>();
+  const sendAdmissionKey = (cli: CliKind, repo: string, chatId: string, clientMsgId: string) => (
+    `${laneLogKey(cli, repo, chatId)}\u0000${clientMsgId}`
+  );
+  const userEchoClientMsgId = (raw: unknown): string | null => {
+    let event: any = raw;
+    while (
+      event
+      && typeof event === 'object'
+      && (event.type === 'event' || event.type === 'stream_event')
+      && event.event
+    ) event = event.event;
+    return event?.type === '_user_echo' && typeof event.clientMsgId === 'string'
+      ? event.clientMsgId
+      : null;
+  };
+  const durableSendAccepted = (cli: CliKind, repo: string, chatId: string, clientMsgId: string): boolean => (
+    loadEventLogSync(laneLogKey(cli, repo, chatId)).events.some(
+      (event) => userEchoClientMsgId(event.ev) === clientMsgId,
+    )
+  );
+  const rememberSendAdmission = (
+    key: string,
+    state: SendAdmission['state'],
+    owner: Pick<SendAdmission, 'cli' | 'repo' | 'chatId' | 'logKey' | 'clientMsgId'>,
+  ) => {
+    sendAdmissions.set(key, { ...owner, state, at: Date.now() });
+    if (sendAdmissions.size <= 5_000) return;
+    const cutoff = Date.now() - 24 * 60 * 60_000;
+    for (const [entryKey, admission] of sendAdmissions) {
+      if (admission.state === 'accepted' && admission.at < cutoff) sendAdmissions.delete(entryKey);
+    }
+    // Accepted ids are also durable in `_user_echo`; cap their hot cache by
+    // insertion order while preserving every in-flight pending reservation.
+    for (const [entryKey, admission] of sendAdmissions) {
+      if (sendAdmissions.size <= 5_000) break;
+      if (admission.state === 'accepted') sendAdmissions.delete(entryKey);
+    }
+  };
+  const activeSessionForLogKey = (logKey: string) => (
+    [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()]
+      .find((session) => (
+        session.busy
+        && laneLogKey(session.cli, session.cwd, session.chatId) === logKey
+      ))
+      ?? null
+  );
+  const pendingAdmissionForLogKey = (logKey: string): SendAdmission | null => (
+    [...sendAdmissions.values()].find((admission) => (
+      admission.logKey === logKey
+      && admission.state === 'pending'
+      && Date.now() - admission.at <= 2 * 60_000
+    )) ?? null
+  );
   const addPendingSteer = (key: string, clientMsgId: string | undefined) => {
     if (!clientMsgId) return;
     const ids = pendingSteers.get(key) ?? new Set<string>();
@@ -479,6 +542,26 @@ export async function registerChat(app: express.Express, server: Server): Promis
     // Duplicate-hello suppression (see HELLO_DEDUPE_MS).
     let lastHelloSig = '';
     let lastHelloAt = 0;
+    // WebSocket OPEN is not the protocol boundary. A send can arrive while an
+    // asynchronous hello is still replaying/binding; hold it until `ready` has
+    // been emitted so it cannot observe an empty or stale lane.
+    let helloSeen = false;
+    let settleHelloBarrier: () => void = () => {};
+    let helloBarrier: Promise<void>;
+    const resetHelloBarrier = () => {
+      helloBarrier = new Promise<void>((resolve) => { settleHelloBarrier = resolve; });
+    };
+    resetHelloBarrier();
+    const waitForHelloBarrier = async (timeoutMs = 15_000): Promise<boolean> => {
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref?.();
+      });
+      const ready = await Promise.race([helloBarrier.then(() => true as const), timedOut]);
+      if (timer) clearTimeout(timer);
+      return ready;
+    };
     // Idle CLI chatter is logged, not surfaced. A wedged lane can emit hundreds
     // of identical lines, so keep the first few and then sample.
     let swallowedIdle = 0;
@@ -504,6 +587,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
     const safeSend = (msg: object) => {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
+    const sendHandshakePending = (clientMsgId?: string) => {
+      safeSend({
+        type: 'error',
+        code: 'HANDSHAKE_PENDING',
+        retryable: true,
+        clientMsgId,
+        message: 'Connecting to this agent. Your message will retry when the line is ready.',
+      });
+    };
 
     const keepalive = setInterval(() => {
       if (ws.readyState !== ws.OPEN) return;
@@ -511,7 +603,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       const signature = queuedClientMsgIds.join('\u0000');
       const queueChanged = signature !== lastQueuedSignature;
       if (!busy && !queueChanged) return;
-      safeSend({ type: 'working', busy, queuedClientMsgIds });
+      safeSend({ type: 'working', busy, activeCli: cliKind, queuedClientMsgIds });
       lastQueuedSignature = signature;
     }, TURN_KEEPALIVE_MS);
     keepalive.unref();
@@ -526,6 +618,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
     const dispatch = (se: DispatchSeqEvent) => {
       const sev = se.ev;
       if (sev.type === 'event') {
+        const admittedClientMsgId = userEchoClientMsgId(sev.event);
+        if (admittedClientMsgId && cliKind && repoPath) {
+          const logKey = laneLogKey(cliKind, repoPath, chatId);
+          rememberSendAdmission(
+            sendAdmissionKey(cliKind, repoPath, chatId, admittedClientMsgId),
+            'accepted',
+            { cli: cliKind, repo: repoPath, chatId, logKey, clientMsgId: admittedClientMsgId },
+          );
+        }
         safeSend({ type: 'stream', event: sev.event, seq: se.seq });
       } else if (sev.type === 'turnStart') {
         busy = true;
@@ -736,8 +837,23 @@ export async function registerChat(app: express.Express, server: Server): Promis
         return;
       }
 
+      let finishHello: (() => void) | null = null;
+      let reservedSendAdmission: { key: string; clientMsgId: string } | null = null;
+      let unsubscribeSendAdmission: (() => void) | null = null;
       try {
         if (msg.type === 'hello') {
+          // Serialize only hello/replay operations. A second focus/pageshow
+          // hello must not race the first subscription bind, but Stop/steer
+          // remain independent and can still interrupt long work immediately.
+          const previousHello = helloBarrier;
+          if (helloSeen) {
+            resetHelloBarrier();
+            finishHello = settleHelloBarrier;
+            await previousHello;
+          } else {
+            helloSeen = true;
+            finishHello = settleHelloBarrier;
+          }
           cliKind = msg.cli;
           repoPath = msg.repo;
           chatId = normalizeChatId(msg.chatId);
@@ -750,7 +866,36 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           const helloSig = `${msg.cli}|${msg.repo}|${chatId}|${sinceSeq}`;
           const helloAt = Date.now();
-          if (helloSig === lastHelloSig && helloAt - lastHelloAt < HELLO_DEDUPE_MS) return;
+          if (helloSig === lastHelloSig && helloAt - lastHelloAt < HELLO_DEDUPE_MS) {
+            lastHelloAt = helloAt;
+            const current = sessionPromise ? await sessionPromise.catch(() => null) : null;
+            const sessionBusy = current
+              ? (current as { isBusy?: () => boolean }).isBusy?.() === true
+              : busy;
+            const latestSeq = current
+              ? current.latestSeq()
+              : loadEventLogSync(laneLogKey(msg.cli, msg.repo, chatId)).events.reduce(
+                  (max, event) => Math.max(max, event.seq),
+                  0,
+                );
+            const activeCli = sessionCli(current) ?? msg.cli;
+            cliKind = activeCli;
+            repoPath = msg.repo;
+            busy = sessionBusy;
+            const queuedClientMsgIds = pendingSteerIds(activeCli, msg.repo, chatId);
+            lastQueuedSignature = queuedClientMsgIds.join('\u0000');
+            safeSend({
+              type: 'ready',
+              cli: msg.cli,
+              activeCli,
+              repo: msg.repo,
+              chatId,
+              latestSeq,
+              busy: sessionBusy,
+              queuedClientMsgIds,
+            });
+            return;
+          }
           lastHelloSig = helloSig;
           lastHelloAt = helloAt;
           console.log(`[chat ws#${wsId}] hello cli=${msg.cli} repo=${msg.repo} chatId=${chatId} sinceSeq=${sinceSeq}`);
@@ -767,7 +912,17 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // A hello is a passive attach and must never start an engine process.
           // Warm lane -> attach to it. Cold lane -> serve the durable log and
           // wait; the first real turn spawns lazily in the `send` handler.
-          const warm = peekClaudeSession({ cli: msg.cli, repoPath: msg.repo, chatId });
+          const requestedLogKey = laneLogKey(msg.cli, msg.repo, chatId);
+          const activeThreadOwner = activeSessionForLogKey(requestedLogKey);
+          const pendingThreadOwner = pendingAdmissionForLogKey(requestedLogKey);
+          const threadOwner = activeThreadOwner ?? pendingThreadOwner;
+          const warm = threadOwner
+            ? await getOrCreateSession({
+                cli: threadOwner.cli,
+                repoPath: 'repo' in threadOwner ? threadOwner.repo : threadOwner.cwd,
+                chatId,
+              })
+            : peekClaudeSession({ cli: msg.cli, repoPath: msg.repo, chatId });
           if (!warm && isClaudeFamilyCli(msg.cli)) {
             // Drop any session this socket was already bound to. Without it a
             // socket that re-helloes onto a different, cold lane keeps the old
@@ -785,6 +940,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({
               type: 'ready',
               cli: msg.cli,
+              activeCli: msg.cli,
               repo: msg.repo,
               chatId,
               latestSeq: coldLatestSeq,
@@ -801,14 +957,19 @@ export async function registerChat(app: express.Express, server: Server): Promis
           );
           lastTurnModel = msg.model;
           lastTurnEffort = msg.effort;
-          const sessionBusy = (session as any).isBusy?.() === true;
+          const activeCli = sessionCli(session) ?? msg.cli;
+          cliKind = activeCli;
+          repoPath = msg.repo;
+          const sessionBusy = (session as any).isBusy?.() === true
+            || Boolean(pendingAdmissionForLogKey(requestedLogKey));
           busy = sessionBusy;
           console.log(`[chat ws#${wsId}] session ready key=${session.key} latestSeq=${session.latestSeq()} busy=${sessionBusy}`);
-          const queuedClientMsgIds = pendingSteerIds(msg.cli, msg.repo, chatId);
+          const queuedClientMsgIds = pendingSteerIds(activeCli, msg.repo, chatId);
           lastQueuedSignature = queuedClientMsgIds.join('\u0000');
           safeSend({
             type: 'ready',
             cli: msg.cli,
+            activeCli,
             repo: msg.repo,
             chatId,
             latestSeq: session.latestSeq(),
@@ -839,13 +1000,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
         if (msg.type === 'stop') {
           turnGeneration += 1;
-          chatId = normalizeChatId(msg.chatId);
-          const stopCli = cliKind ?? msg.cli;
-          const stopRepo = repoPath ?? msg.repo;
-          console.warn(`[chat ws#${wsId}] stop from ${peer} cli=${stopCli} repo=${stopRepo} chatId=${chatId}`);
-          bumpLaneGen(stopCli, stopRepo, chatId);
+          const stopChatId = normalizeChatId(msg.chatId);
+          // Stop frames carry their own authoritative lane. During an
+          // overlapping model-switch hello, mutable socket state may still
+          // describe the prior engine and must never redirect the interrupt.
+          const stopCli = msg.cli;
+          const stopRepo = msg.repo;
+          console.warn(`[chat ws#${wsId}] stop from ${peer} cli=${stopCli} repo=${stopRepo} chatId=${stopChatId}`);
+          bumpLaneGen(stopCli, stopRepo, stopChatId);
           detachCurrentSession();
-          await interruptSession({ cli: stopCli, repoPath: stopRepo, chatId });
+          await interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId });
           safeSend({ type: 'turnEnd' });
           return;
         }
@@ -1047,22 +1211,80 @@ export async function registerChat(app: express.Express, server: Server): Promis
         }
 
         if (msg.type === 'send') {
+          if (!await waitForHelloBarrier()) {
+            sendHandshakePending(msg.clientMsgId);
+            return;
+          }
           if (chatQuiesced) {
             safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
             safeSend({ type: 'turnEnd' });
             return;
           }
           const requestedChatId = normalizeChatId(msg.chatId ?? chatId);
-          if (requestedChatId !== chatId) {
-            safeSend({ type: 'error', message: 'chat tab changed - reconnect before sending' });
-            return;
-          }
-          if (!cliKind || !repoPath) {
-            safeSend({ type: 'error', message: 'no session - send hello first' });
+          const hintedLaneMismatch = (msg.cli !== undefined && msg.cli !== cliKind)
+            || (msg.repo !== undefined && msg.repo !== repoPath);
+          if (requestedChatId !== chatId || hintedLaneMismatch || !cliKind || !repoPath) {
+            sendHandshakePending(msg.clientMsgId);
             return;
           }
           const sendCli = cliKind;
           const sendRepo = repoPath;
+          const logKey = laneLogKey(sendCli, sendRepo, chatId);
+          const owner = msg.clientMsgId
+            ? { cli: sendCli, repo: sendRepo, chatId, logKey, clientMsgId: msg.clientMsgId }
+            : null;
+          const admissionKey = owner
+            ? sendAdmissionKey(sendCli, sendRepo, chatId, owner.clientMsgId)
+            : null;
+          let admission = admissionKey ? sendAdmissions.get(admissionKey) : undefined;
+          if (owner && admissionKey && !admission && durableSendAccepted(sendCli, sendRepo, chatId, owner.clientMsgId)) {
+            rememberSendAdmission(admissionKey, 'accepted', owner);
+            admission = sendAdmissions.get(admissionKey);
+          }
+          let admissionOwner = admission ? activeSessionForLogKey(admission.logKey) : null;
+          if (
+            admission?.state === 'pending'
+            && !admissionOwner
+            && Date.now() - admission.at > 2 * 60_000
+          ) {
+            // The original owner vanished before durable admission. A short
+            // grace protects the normal reserve→spawn/preparation window;
+            // only a genuinely stale reservation may be retried.
+            if (admissionKey) sendAdmissions.delete(admissionKey);
+            admission = undefined;
+          }
+          if (admission) {
+            safeSend({
+              type: 'sendAdmission',
+              state: admission.state,
+              clientMsgId: admission.clientMsgId,
+              busy: admission.state === 'pending' || Boolean(admissionOwner) || busy,
+              // A completed historical admission must not replace ownership of
+              // the currently selected/bound engine.
+              activeCli: admissionOwner?.cli ?? sendCli,
+            });
+            return;
+          }
+          const competingAdmission = [...sendAdmissions.values()].find((entry) => (
+            entry.logKey === logKey
+            && entry.state === 'pending'
+            && Date.now() - entry.at <= 2 * 60_000
+          ));
+          const activeThreadOwner = activeSessionForLogKey(logKey);
+          if (competingAdmission || activeThreadOwner) {
+            safeSend({
+              type: 'sendRejected',
+              clientMsgId: msg.clientMsgId,
+              message: 'This agent is already working. The message was not delivered; send it again when the current turn completes.',
+              busy: true,
+              activeCli: activeThreadOwner?.cli ?? competingAdmission?.cli ?? sendCli,
+            });
+            return;
+          }
+          if (owner && admissionKey) {
+            rememberSendAdmission(admissionKey, 'pending', owner);
+            reservedSendAdmission = { key: admissionKey, clientMsgId: owner.clientMsgId };
+          }
           const sendKey = laneGenKey(sendCli, sendRepo, chatId);
           const sendAborter = new AbortController();
           const sendLaneGeneration = bumpLaneGen(sendCli, sendRepo, chatId);
@@ -1104,7 +1326,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
           }
           if (!sessionPromise) {
-            safeSend({ type: 'error', message: 'no session - send hello first' });
+            sendHandshakePending(msg.clientMsgId);
             return;
           }
           if (busy && cliKind === 'codex') {
@@ -1181,6 +1403,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
+          if (reservedSendAdmission) {
+            const admission = reservedSendAdmission;
+            unsubscribeSendAdmission = session.subscribe((event) => {
+              if (userEchoClientMsgId(event.ev) !== admission.clientMsgId) return;
+              const current = sendAdmissions.get(admission.key);
+              if (!current) return;
+              rememberSendAdmission(admission.key, 'accepted', current);
+            }, session.latestSeq(), false);
+          }
           await (session as any).send(msg.text, msg.images, {
             model: msg.model,
             effort: msg.effort,
@@ -1206,12 +1437,32 @@ export async function registerChat(app: express.Express, server: Server): Promis
             type: 'error',
             code: error.code,
             retryable: true,
+            clientMsgId: msg.type === 'send' ? msg.clientMsgId : undefined,
             message: error.message,
           });
         } else {
-          safeSend({ type: 'error', message: (error as Error).message });
+          safeSend({
+            type: 'error',
+            clientMsgId: msg.type === 'send' ? msg.clientMsgId : undefined,
+            message: (error as Error).message,
+          });
         }
         safeSend({ type: 'turnEnd' });
+      } finally {
+        finishHello?.();
+        unsubscribeSendAdmission?.();
+        if (
+          reservedSendAdmission
+          && sendAdmissions.get(reservedSendAdmission.key)?.state === 'pending'
+        ) {
+          sendAdmissions.delete(reservedSendAdmission.key);
+          safeSend({
+            type: 'sendRejected',
+            clientMsgId: reservedSendAdmission.clientMsgId,
+            message: 'The message was not admitted by the agent. Please send it again.',
+            busy,
+          });
+        }
       }
     });
 

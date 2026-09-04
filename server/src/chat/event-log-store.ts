@@ -381,10 +381,10 @@ export function flushAllEventChains(): Promise<void> {
   return Promise.all([...writeChains.values()]).then(() => undefined);
 }
 
-/** Synchronous append for shutdown tombstones: the queued async write path
- *  races the dying process's exit, so restart markers write straight to disk
- *  synchronously. No write-chain dedupe — written once at teardown by the
- *  markBusy*LanesRestarting helpers only. */
+/** Synchronous append for hard durability boundaries. Shutdown tombstones
+ * cannot race process exit, and `_user_echo` admission records must hit disk
+ * before listeners acknowledge or the model receives the prompt. Callers flush
+ * the per-key async chain first when the process is staying alive. */
 export function appendEventLogSync(key: string, persisted: PersistedEvent): boolean {
   observeNextSeq(key, persisted.seq + 1);
   if (isPlumbingEvent(persisted.ev)) return true;

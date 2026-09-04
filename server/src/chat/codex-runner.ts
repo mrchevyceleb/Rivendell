@@ -465,6 +465,10 @@ export class CodexSession {
     const fallbackHistory = this.eventLog.slice();
     // Echo for reconnect replay (codex's events don't re-emit the user prompt).
     // peerFrom marks a team-bus delivery: sender-tagged bubble, no compaction tick.
+    if (opts.signal?.aborted) {
+      this.busy = false;
+      return;
+    }
     if (opts.peerFrom && !opts.suppressEcho) {
       this.emit({ type: 'turnStart' });
       this.emit({
@@ -479,10 +483,31 @@ export class CodexSession {
         },
       });
     } else if (!opts.suppressEcho) {
-      this.emit({
-        type: 'event',
-        event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments: opts.skipAttachments ? [] : await saveChatAttachments(images), clientMsgId: opts.clientMsgId, ts: Date.now() },
-      });
+      let attachments: Array<{ id: string; mediaType: string }>;
+      try {
+        attachments = opts.skipAttachments ? [] : await saveChatAttachments(images);
+      } catch (error) {
+        this.busy = false;
+        throw error;
+      }
+      if (opts.signal?.aborted) {
+        this.busy = false;
+        return;
+      }
+      await flushEventLog(this.logKey);
+      if (opts.signal?.aborted) {
+        this.busy = false;
+        return;
+      }
+      try {
+        this.emit({
+          type: 'event',
+          event: { type: '_user_echo', text, imageCount: images?.length ?? 0, attachments, clientMsgId: opts.clientMsgId, ts: Date.now() },
+        });
+      } catch (error) {
+        this.busy = false;
+        throw error;
+      }
       noteUserTurn(this.logKey); // compaction cadence (monotonic)
       noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
     }
@@ -904,11 +929,16 @@ export class CodexSession {
     if (isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const persisted = { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) };
+    const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
+    if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
+      throw new Error('could not durably accept the user message');
+    }
     this.eventLog.push(se);
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
-    appendEventLog(this.logKey, { ...se, eng: this.cli, ...(this.turnModel ? { mdl: this.turnModel } : {}) });
+    if (!durableUserEcho) appendEventLog(this.logKey, persisted);
     for (const fn of this.listeners) fn(se);
   }
 

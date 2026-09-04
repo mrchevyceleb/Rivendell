@@ -911,6 +911,14 @@ class ClaudeSession {
         },
       });
     } else {
+      await flushEventLog(this.logKey);
+      if (sendAborted()) {
+        abandonUnsentTurn();
+        return;
+      }
+      if (!startsNewTurn && this.activeToolIds.size === 0) {
+        throw new Error('the native steering window closed before delivery');
+      }
       this.emit({
         type: 'event',
         event: {
@@ -1299,13 +1307,20 @@ class ClaudeSession {
     if (this.disposed || isPlumbingEvent(msg)) return;
     this.lastActivityAtMs = Date.now();
     const se: SeqEvent = { seq: this.reserveSeq(), ev: msg };
+    const persisted = { ...se, eng: this.cli, mdl: this.spawnModel };
+    const durableUserEcho = msg.type === 'event' && msg.event?.type === '_user_echo';
+    // A user echo is the admission commit. Persist it synchronously before any
+    // listener can dequeue/replay the prompt or the model can receive it.
+    if (durableUserEcho && !appendEventLogSync(this.logKey, persisted)) {
+      throw new Error('could not durably accept the user message');
+    }
     this.eventLog.push(se);
     if (this.eventLog.length > EVENT_BUFFER_SIZE) {
       this.eventLog.splice(0, this.eventLog.length - EVENT_BUFFER_SIZE);
     }
     // Don't persist events emitted after an intentional shutdown — they're the
     // dying child's trailing output and would repollute a freshly-cleared log.
-    if (!this.disposed) appendEventLog(this.logKey, { ...se, eng: this.cli, mdl: this.spawnModel });
+    if (!durableUserEcho && !this.disposed) appendEventLog(this.logKey, persisted);
     for (const fn of this.listeners) fn(se);
   }
 
