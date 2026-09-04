@@ -28,6 +28,7 @@ jobs:
           npm ci --prefix jarvis-agent
           npm audit --prefix jarvis-agent --audit-level=high
           npm run typecheck --prefix jarvis-agent
+          npm test --prefix jarvis-agent
 
   secrets:
     runs-on: ubuntu-latest

@@ -17,6 +17,7 @@ export type JarvisAgentMessage =
 /** client -> agent */
 export type JarvisClientMessage =
   | { type: 'settings'; cli?: string; model?: string; effort?: string }
+  | { type: 'hangup' }
   | { type: 'dismiss' };
 
 export function encodeMessage(msg: JarvisClientMessage): Uint8Array<ArrayBuffer> {

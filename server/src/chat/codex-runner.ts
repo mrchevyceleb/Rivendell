@@ -21,6 +21,7 @@ import { codexImageArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
+import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 
 /**
  * Which codex binary to run.
@@ -166,6 +167,7 @@ type CodexSendOptions = {
   emptyRetryDepth?: number;
   suppressEcho?: boolean;
   seedOverride?: string;
+  voiceMode?: boolean;
 };
 type CodexSessionOptions = {
   recoverContextOnNextTurn?: boolean;
@@ -577,7 +579,7 @@ export class CodexSession {
       peerFrom: opts.peerFrom,
       peerFromRole: opts.peerFromRole,
     });
-    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${text}`;
+    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // Selection was validated before the session became busy. effort is
     // interpolated into this config fragment, so only allow-listed strings
     // can reach the CLI.

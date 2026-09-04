@@ -56,10 +56,10 @@ type ClientWatch = { type: 'watch'; visible?: boolean };
 // `model` / `effort` ride on send/steer. Banana and Codex apply them per turn.
 // Claude-family lanes (claude/assistant/zai/xai) apply them at spawn; a live
 // steer must reuse that spawn, not the Counsel picker's current id.
-type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string } & ClientSelection;
+type ClientSend = { type: 'send'; cli?: CliKind; repo?: string; chatId?: string; sinceSeq?: number; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
 type ClientFresh = { type: 'freshStart'; cli: CliKind; repo: string; chatId?: string } & ClientSelection;
 type ClientStop = { type: 'stop'; cli: CliKind; repo: string; chatId?: string };
-type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string } & ClientSelection;
+type ClientSteer = { type: 'steer'; cli: CliKind; repo: string; chatId?: string; text: string; images?: Array<{ mediaType: string; base64: string }>; clientMsgId?: string; voice?: boolean } & ClientSelection;
 type ClientMsg = ClientHello | ClientWatch | ClientSend | ClientFresh | ClientStop | ClientSteer;
 type ResumeWatchableSession = AnySession & {
   startedWithResume?: () => boolean;
@@ -786,6 +786,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       model?: string,
       effort?: string,
       clientMsgId?: string,
+      voiceMode?: boolean,
     ): Promise<boolean> => {
       if (!cliKind || !repoPath || cliKind === 'codex') return false;
       const watchable = session as ResumeWatchableSession;
@@ -805,7 +806,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
         // fire-and-forget, so guard the promise or a rejection escapes the outer
         // try/catch as an unhandled rejection.
         if ('send' in retrySession) {
-          void Promise.resolve((retrySession as any).send(text, images, { model, clientMsgId, skipAttachments: true })).catch((e: Error) => {
+          void Promise.resolve((retrySession as any).send(text, images, { model, clientMsgId, voiceMode, skipAttachments: true })).catch((e: Error) => {
             // Don't just log: a rejected retry-send would otherwise strand the
             // client with busy=true and no turnEnd. Clean up the turn like the
             // synchronous catch below.
@@ -1193,6 +1194,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               effort: steerEffort,
               clientMsgId: msg.clientMsgId,
               allowNativeHumanSteer: nativeClaudeSteer,
+              voiceMode: msg.voice === true,
               signal: steerAborter.signal,
             });
           } finally {
@@ -1416,6 +1418,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             model: msg.model,
             effort: msg.effort,
             clientMsgId: msg.clientMsgId,
+            voiceMode: msg.voice === true,
             signal: sendAborter.signal,
           });
           if (sendCanceled()) return;
@@ -1424,7 +1427,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           lastTurnModel = msg.model;
           lastTurnEffort = msg.effort;
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort, msg.clientMsgId);
+          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort, msg.clientMsgId, msg.voice === true);
           } finally {
             releaseSend();
           }

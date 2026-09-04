@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
+import { listAgents } from '../chat/agents.ts';
+import { ELROND_WORKSPACE_PATH } from '../config.ts';
+import { discoverRepos } from '../chat/repos.ts';
 
-// Jarvis voice sessions: mints LiveKit Cloud room tokens with the jarvis-agent
-// auto-dispatched via token RoomConfiguration, and serves client bootstrap
-// config (Picovoice wake-word key + LiveKit URL) so those rotate without a
-// frontend rebuild. Same trust model as every other /api/* route: tailnet-only,
-// no auth.
+// LiveKit voice sessions. Legacy generic Jarvis summons still use their stable
+// device thread; named teammate calls resolve agentId server-side to that
+// teammate's real bot-* thread and run through the exact Hall chat pipeline.
+// Same trust model as every other /api/* route: tailnet-only, no app auth.
 
 const LIVEKIT_URL = process.env.LIVEKIT_URL ?? '';
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY ?? '';
@@ -40,17 +42,46 @@ jarvisRouter.get('/token', async (req, res) => {
   try {
     const identity = sanitizeIdentity(req.query.identity);
     const face = req.query.face === '1' || req.query.face === 'true';
-    const cli = typeof req.query.cli === 'string' && req.query.cli.trim() ? req.query.cli.trim() : 'xai';
+    const requestedAgentId = typeof req.query.agentId === 'string' ? req.query.agentId.trim() : '';
+    const agent = requestedAgentId
+      ? listAgents().find((candidate) => candidate.id === requestedAgentId)
+      : undefined;
+    if (requestedAgentId && !agent) {
+      res.status(404).json({ error: 'voice teammate not found' });
+      return;
+    }
+    const cli = typeof req.query.cli === 'string' && req.query.cli.trim()
+      ? req.query.cli.trim()
+      : agent?.engine || 'xai';
     const model = typeof req.query.model === 'string' && req.query.model.trim() ? req.query.model.trim() : undefined;
     const effort = typeof req.query.effort === 'string' && req.query.effort.trim() ? req.query.effort.trim() : undefined;
+    const repo = typeof req.query.repo === 'string' && req.query.repo.trim()
+      ? req.query.repo.trim()
+      : ELROND_WORKSPACE_PATH;
+    if (agent && repo !== ELROND_WORKSPACE_PATH) {
+      const allowed = (await discoverRepos()).some((candidate) => candidate.path === repo);
+      if (!allowed) {
+        res.status(400).json({ error: 'voice workspace is not a registered repository' });
+        return;
+      }
+    }
 
-    // Room is unique per conversation, but the Hall chatId is STABLE per
-    // device: the spawned claude CLI (30-70s MCP cold start) stays warm across
-    // summons, so only the first conversation in a while pays the boot cost.
-    // The `jarvis-` prefix still triggers voice mode (normalizeChatId-safe).
-    const room = `jarvis-${identity}-${Date.now().toString(36)}`;
-    const chatId = `jarvis-${identity}`;
-    const metadata = JSON.stringify({ face, cli, model, effort, chatId });
+    // Each audio room is ephemeral. Its Hall chatId is not: named calls use the
+    // exact agent home, while deprecated generic summons keep a device thread.
+    const room = `${agent ? 'voice' : 'jarvis'}-${identity}-${Date.now().toString(36)}`;
+    const chatId = agent?.home ?? `jarvis-${identity}`;
+    const metadata = JSON.stringify({
+      face,
+      cli,
+      model,
+      effort,
+      chatId,
+      repo,
+      threadVoice: Boolean(agent),
+      agentId: agent?.id,
+      agentName: agent?.name,
+      voice: agent?.voice,
+    });
 
     const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, { identity, ttl: TOKEN_TTL });
     at.addGrant({

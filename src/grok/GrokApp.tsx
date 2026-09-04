@@ -21,6 +21,7 @@ import { useRepos } from '../chat/hooks/useRepos';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
 import type { CompanionId } from '../chat/data/types';
+import type { JarvisEngineSettings } from '../jarvis/protocol';
 import { BotRail } from './GrokSidebar';
 import { GrokChat } from './GrokChat';
 import { BotPanel, type ChatMeta } from './BotPanel';
@@ -98,7 +99,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   );
   const [editorOpen, setEditorOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
-  const [callAgent, setCallAgent] = useState<Agent | null>(null);
+  const [callTarget, setCallTarget] = useState<{ agent: Agent; settings: JarvisEngineSettings; repoPath: string } | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -115,7 +116,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   // Esc also collapses the desktop rail (quick focus-the-chat shortcut).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !editorOpen && !callAgent) {
+      if (e.key === 'Escape' && !editorOpen && !callTarget) {
         // The drawer's own Escape handler owns mobile navigation. Letting this
         // desktop shortcut run too persists railCollapsed=true underneath it.
         if (isMobile || drawerOpen) return;
@@ -126,7 +127,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editorOpen, callAgent, isMobile, drawerOpen]);
+  }, [editorOpen, callTarget, isMobile, drawerOpen]);
   useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
 
   // Land on the first agent (Chief of Staff) once the list loads, if the
@@ -271,7 +272,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               paneOpen={paneOpen}
               onTogglePane={() => setPaneOpen((o) => !o)}
               onOpenAgentEditor={() => { setEditTarget(agent); setEditorOpen(true); }}
-              onVoice={() => (agent ? setCallAgent(agent) : jarvis.summon())}
+              onVoice={(settings) => (agent && chatRepo ? setCallTarget({ agent, settings, repoPath: chatRepo.path }) : jarvis.summon())}
               voiceActive={jarvis.wakeActive}
               theme={theme}
               onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
@@ -297,11 +298,12 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           />
         ) : null}
 
-        {callAgent ? (
+        {callTarget ? (
           <CallOverlay
-            agent={callAgent}
-            initialVoice={callAgent.voice ?? 'ara'}
-            onClose={() => setCallAgent(null)}
+            agent={callTarget.agent}
+            settings={callTarget.settings}
+            repoPath={callTarget.repoPath}
+            onClose={() => setCallTarget(null)}
           />
         ) : null}
 

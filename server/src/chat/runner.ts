@@ -22,7 +22,7 @@ import { engineDefault } from '../lib/engineConfig.ts';
 import { adaptImagesForTextModel } from './vision-adapter.ts';
 import { ensureXaiProxy, xaiProxyBaseUrl, xaiProxySecret } from './xai-proxy.ts';
 import { getXaiOauthToken, getXaiOauthTokenSync, hasXaiOauthToken } from '../routes/xai-oauth.ts';
-import { isVoiceChatId, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
+import { isVoiceChatId, THREAD_VOICE_STYLE_ADDENDUM, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isThreadWatched } from './threadWatch.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
@@ -777,7 +777,7 @@ class ClaudeSession {
   /** Send a user message into the running CLI as one turn. `peerFrom` marks
    *  agent-to-agent deliveries (team bus): they echo as a sender-tagged
    *  peer_message instead of _user_echo and don't tick compaction. */
-  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean } = {}): Promise<void> {
+  async send(text: string, images?: Array<{ mediaType: string; base64: string }>, opts: { peerFrom?: string; peerFromRole?: string; peerText?: string; peerDeliveryId?: string; allowNativePeerSteer?: boolean; allowNativeHumanSteer?: boolean; signal?: AbortSignal; clientMsgId?: string; skipAttachments?: boolean; voiceMode?: boolean } = {}): Promise<void> {
     // Every caller (human, teammate, routine) shares this admission barrier.
     // A read-only MCP control warmup can never reject or absorb a real message.
     if (this.warmupPromise) await this.warmupPromise.catch(() => {});
@@ -963,6 +963,7 @@ class ClaudeSession {
           'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” Rivendell already renders basic liveness.',
           '</rivendell-continuation>',
           ...(conversationGuidance ? ['', conversationGuidance] : []),
+          ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []),
           '',
           commandText,
         ].join('\n')

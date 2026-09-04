@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/agent.ts start",
     "dev": "tsx src/agent.ts dev",
+    "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

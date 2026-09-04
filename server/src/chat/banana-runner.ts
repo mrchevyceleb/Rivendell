@@ -28,6 +28,7 @@ import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { ensureLocalLlmProxy, shutdownLocalLlmProxy } from './local-llm-proxy.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
+import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -78,6 +79,7 @@ type BananaSendOptions = {
   /** Deprecated alias kept so an in-flight hidden continuation from older code
    *  cannot reset the retry guard during a hot reload. */
   blockedSearchContinueDepth?: number;
+  voiceMode?: boolean;
 };
 type GmailSideEffectAction = 'gmail_send' | 'gmail_reply';
 type ApprovedGmailDraft = {
@@ -159,6 +161,8 @@ type BananaTurnState = {
   currentMessageHiddenCompactionSummary: boolean;
   /** Model id to reuse if an internal compact summary consumes the turn. */
   model?: string;
+  /** Preserve spoken-output rules across hidden internal continuations. */
+  voiceMode: boolean;
   /** Prevent runaway auto-continue loops if a model keeps compacting. */
   autoContinueDepth: number;
   /** Prevent retry loops if a model keeps launching the same blocked side effect. */
@@ -2907,6 +2911,7 @@ export class BananaSession {
       currentMessageVisibleContent: false,
       currentMessageHiddenCompactionSummary: false,
       model: opts.model,
+      voiceMode: opts.voiceMode === true,
       autoContinueDepth: opts.autoContinueDepth ?? 0,
       blockedSideEffectContinueDepth: opts.blockedSideEffectContinueDepth ?? opts.blockedSearchContinueDepth ?? 0,
       gmailApprovedDraft,
@@ -2968,7 +2973,7 @@ export class BananaSession {
       peerFromRole: opts.peerFromRole,
       hidden: opts.hidden,
     });
-    const effectiveText = `${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${commandExpandedText}`;
+    const effectiveText = `${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({
@@ -3683,7 +3688,7 @@ export class BananaSession {
     void this.send(
       'Continue the previous task from where you left off. The last assistant message was an internal context summary; do not repeat it or output any <summary> block.',
       undefined,
-      { model, hidden: true, autoContinueDepth },
+      { model, hidden: true, voiceMode: state.voiceMode, autoContinueDepth },
     ).catch((err) => {
       if (!this.dead) this.failTurn(`banana hidden continue failed: ${(err as Error).message}`);
     });
@@ -3701,7 +3706,7 @@ export class BananaSession {
         'Show the user the full email draft with From, To, Subject, and Body, then wait for explicit approval in a later message before sending.',
       ].join(' '),
       undefined,
-      { model, hidden: true, blockedSideEffectContinueDepth },
+      { model, hidden: true, voiceMode: state.voiceMode, blockedSideEffectContinueDepth },
     ).catch((err) => {
       if (!this.dead) this.failTurn(`banana blocked-side-effect continue failed: ${(err as Error).message}`);
     });

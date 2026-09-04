@@ -10,6 +10,7 @@ import { useCompanionPicker } from '../chat/hooks/useCompanionPicker';
 import { useChatShell } from '../chat/components/reimagine/useChatShell';
 import { companionAgentLabel } from '../shell/studio/ChatTab';
 import type { CompanionId, Repo } from '../chat/data/types';
+import type { JarvisEngineSettings } from '../jarvis/protocol';
 import { GrokConversation } from './GrokConversation';
 import type { ChatMeta } from './BotPanel';
 import type { Agent } from './agents';
@@ -24,7 +25,7 @@ export type GrokChatProps = {
   repo?: Repo;
   paneOpen: boolean;
   onTogglePane: () => void;
-  onVoice: () => void;
+  onVoice: (settings: JarvisEngineSettings) => void;
   voiceActive: boolean;
   theme: 'dark' | 'light';
   onToggleTheme: () => void;

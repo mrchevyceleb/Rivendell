@@ -18,7 +18,7 @@ import {
 import * as elevenlabs from '@livekit/agents-plugin-elevenlabs';
 import * as silero from '@livekit/agents-plugin-silero';
 import { RoomEvent } from '@livekit/rtc-node';
-import { CONFIG, assertConfig } from './config.ts';
+import { CONFIG, assertConfig, teammateVoiceId } from './config.ts';
 import { HallBrain, type BrainEvent } from './hallBrain.ts';
 import { ack, greeting, nextKeepAlive, phraseForTool } from './narration.ts';
 import { JARVIS_TOPIC, decodeMessage, encodeMessage, type JarvisAgentMessage } from './protocol.ts';
@@ -57,8 +57,10 @@ async function* narratedTurn(
   brain: HallBrain,
   text: string,
   publish: (msg: JarvisAgentMessage) => void,
+  signal: AbortSignal,
 ): AsyncGenerator<string> {
-  const events = brain.runTurn(text);
+  const events = brain.runTurn(text, signal);
+  const exactTranscript = brain.exactSpokenTranscript;
   let pending: Promise<IteratorResult<BrainEvent>> | null = null;
 
   // Jarvis acknowledges INSTANTLY on every request, then thinks. This also
@@ -87,8 +89,10 @@ async function* narratedTurn(
         const phrase = firstEventSeen ? nextKeepAlive() : ack();
         firstEventSeen = true;
         publish({ type: 'status', message: phrase });
-        lastSpokenAt = Date.now();
-        yield ` ${phrase} `;
+        if (!exactTranscript) {
+          lastSpokenAt = Date.now();
+          yield ` ${phrase} `;
+        }
         continue;
       }
       pending = null;
@@ -107,7 +111,7 @@ async function* narratedTurn(
       } else if (ev.kind === 'tool') {
         const phrase = phraseForTool(ev.name);
         publish({ type: 'tool', name: ev.name, phrase });
-        if (Date.now() - lastSpokenAt > NARRATE_QUIET_MS) {
+        if (!exactTranscript && Date.now() - lastSpokenAt > NARRATE_QUIET_MS) {
           if (buf.trim()) {
             const flushed = buf;
             buf = '';
@@ -118,7 +122,9 @@ async function* narratedTurn(
         }
       } else if (ev.kind === 'error') {
         publish({ type: 'status', message: `brain error: ${ev.message}` });
-        yield ' I hit a snag with that one, sir. The details are in Hall.';
+        if (!exactTranscript) yield ' I hit a snag with that one, sir. The details are in Hall.';
+        return;
+      } else if (ev.kind === 'cancelled') {
         return;
       } else if (ev.kind === 'turnEnd') {
         break;
@@ -179,7 +185,8 @@ class JarvisAgent extends voice.Agent {
     const text = lastUser?.textContent?.trim();
     if (!text) return null;
 
-    const iterator = narratedTurn(this.brain, text, this.publish)[Symbol.asyncIterator]();
+    const speechAborter = new AbortController();
+    const iterator = narratedTurn(this.brain, text, this.publish, speechAborter.signal)[Symbol.asyncIterator]();
     return new ReadableStream<string>({
       async pull(controller) {
         const { value, done } = await iterator.next();
@@ -187,8 +194,10 @@ class JarvisAgent extends voice.Agent {
         else controller.enqueue(value);
       },
       cancel() {
-        // Barge-in: stop speaking, keep the Hall turn working. A follow-up
-        // utterance steers it; silence lets it finish into Hall history.
+        // Abort synchronously before asking the async generator to return.
+        // Otherwise its pending Hall waiter can consume the next utterance's
+        // first text while return() waits for that obsolete promise to settle.
+        speechAborter.abort();
         void iterator.return?.(undefined);
       },
     });
@@ -204,7 +213,7 @@ export default defineAgent({
     assertConfig();
     await ctx.connect();
 
-    let meta: { face?: boolean; cli?: string; model?: string; effort?: string; chatId?: string } = {};
+    let meta: { face?: boolean; cli?: string; model?: string; effort?: string; chatId?: string; repo?: string; threadVoice?: boolean; agentId?: string; agentName?: string; voice?: string } = {};
     try {
       meta = JSON.parse(ctx.job.metadata || '{}');
     } catch {
@@ -214,13 +223,14 @@ export default defineAgent({
 
     const brain = new HallBrain({
       wsUrl: CONFIG.rivendellWsUrl,
-      repo: CONFIG.rivendellRepo,
+      repo: meta.repo || CONFIG.rivendellRepo,
       chatId,
       settings: {
         cli: meta.cli || CONFIG.defaultCli,
         model: meta.model || CONFIG.defaultModel,
         effort: meta.effort || CONFIG.defaultEffort,
       },
+      threadVoice: meta.threadVoice === true,
     });
 
     const publish = (msg: JarvisAgentMessage): void => {
@@ -231,10 +241,14 @@ export default defineAgent({
 
     const session = new voice.AgentSession({
       vad: ctx.proc.userData.vad as silero.VAD,
-      stt: CONFIG.stt,
+      stt: new elevenlabs.STT({
+        apiKey: CONFIG.elevenApiKey,
+        model: CONFIG.sttModel,
+        languageCode: CONFIG.sttLanguage,
+      }),
       tts: new elevenlabs.TTS({
         apiKey: CONFIG.elevenApiKey,
-        voiceId: CONFIG.voiceId,
+        voiceId: meta.threadVoice ? teammateVoiceId(meta.voice) : CONFIG.voiceId,
         model: CONFIG.ttsModel,
       }),
       userAwayTimeout: 30,
@@ -289,6 +303,11 @@ export default defineAgent({
         brain.stopTurn();
         void session.interrupt({ force: true });
         void shutdown('dismissed');
+      } else if (msg.type === 'hangup') {
+        // End audio only. The normal bot-* Hall turn stays alive and finishes
+        // into the teammate's durable thread after the caller leaves.
+        void session.interrupt({ force: true });
+        void shutdown('hangup');
       } else if (msg.type === 'settings') {
         brain.updateSettings(msg);
         publish({ type: 'settings', ...brain.currentSettings });
@@ -323,7 +342,9 @@ export default defineAgent({
 
     await session.start({ agent, room: ctx.room, record: false });
     publish({ type: 'settings', ...brain.currentSettings });
-    session.say(greeting());
+    // Named teammate calls speak only Hall output so every audible assistant
+    // sentence is also present in that teammate's durable chat transcript.
+    if (!meta.threadVoice) session.say(greeting());
   },
 });
 

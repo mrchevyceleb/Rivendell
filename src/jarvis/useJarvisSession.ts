@@ -1,7 +1,7 @@
 // LiveKit session hook for Jarvis: token fetch, room join, mic publish (AEC
 // on), remote audio playback + analyser tap for the orb, data-channel wiring.
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ConnectionState,
   Room,
@@ -21,6 +21,7 @@ export type JarvisPhase = 'idle' | 'connecting' | JarvisAgentState | 'error';
 
 export type JarvisCaption = { role: 'user' | 'jarvis'; text: string; final: boolean };
 export type JarvisToolEvent = { name: string; phrase: string; at: number };
+export type ThreadVoiceTarget = { agentId: string; chatId: string; repoPath: string };
 
 function deviceId(): string {
   const KEY = 'rivendell:jarvis:device';
@@ -35,6 +36,7 @@ function deviceId(): string {
 export function useJarvisSession(opts: {
   onActivity: () => void;
   onClosed: (reason: string) => void;
+  onCaption?: (caption: JarvisCaption) => void;
 }) {
   const [phase, setPhase] = useState<JarvisPhase>('idle');
   const [caption, setCaption] = useState<JarvisCaption | null>(null);
@@ -45,16 +47,22 @@ export function useJarvisSession(opts: {
   const [audioBlocked, setAudioBlocked] = useState(false);
 
   const roomRef = useRef<Room | null>(null);
+  const startingRef = useRef(false);
+  const startGenerationRef = useRef(0);
   const audioElsRef = useRef<HTMLMediaElement[]>([]);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   // Kept in refs so stale closures inside room listeners never bite.
   const onActivityRef = useRef(opts.onActivity);
   const onClosedRef = useRef(opts.onClosed);
+  const onCaptionRef = useRef(opts.onCaption);
   onActivityRef.current = opts.onActivity;
   onClosedRef.current = opts.onClosed;
+  onCaptionRef.current = opts.onCaption;
 
   const teardown = useCallback((reason: string, opts2?: { keepError?: boolean }) => {
+    startGenerationRef.current += 1;
+    startingRef.current = false;
     const room = roomRef.current;
     roomRef.current = null;
     for (const el of audioElsRef.current) {
@@ -84,21 +92,32 @@ export function useJarvisSession(opts: {
     if (room) onClosedRef.current(reason);
   }, []);
 
+  useEffect(() => () => teardown('unmount'), [teardown]);
+
   const start = useCallback(
-    async (settings: JarvisEngineSettings) => {
-      if (roomRef.current) return;
+    async (settings: JarvisEngineSettings, target?: ThreadVoiceTarget) => {
+      if (roomRef.current || startingRef.current) return;
+      startingRef.current = true;
+      const generation = ++startGenerationRef.current;
+      const alive = () => generation === startGenerationRef.current;
       setError(null);
       setPhase('connecting');
       try {
         const params = new URLSearchParams({ identity: deviceId(), cli: settings.cli });
         if (settings.model) params.set('model', settings.model);
         if (settings.effort) params.set('effort', settings.effort);
+        if (target) {
+          params.set('agentId', target.agentId);
+          params.set('chatId', target.chatId);
+          params.set('repo', target.repoPath);
+        }
         const resp = await fetch(`/api/jarvis/token?${params.toString()}`);
         if (!resp.ok) {
           const body = await resp.json().catch(() => ({}));
           throw new Error(body.error || `token endpoint returned ${resp.status}`);
         }
         const { url, token } = (await resp.json()) as { url: string; token: string };
+        if (!alive()) return;
 
         const room = new Room();
         roomRef.current = room;
@@ -136,7 +155,9 @@ export function useJarvisSession(opts: {
           if (msg.type === 'state') {
             setPhase(msg.agentState);
           } else if (msg.type === 'caption') {
-            setCaption({ role: msg.role, text: msg.text, final: msg.final });
+            const nextCaption = { role: msg.role, text: msg.text, final: msg.final };
+            setCaption(nextCaption);
+            onCaptionRef.current?.(nextCaption);
           } else if (msg.type === 'tool') {
             setTools((prev) => [...prev.slice(-4), { name: msg.name, phrase: msg.phrase, at: Date.now() }]);
           } else if (msg.type === 'settings') {
@@ -151,15 +172,23 @@ export function useJarvisSession(opts: {
         });
 
         await room.connect(url, token);
+        if (!alive()) {
+          await room.disconnect().catch(() => {});
+          return;
+        }
         await room.localParticipant.setMicrophoneEnabled(true, {
           echoCancellation: true,
           noiseSuppression: true,
         });
-        if (room.state === ConnectionState.Connected) setPhase('listening');
+        if (alive() && room.state === ConnectionState.Connected) setPhase('listening');
       } catch (err) {
-        setError((err as Error).message);
-        setPhase('error');
-        teardown('start failed', { keepError: true });
+        if (alive()) {
+          setError((err as Error).message);
+          setPhase('error');
+          teardown('start failed', { keepError: true });
+        }
+      } finally {
+        if (alive()) startingRef.current = false;
       }
     },
     [teardown],
@@ -191,6 +220,21 @@ export function useJarvisSession(opts: {
       .catch(() => {});
   }, []);
 
+  const hangup = useCallback(() => {
+    const room = roomRef.current;
+    if (!room) {
+      setPhase('idle');
+      setError(null);
+      return;
+    }
+    // Named teammate calls leave accepted Hall work running in its normal
+    // thread; hanging up ends only microphone/TTS transport.
+    void room.localParticipant
+      .publishData(encodeMessage({ type: 'hangup' }), { reliable: true, topic: JARVIS_TOPIC })
+      .catch(() => {});
+    setTimeout(() => teardown('hangup'), 250);
+  }, [teardown]);
+
   const dismiss = useCallback(() => {
     const room = roomRef.current;
     if (!room) {
@@ -218,6 +262,7 @@ export function useJarvisSession(opts: {
     unlockAudio,
     setMicMuted,
     start,
+    hangup,
     dismiss,
     sendSettings,
   };

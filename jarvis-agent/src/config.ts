@@ -5,15 +5,37 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const DANIEL_VOICE_ID = 'cjVigY5qzO86Huf0OWal'; // ElevenLabs "Daniel", British, authoritative
+const DEFAULT_VOICE_ID = 'cjVigY5qzO86Huf0OWal';
+
+// Agent records predate the Hall-backed voice path and store xAI's short voice
+// names. Preserve those user choices by mapping them onto distinct ElevenLabs
+// premade voices for speech I/O; the reasoning model still comes from Hall.
+const TEAMMATE_VOICE_IDS: Record<string, string> = {
+  ara: 'EXAVITQu4vr4xnSDxMaL',      // Sarah
+  eve: 'cgSgspJ2msm6clMCkdW9',      // Jessica
+  leo: 'TX3LPaxmHKxFdv7VOQHJ',      // Liam
+  rex: 'nPczCjzI2devNBz1zQrb',      // Brian
+  sal: 'SAz9YHcvj6GT2YYXdXww',      // River
+  atlas: 'onwK4e9ZLuTAKqWW03F9',    // Daniel
+  aurora: 'FGY2WhTYpPnrIDTdsKH5',   // Laura
+  luna: 'pFZP5JQG7iQjIQuC4Bku',     // Lily
+  orion: 'JBFqnCBsd6RMkjVDRZzb',    // George
+  carina: 'XrExE9yKIg1WjnnlVkGX',   // Matilda
+};
+
+export function teammateVoiceId(voice: string | undefined): string {
+  return (voice && TEAMMATE_VOICE_IDS[voice]) || CONFIG.voiceId;
+}
 
 export const CONFIG = {
   /** ElevenLabs TTS */
   elevenApiKey: process.env.ELEVENLABS_API_KEY ?? '',
-  voiceId: process.env.JARVIS_VOICE_ID || DANIEL_VOICE_ID,
+  voiceId: process.env.JARVIS_VOICE_ID || DEFAULT_VOICE_ID,
   ttsModel: process.env.JARVIS_TTS_MODEL || 'eleven_flash_v2_5',
-  /** STT: LiveKit Inference descriptor string (or a future plugin swap). */
-  stt: process.env.JARVIS_STT || 'elevenlabs/scribe_v2_realtime:en',
+  /** Direct ElevenLabs realtime STT. Normalize the old LiveKit Inference
+   * descriptor so existing deployments migrate without an env change. */
+  sttModel: (process.env.JARVIS_STT || 'scribe_v2_realtime').replace(/^.*\//, '').split(':')[0],
+  sttLanguage: (process.env.JARVIS_STT || '').split(':')[1] || 'en',
   /** Rivendell Hall chat bridge */
   rivendellWsUrl: process.env.RIVENDELL_WS_URL || 'ws://127.0.0.1:8091/api/ws',
   rivendellRepo: process.env.RIVENDELL_REPO || join(homedir(), 'ASSISTANT-HUB'),
