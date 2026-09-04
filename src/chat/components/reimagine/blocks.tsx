@@ -3,7 +3,7 @@
 // ChatBlock stream from useChat into the LOTR "Elrond speaks on the page"
 // anatomy defined in the approved prototypes (§3.3 – §3.8).
 
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ChatBlock } from '../../data/types';
 import { Markdown } from '../primitives/Markdown';
@@ -447,32 +447,6 @@ function SwitchDivider({ block }: { block: Extract<ChatBlock, { kind: 'switch' }
 }
 
 // ── user bubble ───────────────────────────────────────────────────────────
-// ── Thoughts pod (Grok anatomy) — in a multi-step turn, every assistant text
-//    block except the final one is working narrative; collapse it into an
-//    expandable card so the feed keeps Grok's two-level rhythm. Grok shell
-//    only (ChatThread prop); the Studio keeps every step inline.
-function StepsCard({ steps }: { steps: Array<Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' }>> }) {
-  const [open, setOpen] = useState(false);
-  const lines: string[] = [];
-  for (const s of steps) {
-    if (s.kind === 'text') lines.push(s.text);
-    else lines.push(`⚙ ${s.tool}${s.running ? ' · working…' : ' · done'}`);
-  }
-  return (
-    <div className={`tool steps${open ? ' open' : ''}`}>
-      <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)}>
-        <StarSigil className="tstar" />
-        <span className="tool-title">Thoughts</span>
-        <span className="tool-meta">{steps.length} step{steps.length === 1 ? '' : 's'}</span>
-        <ChevronDown className="tool-chev" />
-      </button>
-      <div className="tool-body">
-        <pre>{lines.join('\n\n')}</pre>
-      </div>
-    </div>
-  );
-}
-
 function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) {
   const images = block.images ?? [];
   const missing = Math.max(0, (block.imageCount ?? images.length) - images.length);
@@ -524,7 +498,6 @@ function UserBubble({ block }: { block: Extract<ChatBlock, { kind: 'user' }> }) 
 }
 
 type AssistantBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' } | { kind: 'doc-link' } | { kind: 'folder-link' } | { kind: 'artifact' }>;
-type StepBlock = Extract<ChatBlock, { kind: 'text' } | { kind: 'tool' }>;
 type ToolBlock = Extract<ChatBlock, { kind: 'tool' }>;
 
 /** Live "working · m:ss" heartbeat for running tool calls. Long subprocess
@@ -602,56 +575,10 @@ function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boole
   return Boolean(b.open) && streaming;
 }
 
-/** Grok mode: last real prose is the visible reply. Empty or quiet trailing
- *  text used to steal that slot, so the feed was Thoughts-only and a completed
- *  turn looked dead. While an empty/noop last block is still open, keep it as
- *  the answer slot (caret only) so working narrative stays in the pod. */
-function planCollapsedSteps(
-  blocks: AssistantBlock[],
-  collapseSteps: boolean,
-  streaming: boolean,
-): { finalTextId: string | null; stepBlocks: StepBlock[] } {
-  if (!collapseSteps) return { finalTextId: null, stepBlocks: [] };
-  const textBlocks = blocks.filter((b): b is Extract<ChatBlock, { kind: 'text' }> => b.kind === 'text');
-  if (textBlocks.length === 0) return { finalTextId: null, stepBlocks: [] };
-
-  // While any tool-backed turn is still live, none of its prose is a proven
-  // final answer. Fold status narration ("I'm on it", "checking…") and tools
-  // into Thoughts until the real turnEnd. Otherwise one early sentence looks
-  // complete, the user replies normally, and the hidden old turn surprises
-  // them by treating that reply as mid-turn guidance.
-  if (streaming && blocks.some((block) => block.kind === 'tool')) {
-    return {
-      finalTextId: null,
-      stepBlocks: blocks.filter((block): block is StepBlock => (
-        block.kind === 'tool' || (block.kind === 'text' && isAnswerProse(block))
-      )),
-    };
-  }
-
-  const answerTexts = textBlocks.filter(isAnswerProse);
-  const nonempty = textBlocks.filter(hasVisibleProse);
-  const visible = answerTexts.length > 0 ? answerTexts : nonempty;
-  const last = textBlocks[textBlocks.length - 1];
-  const holdStreamingSlot = Boolean(
-    streaming && last && last.open && (!hasVisibleProse(last) || isProtocolNoopText(last.text)),
-  );
-  const final = holdStreamingSlot ? last : (visible[visible.length - 1] ?? null);
-  const finalTextId = final?.id ?? null;
-  if (!finalTextId || textBlocks.length < 2) return { finalTextId: null, stepBlocks: [] };
-
-  const finalIdx = blocks.findIndex((b) => b.id === finalTextId);
-  // Only collapse work that happened BEFORE the answer. Tools after a
-  // promoted earlier reply must stay after it — they are not thoughts.
-  const stepBlocks = blocks.filter((b, i): b is StepBlock =>
-    (b.kind === 'text' || b.kind === 'tool')
-    && b.id !== finalTextId
-    && i < finalIdx
-    && (b.kind !== 'text' || isAnswerProse(b)),
-  );
-  return { finalTextId, stepBlocks };
-}
-
+/** Every provider `text` block is an intentional, user-facing message — the
+ *  same prose a terminal client shows between tool calls. Never classify it as
+ *  hidden thinking. Provider reasoning uses a distinct `thinking` block, while
+ *  tool calls already have their own collapsible cards. */
 // A run of consecutive assistant blocks that share a turnId render under a
 // single "✦ Elrond" header (the prototype's per-turn group).
 function ElrondGroup({
@@ -675,15 +602,9 @@ function ElrondGroup({
     return (src.length ? src : textBlocks.filter(hasVisibleProse)).map((b) => b.text).join('\n\n');
   };
   const isPinned = Boolean(pin?.pinnedBlockIds.includes(first.id));
-  // Grok mode: collapse the working narrative into a Thoughts pod rendered
-  // immediately before the final answer. The pod folds in non-final text AND
-  // tool blocks (in original order), so chronology is preserved inside it and
-  // no tool is ever shown after a step it actually preceded.
-  const { finalTextId, stepBlocks } = planCollapsedSteps(blocks, collapseSteps, streaming);
-  const stepIds = new Set(stepBlocks.map((b) => b.id));
-  // Grok mode: fold RUNS of consecutive tool blocks (the ones not already in
-  // the Thoughts pod) into a single expandable card. One-off tools keep their
-  // own card. Studio mode stays fully inline.
+  // Grok mode collapses only consecutive tool calls. Assistant `text` blocks
+  // always render in their original position so a long-running turn remains a
+  // real conversation instead of hiding every message until the final result.
   const toolRuns = new Map<string, ToolBlock[]>();
   const toolRunSkip = new Set<string>();
   if (collapseSteps) {
@@ -696,19 +617,11 @@ function ElrondGroup({
       run = [];
     };
     for (const b of blocks) {
-      if (b.kind === 'tool' && !stepIds.has(b.id)) run.push(b);
+      if (b.kind === 'tool') run.push(b);
       else flush();
     }
     flush();
   }
-  // Anchor the pod to the last collapsed step BEFORE the final answer — if a
-  // tool runs after the final text, the pod must still land ahead of the
-  // answer (never after it). If every step comes after the final text
-  // (degenerate order), pin the pod to the answer's own slot, rendered first.
-  const indexById = new Map(blocks.map((b, i) => [b.id, i]));
-  const finalIdx = finalTextId ? indexById.get(finalTextId) ?? blocks.length : blocks.length;
-  const before = stepBlocks.filter((b) => (indexById.get(b.id) ?? 0) < finalIdx);
-  const podAnchorId = before.length ? before[before.length - 1].id : finalTextId;
   return (
     <div
       id={`msg-pin-${first.id}`}
@@ -720,25 +633,6 @@ function ElrondGroup({
         <span className="mini">✦</span> Elrond <span className="when">{timeLabel(first.ts)}</span>
       </div>
       {blocks.map((b) => {
-        if (stepIds.has(b.id)) {
-          if (b.id !== podAnchorId) return null;
-          return <StepsCard key="steps" steps={stepBlocks} />;
-        }
-        // Degenerate order (all steps after the answer): pod rides first.
-        if (b.id === podAnchorId && b.id === finalTextId && stepBlocks.length && b.kind === 'text') {
-          const open = showTextCaret(b, streaming);
-          const display = isProtocolNoopText(b.text) ? '' : b.text;
-          const showAnswer = open || display.length > 0;
-          if (!showAnswer) {
-            return <StepsCard key="steps" steps={stepBlocks} />;
-          }
-          return (
-            <Fragment key={`steps-plus-${b.id}`}>
-              <StepsCard steps={stepBlocks} />
-              <StreamText text={display} open={open} />
-            </Fragment>
-          );
-        }
         switch (b.kind) {
           case 'tool': {
             if (toolRunSkip.has(b.id)) return null;
@@ -750,7 +644,6 @@ function ElrondGroup({
             const open = showTextCaret(b, streaming);
             const display = isProtocolNoopText(b.text) ? '' : b.text;
             if (!open && !display) return null;
-            if (!open && !isAnswerProse(b) && b.id !== finalTextId && textBlocks.some(isAnswerProse)) return null;
             return <StreamText key={b.id} text={display} open={open} />;
           }
           case 'doc-link':
@@ -788,7 +681,7 @@ export type ChatThreadProps = {
   noteUnread?: () => void;
   /** Grok shell overrides the elvish thinking phrases. */
   phrases?: string[];
-  /** Grok shell: collapse multi-step working narrative into a Thoughts pod. */
+  /** Grok shell: combine consecutive tool calls into compact expandable cards. */
   collapseSteps?: boolean;
   /** Grok shell: persist pin into the focused agent's right-pane pocket. */
   pin?: ThreadPin;
@@ -907,12 +800,10 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
         continue;
       }
       // Grok mode (collapseSteps): one user prompt → one assistant response.
-      // Assistant turns in Rivendell exist ONLY as replies to a user send or
-      // as automation narrative — so consecutive assistant blocks with no user
-      // message between them are one working run by construction, and merge
-      // into a single group whose narrative collapses into the Thoughts pod
-      // (the final text block renders as the answer). Studio mode keeps
-      // strict turnId grouping.
+      // A single outer turn can contain many provider message_start cycles as
+      // tools return. Merge those cycles into one chronological response group;
+      // prose remains visible and only consecutive tools are compacted. Studio
+      // mode keeps strict provider turnId grouping.
       const merge = last && last.type === 'elrond' && (collapseSteps
         ? true
         : turnId && last.blocks[0] && (last.blocks[0] as { turnId?: string }).turnId === turnId);
@@ -1000,8 +891,8 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
 
   if (streaming && !hasCurrentTerminalFailure && !hideThinking && !pendingAutomation && !suppressTyping) {
     // Never make the user infer liveness from a Stop button. Keep one animated
-    // proof-of-life row visible for the ENTIRE turn, even after prose, Thoughts,
-    // or completed tool cards have appeared.
+    // proof-of-life row visible for the ENTIRE turn, even after user-facing
+    // prose or completed tool cards have appeared.
     nodes.push(<ActiveTurnIndicator key="active-turn" since={workingSince} />);
   } else if (!latestQueued && status === 'ready' && hasAssistantAfterLastUser && !hasCurrentTerminalFailure) {
     // Absence of animation must mean something explicit. This permanent,

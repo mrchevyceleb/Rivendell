@@ -26,6 +26,7 @@ import { isVoiceChatId, VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 import { isThreadWatched } from './threadWatch.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
+import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 import { isSyntheticApiErrorEvent, isSyntheticApiErrorText, terminalExecutionError, terminalProviderError, type TerminalProviderError } from './providerErrors.ts';
 
 export { MemoryPressureSpawnError } from './memory.ts';
@@ -942,12 +943,18 @@ class ClaudeSession {
     // Max run `date`, reload session context, and narrate "I'm on it" on every
     // ordinary follow-up. Supply the runtime fact inline so agent-home turns
     // continue immediately instead of acting like cold starts.
+    const conversationGuidance = conversationGuidanceForTurn({
+      chatId: this.chatId,
+      peerFrom: opts.peerFrom,
+      peerFromRole: opts.peerFromRole,
+    });
     const continuationText = isAgentThread(this.chatId)
       ? [
           '<rivendell-continuation>',
           `This is a warm continuation of the existing conversation, not a new user-visible session. Host time: ${new Date().toString()}.`,
-          'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not announce startup or planned steps such as “I’m on it” or “checking now.” Rivendell already renders live progress. Work silently, then give the result.',
+          'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” Rivendell already renders basic liveness.',
           '</rivendell-continuation>',
+          ...(conversationGuidance ? ['', conversationGuidance] : []),
           '',
           commandText,
         ].join('\n')

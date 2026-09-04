@@ -27,6 +27,7 @@ import {
 import { TEAM_MCP_SCRIPT } from '../config.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { ensureLocalLlmProxy, shutdownLocalLlmProxy } from './local-llm-proxy.ts';
+import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 
 const EVENT_BUFFER_SIZE = 2000;
 
@@ -2940,7 +2941,13 @@ export class BananaSession {
       : '';
     const personaScope = personaPromptFor(this.chatId);
     const personaPrefix = personaScope ? `${personaScope}\n\n---\n\n` : '';
-    const effectiveText = `${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${commandExpandedText}`;
+    const conversationGuidance = conversationGuidanceForTurn({
+      chatId: this.chatId,
+      peerFrom: opts.peerFrom,
+      peerFromRole: opts.peerFromRole,
+      hidden: opts.hidden,
+    });
+    const effectiveText = `${personaPrefix}${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${commandExpandedText}`;
     if (seed) {
       this.turn.recoveryRecapUsed = true;
       this.emit({

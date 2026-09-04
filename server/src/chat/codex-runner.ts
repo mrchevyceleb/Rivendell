@@ -20,6 +20,7 @@ import { resolveCodexSelection } from './codex-models.ts';
 import { codexImageArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
+import { conversationGuidanceForTurn } from './conversation-guidance.ts';
 
 /**
  * Which codex binary to run.
@@ -546,7 +547,12 @@ export class CodexSession {
       this.recoverContextOnNextTurn = false;
     }
     const personaScope = personaPromptFor(this.chatId);
-    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${text}`;
+    const conversationGuidance = conversationGuidanceForTurn({
+      chatId: this.chatId,
+      peerFrom: opts.peerFrom,
+      peerFromRole: opts.peerFromRole,
+    });
+    const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${text}`;
     // Selection was validated before the session became busy. effort is
     // interpolated into this config fragment, so only allow-listed strings
     // can reach the CLI.
