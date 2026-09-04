@@ -12,9 +12,9 @@
  *   team_message — message a teammate; waits for their reply by default
  *   team_recent  — recent visible messages from a teammate's thread
  *
- * The server enforces hop/rate limits, so free conversation can't loop
- * forever. Loop discipline still belongs to the models: end chains with a
- * summary to the human rather than hop 4/4.
+ * The server uses active-cycle detection and rate limits rather than a hard
+ * chain-depth ceiling. Teammates can keep a legitimate collaboration going;
+ * tight runaway loops are still broken without discarding the handoff.
  */
 
 import { createInterface } from 'node:readline';
@@ -36,15 +36,14 @@ const TOOLS = [
       'and (by default) their reply is returned when they are immediately available. Busy teammates ' +
       'are durably queued/steered in the background so this tool returns immediately; their result ' +
       'arrives back through team_message. Never poll or retry. Use wait:false for an explicit ' +
-      'fire-and-forget handoff. hop: pass 2 when replying ' +
-      'to a message you received (chain depth guard).',
+      'fire-and-forget handoff. Legitimate teammate chains have no fixed depth limit.',
     inputSchema: {
       type: 'object',
       properties: {
         from: { type: 'string', description: 'Your own teammate name (the sender)' },
         to: { type: 'string', description: "Teammate name, e.g. 'Chief of Staff'" },
         text: { type: 'string', description: 'What to say or ask' },
-        hop: { type: 'number', description: 'Chain depth: 1 for a fresh message, 2+ when replying in a chain' },
+        hop: { type: 'number', description: 'Optional legacy handoff sequence metadata; there is no fixed depth limit' },
         wait: { type: 'boolean', description: 'Wait for the reply (default true)' },
       },
       required: ['from', 'to', 'text'],
@@ -103,6 +102,9 @@ async function callTool(name, args, signal) {
       }),
     }, signal);
     if (!result.delivered) return `NOT DELIVERED: ${result.reason}`;
+    if (result.loopClosed) {
+      return `No duplicate handoff sent. ${result.reason}`;
+    }
     if (result.reply) {
       const queueNote = result.queued ? ' (waited for their current turn)' : '';
       return `Delivered to ${result.to}${queueNote}. Their reply:\n\n${result.reply}`;

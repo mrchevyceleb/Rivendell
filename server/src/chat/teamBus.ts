@@ -2,9 +2,9 @@
 // teammate through the `rivendell-team` MCP tool (see server/scripts/team-mcp.mjs);
 // delivery lands in the recipient's home thread as a `peer_message` event
 // (rendered with the sender's identity, not as a user turn) and wakes the
-// recipient's engine for a real turn. Guards: hop limit, rate limits, text cap,
-// and per-recipient FIFO delivery — free conversation, no runaway loops and no
-// manual retry when a teammate happens to be mid-turn.
+// recipient's engine for a real turn. Guards: active-cycle detection, rate
+// limits, text cap, and per-recipient FIFO delivery — long legitimate chains
+// stay open without allowing a tight runaway loop or losing busy handoffs.
 
 import { randomUUID } from 'node:crypto';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
@@ -57,7 +57,6 @@ function findAgent(ref: string): Agent | undefined {
 
 // ---- guards ----------------------------------------------------------------
 
-const HOP_LIMIT = 4;
 const MAX_TEXT = 8000;
 const GLOBAL_WINDOW_MS = 60_000;
 const GLOBAL_MAX = 20;
@@ -88,6 +87,17 @@ const recipientDeliveryTails = new Map<string, Promise<void>>();
 const synchronousReplyEdges = new Map<string, number>();
 const admittedQueuedDeliveries = new Set<string>();
 
+export type TeamChain = {
+  id: string;
+  edges: string[];
+  route: string[];
+};
+type ActiveInboundChain = TeamChain & { deliveryId: string; at: number };
+// While a teammate is handling a peer turn, any team_message calls they make
+// inherit that collaboration's route automatically. Repeating a directed edge
+// closes a real loop; merely having a long route never blocks legitimate work.
+const activeInboundChains = new Map<string, ActiveInboundChain>();
+
 type QueuedTeamDelivery = StoredRecord & {
   fromId: string;
   fromName: string;
@@ -95,7 +105,22 @@ type QueuedTeamDelivery = StoredRecord & {
   toId: string;
   text: string;
   hop: number;
+  chainId?: string;
+  chainEdges?: string[];
+  chainRoute?: string[];
 };
+
+function chainForQueuedDelivery(record: QueuedTeamDelivery): TeamChain {
+  return {
+    id: record.chainId ?? record.id,
+    edges: record.chainEdges?.length
+      ? [...record.chainEdges]
+      : [replyEdge(record.fromId, record.toId)],
+    route: record.chainRoute?.length
+      ? [...record.chainRoute]
+      : [record.fromId, record.toId],
+  };
+}
 
 const queuedDeliveryStore = new JsonStore<QueuedTeamDelivery>('team-delivery-queue.json', []);
 let queueStoreTail: Promise<void> = Promise.resolve();
@@ -110,6 +135,67 @@ function queueStoreOperation<T>(operation: () => Promise<T>): Promise<T> {
 
 function replyEdge(fromId: string, toId: string): string {
   return `${fromId}->${toId}`;
+}
+
+export function extendTeamChain(
+  parent: TeamChain | undefined,
+  fromId: string,
+  toId: string,
+): { chain: TeamChain; repeatsEdge: boolean } {
+  const edge = replyEdge(fromId, toId);
+  if (parent?.edges.includes(edge)) return { chain: parent, repeatsEdge: true };
+  if (parent) {
+    return {
+      chain: {
+        id: parent.id,
+        edges: [...parent.edges, edge],
+        route: [...parent.route, toId],
+      },
+      repeatsEdge: false,
+    };
+  }
+  return {
+    chain: { id: randomUUID(), edges: [edge], route: [fromId, toId] },
+    repeatsEdge: false,
+  };
+}
+
+function inheritedTeamChain(fromId: string, toId: string): { chain: TeamChain; repeatsEdge: boolean } {
+  let parent = activeInboundChains.get(fromId);
+  // Turn-end normally clears this. The expiry is only crash insurance for a
+  // listener that could not observe its terminal event.
+  if (parent && Date.now() - parent.at > 2 * 60 * 60_000) {
+    activeInboundChains.delete(fromId);
+    parent = undefined;
+  }
+  return extendTeamChain(parent, fromId, toId);
+}
+
+function activateInboundChain(
+  recipientId: string,
+  chain: TeamChain,
+  deliveryId: string,
+  session: SessionLike,
+  admittedSeq: number,
+): void {
+  const active: ActiveInboundChain = { ...chain, deliveryId, at: Date.now() };
+  activeInboundChains.set(recipientId, active);
+  let unsubscribe: (() => void) | null = null;
+  const clear = () => {
+    if (activeInboundChains.get(recipientId)?.deliveryId === deliveryId) {
+      activeInboundChains.delete(recipientId);
+    }
+    unsubscribe?.();
+    unsubscribe = null;
+  };
+  try {
+    unsubscribe = session.subscribe((event) => {
+      if ((event.seq ?? 0) <= admittedSeq) return;
+      if (event.ev?.type === 'turnEnd' || event.ev?.type === 'closed') clear();
+    }, session.latestSeq(), false);
+  } catch {
+    clear();
+  }
 }
 
 function addReplyEdge(key: string): void {
@@ -317,6 +403,9 @@ export type TeamMessageResult = {
   reason?: string;
   reply?: string;
   hop?: number;
+  /** No delivery was needed because this exact directed edge already ran in
+   * the inherited collaboration chain. Returned as success, not a wall. */
+  loopClosed?: boolean;
   /** Accepted by the durable asynchronous path instead of making the caller retry. */
   queued?: boolean;
 };
@@ -326,6 +415,7 @@ type TeamDelivery = {
   to: Agent;
   text: string;
   hop: number;
+  chain: TeamChain;
   waitForReply: boolean;
   /** Synchronous MCP callers return as soon as a busy recipient is detected;
    * the durable outbox owns eventual delivery. */
@@ -349,15 +439,15 @@ function hasDurableDeliveryReceipt(logKey: string, deliveryId: string): boolean 
 }
 
 async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResult> {
-  const { from, to, text, hop, waitForReply, signal, onAdmitted, deferIfBusy = false } = delivery;
+  const { from, to, text, hop, chain, waitForReply, signal, onAdmitted, deferIfBusy = false } = delivery;
   const deliveryId = delivery.deliveryId ?? randomUUID();
   const deadline = Date.now() + RECIPIENT_IDLE_WAIT_MS;
   let waited = false;
   const replyInstruction = waitForReply
     ? `(Reply inline in this turn. Your final answer is returned automatically to ${from.name}; no second team_message call is needed.)`
-    : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., hop: ${hop + 1}, wait: false); busy teammates are queued automatically.)`;
+    : `(Reply inline for the thread. If ${from.name} needs the result, use team_message(to: "${from.name}", text: ..., wait: false); busy teammates are queued automatically.)`;
   const prompt = [
-    `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — hop ${hop}/${HOP_LIMIT}]`,
+    `[message from teammate ${from.name}${from.role ? ` (${from.role})` : ''} — handoff ${hop}]`,
     text,
     '',
     replyInstruction,
@@ -391,6 +481,12 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
     // peer_message is emitted and this FIFO worker simply waits and retries.
     let admittedSeq: number | null = null;
     let providerAccepted = false;
+    let chainActivated = false;
+    const maybeActivateChain = () => {
+      if (chainActivated || !providerAccepted || admittedSeq === null) return;
+      chainActivated = true;
+      activateInboundChain(to.id, chain, deliveryId, session, admittedSeq);
+    };
     type WaitOutcome =
       | { kind: 'completed'; endSeq: number }
       | { kind: 'closed' }
@@ -413,10 +509,12 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
         const inner = event.ev?.type === 'event' ? event.ev.event : undefined;
         if (inner?.type === 'peer_message' && inner.deliveryId === deliveryId) {
           admittedSeq = event.seq ?? session.latestSeq();
+          maybeActivateChain();
           return;
         }
         if (inner?.type === 'peer_delivery_accepted' && inner.deliveryId === deliveryId) {
           providerAccepted = true;
+          maybeActivateChain();
           return;
         }
         if (event.ev?.type === 'turnEnd' && providerAccepted && admittedSeq !== null && (event.seq ?? 0) > admittedSeq) {
@@ -564,6 +662,7 @@ async function drainQueuedRecipient(toId: string): Promise<void> {
         to,
         text: record.text,
         hop: record.hop,
+        chain: chainForQueuedDelivery(record),
         waitForReply: false,
         deliveryId: record.id,
         onAdmitted: (session) => acknowledgeQueuedDelivery(record, session),
@@ -629,13 +728,23 @@ export async function deliverTeamMessage(input: {
   const hop = Math.max(1, Math.floor(input.hop ?? 1));
   const text = (input.text ?? '').trim().slice(0, MAX_TEXT);
   if (!text) return { delivered: false, reason: 'empty message' };
-  if (hop > HOP_LIMIT) return { delivered: false, reason: `hop limit (${HOP_LIMIT}) reached — end the chain and summarize to the human instead` };
 
   const to = findAgent(input.to);
   if (!to) return { delivered: false, reason: `no teammate named "${input.to}" — call team_list first` };
   const from = findAgent(input.from) ?? { id: 'unknown', name: input.from || 'Unknown', role: '', engine: '', home: '', createdAt: 0 };
   if (to.id === from.id && input.from.trim().toLowerCase() === to.name.trim().toLowerCase()) {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
+  }
+
+  const { chain, repeatsEdge } = inheritedTeamChain(from.id, to.id);
+  if (repeatsEdge) {
+    return {
+      delivered: true,
+      to: to.name,
+      hop,
+      loopClosed: true,
+      reason: 'This exact teammate route already ran in the current collaboration, so Rivendell closed a repeat loop. Continue inline and summarize the new information instead of re-sending it.',
+    };
   }
 
   const requestedWaitForReply = input.wait !== false;
@@ -661,6 +770,9 @@ export async function deliverTeamMessage(input: {
       toId: to.id,
       text,
       hop,
+      chainId: chain.id,
+      chainEdges: chain.edges,
+      chainRoute: chain.route,
     }));
   } catch (error) {
     return { delivered: false, to: to.name, hop, reason: `could not persist queued delivery: ${(error as Error).message}` };
@@ -697,6 +809,7 @@ export async function deliverTeamMessage(input: {
     to,
     text,
     hop,
+    chain,
     waitForReply: true,
     signal: input.signal,
     deliveryId: record.id,
