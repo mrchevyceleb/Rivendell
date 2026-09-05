@@ -7,6 +7,10 @@ type CodexModelCapability = {
 
 const STANDARD_CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 const CODEX_MODEL_CAPABILITIES: Record<string, CodexModelCapability> = {
+  'gpt-6-astra': {
+    defaultEffort: 'medium',
+    efforts: new Set([...STANDARD_CODEX_EFFORTS, 'max', 'ultra']),
+  },
   'gpt-5.6-sol': {
     defaultEffort: 'low',
     efforts: new Set([...STANDARD_CODEX_EFFORTS, 'max', 'ultra']),

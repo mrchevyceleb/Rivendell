@@ -3,6 +3,14 @@ import test from 'node:test';
 import { resolveCodexSelection } from './codex-models.ts';
 
 test('resolves model-specific Codex efforts', () => {
+  assert.deepEqual(resolveCodexSelection('gpt-6-astra', 'ultra'), {
+    model: 'gpt-6-astra',
+    effort: 'ultra',
+  });
+  assert.deepEqual(resolveCodexSelection('gpt-6-astra', 'not-real'), {
+    model: 'gpt-6-astra',
+    effort: 'medium',
+  });
   assert.deepEqual(resolveCodexSelection('gpt-5.6-sol', 'ultra'), {
     model: 'gpt-5.6-sol',
     effort: 'ultra',

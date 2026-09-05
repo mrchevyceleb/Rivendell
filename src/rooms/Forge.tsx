@@ -24,6 +24,7 @@ import { apiJson } from '../data/api';
 import { CLAUDE_MODELS } from '../chat/components/CodexEnginePicker';
 import {
   CODEX_MODELS,
+  DEFAULT_CODEX_MODEL,
   codexModelSpec,
   normalizeCodexEffort,
 } from '../chat/codexModels';
@@ -324,7 +325,7 @@ export function Forge() {
     : [];
   const initialSelectionFor = (engine: string): { model: string; effort: string } => {
     const list = engine === 'banana-local' ? localModels : engine === 'banana-fireworks' ? fireworksModels : staticModelsForEngine(engine);
-    const model = list[0]?.id ?? '';
+    const model = engine === 'codex' ? DEFAULT_CODEX_MODEL : list[0]?.id ?? '';
     return {
       model,
       effort: engine === 'codex' ? codexModelSpec(model).defaultEffort : '',
@@ -981,7 +982,7 @@ function validModelFor(engine: string, modelId: string | undefined): string {
   if (engine === 'banana-local' || engine === 'banana-fireworks') return modelId || '';
   const list = staticModelsForEngine(engine);
   if (modelId && list.some((m) => m.id === modelId)) return modelId;
-  return list[0]?.id ?? '';
+  return engine === 'codex' ? DEFAULT_CODEX_MODEL : list[0]?.id ?? '';
 }
 
 function normalizeDraft(draft: CronDraft): Partial<CronJob> {
