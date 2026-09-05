@@ -242,17 +242,27 @@ function tryEnqueueForRecipient<T>(recipientId: string, work: () => Promise<T>):
   return enqueueForRecipient(recipientId, work).job;
 }
 
-type IdleBoundary = 'idle' | 'closed' | 'timeout' | 'aborted';
+export type DeliveryBoundary = 'idle' | 'steerable' | 'closed' | 'timeout' | 'aborted';
 
-function waitForIdleBoundary(session: SessionLike, timeoutMs: number, signal?: AbortSignal): Promise<IdleBoundary> {
+/** Wait until a busy recipient either finishes or enters Claude's verified
+ * tool-execution steering window. Listening to every emitted event matters:
+ * waiting only for turnEnd strands the first queued handoff behind a long turn,
+ * and that FIFO tail then makes every later (including urgent) handoff look
+ * locked out even while the recipient executes dozens of tools. */
+export function waitForDeliveryBoundary(
+  session: SessionLike,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<DeliveryBoundary> {
   if (signal?.aborted) return Promise.resolve('aborted');
   if (session.isBusy?.() !== true) return Promise.resolve('idle');
+  if (session.canAcceptNativeHumanSteer?.() === true) return Promise.resolve('steerable');
   const sinceSeq = session.latestSeq();
   return new Promise((resolve) => {
     let settled = false;
     let unsubscribe: () => void = () => {};
     const onAbort = () => done('aborted');
-    const done = (outcome: IdleBoundary) => {
+    const done = (outcome: DeliveryBoundary) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -271,6 +281,7 @@ function waitForIdleBoundary(session: SessionLike, timeoutMs: number, signal?: A
       const stop = session.subscribe((event) => {
         if (event.ev?.type === 'turnEnd') done('idle');
         else if (event.ev?.type === 'closed') done('closed');
+        else if (session.canAcceptNativeHumanSteer?.() === true) done('steerable');
       }, sinceSeq, false);
       unsubscribe = stop;
       if (settled) stop();
@@ -278,9 +289,44 @@ function waitForIdleBoundary(session: SessionLike, timeoutMs: number, signal?: A
       done('closed');
       return;
     }
-    // Close the check/subscribe race: a turn can finish between the first busy
-    // read and listener registration without another event arriving.
+    // Close both check/subscribe races: the turn can finish, or a tool can
+    // begin, between the initial snapshots and listener registration.
     if (session.isBusy?.() !== true) done('idle');
+    else if (session.canAcceptNativeHumanSteer?.() === true) done('steerable');
+  });
+}
+
+function waitForSessionProgress(
+  session: SessionLike,
+  sinceSeq: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted || session.latestSeq() > sinceSeq) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsubscribe: () => void = () => {};
+    const onAbort = () => done();
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      unsubscribe();
+      resolve();
+    };
+    const timer = setTimeout(done, Math.max(1, timeoutMs));
+    timer.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const stop = session.subscribe(() => done(), sinceSeq, false);
+      unsubscribe = stop;
+      if (settled) stop();
+    } catch {
+      done();
+      return;
+    }
+    if (session.latestSeq() > sinceSeq) done();
   });
 }
 
@@ -346,14 +392,17 @@ async function getRecipientSessionForDelivery(
       return { session, waited, nativeSteer: true, model, effort };
     }
     waited = true;
-    const outcome = await waitForIdleBoundary(session, Math.max(1, deadline - Date.now()), signal);
+    const outcome = await waitForDeliveryBoundary(session, Math.max(1, deadline - Date.now()), signal);
     if (outcome === 'aborted') throw new Error('sender stopped before delivery');
     if (outcome === 'timeout') break;
-    // Re-resolve after every boundary. A closed process or a mid-thread rebrain
-    // may replace the session object before this queued handoff starts.
+    // Re-resolve after every idle, closed, or steerable boundary. A closed
+    // process or a mid-thread rebrain may replace the session object, and a
+    // steering window can close before admission, in which case we wait again.
+    // Crucially, a future tool window wakes this loop instead of pinning the
+    // recipient FIFO until the entire long-running turn ends.
   }
 
-  throw new Error(`${agent.name} did not reach an idle turn boundary within ${Math.round(RECIPIENT_IDLE_WAIT_MS / 60_000)} minutes`);
+  throw new Error(`${agent.name} did not reach an admissible delivery boundary within ${Math.round(RECIPIENT_IDLE_WAIT_MS / 60_000)} minutes`);
 }
 
 // ---- delivery ----------------------------------------------------------------
@@ -593,7 +642,18 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
       // delete the outbox row or accept another turn's completion; retry.
       unsubscribe?.();
       waited = true;
-      await retryDelay();
+      // Re-enter admission promptly. If the safe tool window closed during
+      // preparation, getRecipientSessionForDelivery will subscribe for the next
+      // one. When a runner reports a stale-open window, wait for a new event (or
+      // a short backstop) so retries cannot become an unbounded microtask loop.
+      if (session.canAcceptNativeHumanSteer?.() === true) {
+        await waitForSessionProgress(
+          session,
+          session.latestSeq(),
+          Math.min(250, Math.max(1, deadline - Date.now())),
+          signal,
+        );
+      }
       continue;
     }
 
@@ -782,17 +842,28 @@ export async function deliverTeamMessage(input: {
   }
 
   const { chain, repeatsEdge } = inheritedTeamChain(from.id, to.id);
-  if (repeatsEdge) {
+  const requestedWaitForReply = input.wait !== false;
+  // The repeat-edge rule exists to stop a SYNCHRONOUS loop (A waits on B, B
+  // waits on C, C waits back on A). A fire-and-forget handoff cannot close such
+  // a loop: nothing blocks on it, so re-sending the same edge just enqueues
+  // another delivery. Blocking it here was collapsing an orchestrator's whole
+  // turn into "one message per teammate", because the inbound chain is keyed on
+  // the sender and only cleared at turnEnd. A long turn that steers the same
+  // teammate several times had every message after the first silently dropped,
+  // which is exactly when steering matters most.
+  //
+  // The genuinely dangerous case is still covered, and covered better: the
+  // `closesReplyCycle` check below detects a wait path back to the sender and
+  // degrades that leg to fire-and-forget rather than discarding its text.
+  if (repeatsEdge && requestedWaitForReply) {
     return {
       delivered: true,
       to: to.name,
       hop,
       loopClosed: true,
-      reason: 'This exact teammate route already ran in the current collaboration, so Rivendell closed a repeat loop. Continue inline and summarize the new information instead of re-sending it.',
+      reason: 'This exact teammate route already ran in the current collaboration and this send would wait on a reply, so Rivendell closed a repeat loop. Re-send with wait:false if you need to steer them again.',
     };
   }
-
-  const requestedWaitForReply = input.wait !== false;
   // If adding from -> to closes any active wait path (A -> B -> C -> A), the
   // closing leg becomes durable fire-and-forget. Its text is preserved and all
   // blocked turns can finish; direct and longer cycles behave identically.
