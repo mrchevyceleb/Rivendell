@@ -8,7 +8,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync, statSync, unlinkSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { STATE_DIR } from './config.ts';
+import { SESSIONS_FILE, STATE_DIR } from './config.ts';
 import { deleteRoutinesForAgent } from './routines.ts';
 import { deleteMessagePinsForAgent } from '../lib/messagePinStore.ts';
 
@@ -28,16 +28,20 @@ export type Agent = {
   id: string;
   name: string;
   role: string;
-  /** WORKSPACE_COMPANIONS lane id ('claude', 'xai', …). */
+  /** Server-authoritative brain used by every device, voice call, routine, and
+   * teammate handoff. */
   engine: string;
+  model?: string;
+  effort?: string;
+  brainRevision?: number;
+  brainUpdatedAt?: number;
   /** home thread chatId (bot-<id>). */
   home: string;
   createdAt: number;
   /** Avatar version stamp (epoch ms) — also the cache-buster in avatar URLs. */
   avatar?: number;
-  /** Live lane (session cli) this agent's home thread last ran on — updated
-   *  on every user turn so the team bus routes to the thread the human (and
-   *  teammates) actually see, even after a rebrain. */
+  /** Historical lane stamp retained for migration/diagnostics only. Routing
+   * always derives from the canonical engine/model/effort brain above. */
   cli?: string;
   /** Manual sidebar position (drag-and-drop). Order is FIXED unless the user
    *  moves a row — never activity-sorted. */
@@ -47,6 +51,144 @@ export type Agent = {
   /** Pinned to the top bubble strip (user choice, not activity). */
   pinned?: boolean;
 };
+
+export type AgentBrain = { engine: string; model?: string; effort?: string; revision: number; updatedAt?: number };
+
+const VALID_ENGINES = new Set([
+  'claude', 'codex', 'banana', 'banana-local', 'banana-fireworks', 'zai', 'xai',
+]);
+
+export function cliForAgentEngine(engine: string): string {
+  if (engine.startsWith('claude')) return 'claude';
+  if (engine.startsWith('banana')) return engine;
+  if (engine.startsWith('codex')) return 'codex';
+  if (engine === 'zai') return 'zai';
+  if (engine === 'xai') return 'xai';
+  return 'xai';
+}
+
+export function defaultAgentBrain(engine: string): Omit<AgentBrain, 'revision' | 'updatedAt'> {
+  switch (cliForAgentEngine(engine)) {
+    case 'claude': return { engine: 'claude', model: 'claude-opus-5', effort: 'xhigh' };
+    case 'codex': return { engine: 'codex', model: 'gpt-5.6-sol', effort: 'low' };
+    case 'banana': return { engine: 'banana', model: 'openrouter/anthropic/claude-sonnet-5', effort: 'medium' };
+    case 'banana-fireworks': return { engine: 'banana-fireworks', model: 'fireworks/accounts/fireworks/models/glm-5p2', effort: 'medium' };
+    case 'banana-local': return { engine: 'banana-local', effort: 'medium' };
+    case 'zai': return { engine: 'zai', model: 'glm-5.3[1m]', effort: 'high' };
+    case 'xai':
+    default: return { engine: 'xai', model: 'grok-4.6', effort: 'max' };
+  }
+}
+
+function cleanBrainValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  return value.trim().slice(0, 180) || undefined;
+}
+
+const CLAUDE_BRAIN_MODELS = new Set(['claude-opus-5', 'claude-fable-5-1', 'claude-fable-5']);
+const ZAI_BRAIN_MODELS = new Set(['glm-5.3[1m]', 'glm-5.3-flash[1m]', 'glm-5.2[1m]', 'glm-5.1']);
+const CODEX_BRAIN_EFFORTS: Record<string, ReadonlySet<string>> = {
+  'gpt-6-astra': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  'gpt-5.6-sol': new Set(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  'gpt-5.6-luna': new Set(['low', 'medium', 'high', 'xhigh', 'max']),
+  'gpt-5.5': new Set(['low', 'medium', 'high', 'xhigh']),
+  'gpt-5.3-codex': new Set(['low', 'medium', 'high', 'xhigh']),
+  'gpt-5.3-codex-spark': new Set(['low', 'medium', 'high', 'xhigh']),
+};
+const CODEX_DEFAULT_EFFORT: Record<string, string> = {
+  'gpt-6-astra': 'medium',
+  'gpt-5.6-sol': 'low',
+  'gpt-5.6-luna': 'medium',
+  'gpt-5.5': 'medium',
+  'gpt-5.3-codex': 'high',
+  'gpt-5.3-codex-spark': 'high',
+};
+const STANDARD_BRAIN_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const BANANA_BRAIN_EFFORTS = new Set(['low', 'medium', 'high']);
+const ZAI_MODEL_ALIASES: Record<string, string> = {
+  'glm-5.3': 'glm-5.3[1m]',
+  'glm-5.3-flash': 'glm-5.3-flash[1m]',
+  'glm-5.2': 'glm-5.2[1m]',
+};
+
+function normalizeBrainModel(engine: string, value: unknown, fallback?: string): string | undefined {
+  let model = cleanBrainValue(value);
+  if (!model) return fallback;
+  if (engine === 'zai') model = ZAI_MODEL_ALIASES[model] ?? model;
+  const valid = engine === 'claude' ? CLAUDE_BRAIN_MODELS.has(model)
+    : engine === 'codex' ? Object.prototype.hasOwnProperty.call(CODEX_BRAIN_EFFORTS, model)
+    : engine === 'xai' ? model === 'grok-4.6' || model === 'grok-4.5'
+    : engine === 'zai' ? ZAI_BRAIN_MODELS.has(model)
+    : engine === 'banana' ? model.startsWith('openrouter/')
+    : engine === 'banana-fireworks' ? model.startsWith('fireworks/')
+    : engine === 'banana-local' ? model.startsWith('local/')
+    : false;
+  return valid ? model : fallback;
+}
+
+function normalizeBrainEffort(engine: string, model: string | undefined, value: unknown, fallback?: string): string | undefined {
+  const effort = cleanBrainValue(value);
+  const allowed = engine === 'codex' && model ? CODEX_BRAIN_EFFORTS[model]
+    : engine === 'zai' ? new Set(['high', 'max'])
+    : engine.startsWith('banana') ? BANANA_BRAIN_EFFORTS
+    : STANDARD_BRAIN_EFFORTS;
+  const canonicalFallback = engine === 'codex' && model
+    ? CODEX_DEFAULT_EFFORT[model] ?? fallback
+    : fallback;
+  return effort && allowed?.has(effort) ? effort : canonicalFallback;
+}
+
+function lastPersistedSelection(agent: Agent, engine: string): { model?: string; effort?: string } {
+  try {
+    const records = JSON.parse(readFileSync(SESSIONS_FILE, 'utf8')) as Record<
+      string,
+      { model?: unknown; effort?: unknown; updatedAt?: unknown }
+    >;
+    const cli = cliForAgentEngine(engine);
+    const suffix = `|${agent.home}`;
+    const candidates = Object.entries(records)
+      .filter(([key]) => (
+        key.startsWith(`${cli}|`)
+        && (key.endsWith(suffix) || key.includes(`${suffix}__acct__`))
+      ))
+      .sort(([, a], [, b]) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0));
+    const latest = candidates[0]?.[1];
+    return {
+      model: cleanBrainValue(latest?.model),
+      effort: cleanBrainValue(latest?.effort),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function normalizeAgentBrain(agent: Agent): Agent {
+  const engine = VALID_ENGINES.has(agent.engine) ? agent.engine : 'xai';
+  const defaults = defaultAgentBrain(engine);
+  const persisted = !agent.model || !agent.effort ? lastPersistedSelection(agent, engine) : {};
+  const model = normalizeBrainModel(engine, agent.model ?? persisted.model, defaults.model);
+  const effort = normalizeBrainEffort(engine, model, agent.effort ?? persisted.effort, defaults.effort);
+  return {
+    ...agent,
+    engine,
+    model,
+    effort,
+    brainRevision: Number.isSafeInteger(agent.brainRevision) && (agent.brainRevision ?? 0) > 0
+      ? agent.brainRevision
+      : 1,
+  };
+}
+
+export function brainForAgent(agent: Agent): AgentBrain {
+  const normalized = normalizeAgentBrain(agent);
+  return {
+    engine: normalized.engine,
+    model: normalized.model,
+    effort: normalized.effort,
+    revision: normalized.brainRevision ?? 1,
+    updatedAt: normalized.brainUpdatedAt,
+  };
+}
 
 const DEFAULT_SCOPE = `# Chief of Staff
 
@@ -73,7 +215,11 @@ function slugify(name: string): string {
 export function listAgents(): Agent[] {
   try {
     const data = JSON.parse(readFileSync(AGENTS_FILE, 'utf8')) as { agents?: Agent[] };
-    const agents = Array.isArray(data.agents) ? data.agents : [];
+    const rawAgents = Array.isArray(data.agents) ? data.agents : [];
+    const agents = rawAgents.map(normalizeAgentBrain);
+    // One-time in-place migration makes the central brain explicit instead of
+    // recomputing hidden defaults independently on every device and worker.
+    if (JSON.stringify(agents) !== JSON.stringify(rawAgents)) saveAgents(agents);
     // Fixed manual order first; unordered legacy/new agents append by age.
     return agents.sort((a, b) =>
       (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER)
@@ -113,7 +259,7 @@ export function ensureAgents(): void {
   }
 }
 
-export type AgentInput = { name: string; role?: string; engine?: string; voice?: string; pinned?: boolean; scope?: string };
+export type AgentInput = { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; pinned?: boolean; scope?: string };
 
 export function createAgent(input: AgentInput): Agent {
   const agents = listAgents();
@@ -121,14 +267,26 @@ export function createAgent(input: AgentInput): Agent {
   let id = base;
   let n = 2;
   while (agents.some((a) => a.id === id) || id === 'chief-of-staff' && false) id = `${base}-${n++}`;
+  const engine = input.engine && VALID_ENGINES.has(input.engine) ? input.engine : 'xai';
+  const defaults = defaultAgentBrain(engine);
+  const now = Date.now();
   const agent: Agent = {
     id,
     name: input.name.trim().slice(0, 60),
     role: (input.role ?? '').trim().slice(0, 120) || 'Teammate',
-    engine: input.engine ?? 'xai',
+    engine,
+    model: normalizeBrainModel(engine, input.model, defaults.model),
+    effort: normalizeBrainEffort(
+      engine,
+      normalizeBrainModel(engine, input.model, defaults.model),
+      input.effort,
+      defaults.effort,
+    ),
+    brainRevision: 1,
+    brainUpdatedAt: now,
     voice: input.voice ?? 'ara',
     home: `bot-${id}`,
-    createdAt: Date.now(),
+    createdAt: now,
     order: Math.max(0, ...agents.map((a) => a.order ?? 0)) + 1,
   };
   if (input.scope && input.scope.trim()) {
@@ -139,23 +297,61 @@ export function createAgent(input: AgentInput): Agent {
   return agent;
 }
 
-export function updateAgent(id: string, patch: Partial<AgentInput>): Agent | null {
+export class AgentBrainConflictError extends Error {
+  constructor(readonly current: Agent) {
+    super('agent brain changed on another device');
+    this.name = 'AgentBrainConflictError';
+  }
+}
+
+export class AgentBrainRevisionRequiredError extends Error {
+  constructor(readonly current: Agent) {
+    super('agent brain updates require the current brain revision');
+    this.name = 'AgentBrainRevisionRequiredError';
+  }
+}
+
+export function updateAgent(
+  id: string,
+  patch: Partial<AgentInput>,
+  expectedBrainRevision?: number,
+): Agent | null {
   const agents = listAgents();
   const idx = agents.findIndex((a) => a.id === id);
   if (idx < 0) return null;
-  const cur = agents[idx];
+  const cur = normalizeAgentBrain(agents[idx]);
+  const changesBrain = patch.engine !== undefined || patch.model !== undefined || patch.effort !== undefined;
+  if (changesBrain && expectedBrainRevision === undefined) {
+    throw new AgentBrainRevisionRequiredError(cur);
+  }
+  if (changesBrain && expectedBrainRevision !== (cur.brainRevision ?? 1)) {
+    throw new AgentBrainConflictError(cur);
+  }
+  const engine = patch.engine && VALID_ENGINES.has(patch.engine) ? patch.engine : cur.engine;
+  const engineChanged = engine !== cur.engine;
+  const defaults = defaultAgentBrain(engine);
+  const model = patch.model !== undefined
+    ? normalizeBrainModel(engine, patch.model, defaults.model)
+    : engineChanged ? defaults.model : cur.model;
+  const effortInput = patch.effort !== undefined
+    ? patch.effort
+    : engineChanged ? defaults.effort : cur.effort;
+  const effort = normalizeBrainEffort(engine, model, effortInput, defaults.effort);
+  const brainChanged = engineChanged || model !== cur.model || effort !== cur.effort;
   const next: Agent = {
     ...cur,
     name: patch.name !== undefined ? (patch.name.trim().slice(0, 60) || cur.name) : cur.name,
     role: patch.role !== undefined ? (patch.role.trim().slice(0, 120) || cur.role) : cur.role,
-    engine: patch.engine !== undefined ? (patch.engine || cur.engine) : cur.engine,
+    engine,
+    model,
+    effort,
+    brainRevision: brainChanged ? (cur.brainRevision ?? 1) + 1 : cur.brainRevision,
+    brainUpdatedAt: brainChanged ? Date.now() : cur.brainUpdatedAt,
     voice: patch.voice !== undefined ? (patch.voice || cur.voice) : cur.voice,
     pinned: patch.pinned !== undefined ? patch.pinned : cur.pinned,
   };
-  // A deliberate engine change invalidates the live lane stamp — the next
-  // user turn re-stamps it. Otherwise team delivery keeps routing to the
-  // old lane's log after a rebrain.
-  if (next.engine !== cur.engine) delete next.cli;
+  // Any deliberate brain change makes the prior live-lane stamp historical.
+  if (brainChanged) delete next.cli;
   agents[idx] = next;
   saveAgents(agents);
   if (patch.scope !== undefined && patch.scope.trim()) {
@@ -247,9 +443,9 @@ export function agentForChatId(chatId: string): Agent | undefined {
 
 const laneStamps = new Map<string, string>();
 
-/** Record which session cli a home thread last took a USER turn on. Called by
- *  every runner so rebrains (lane changes from the composer) re-route team
- *  deliveries to the live thread. Throttled write: at most one save/min/agent. */
+/** Record which session cli most recently accepted a USER turn. Canonical
+ * routing ignores this stamp; it remains useful for legacy migration and
+ * diagnostics. Throttled write: at most one save/min/agent. */
 const laneLastWrite = new Map<string, number>();
 export function noteAgentLane(chatId: string, cli: string): void {
   const bare = chatId.replace(/__acct__[a-z0-9-]+$/i, '');

@@ -87,7 +87,7 @@ async function callTool(name, args, signal) {
   if (name === 'team_list') {
     const { agents } = await api('/api/team', undefined, signal);
     return `Teammates (${agents.length}):\n` + agents
-      .map((a) => `- ${a.name} (${a.id}) — ${a.role} [${a.engine}]`)
+      .map((a) => `- ${a.name} (${a.id}) — ${a.role} [${a.engine}${a.model ? ` · ${a.model}` : ''}${a.effort ? ` · ${a.effort}` : ''}]`)
       .join('\n');
   }
   if (name === 'team_message') {

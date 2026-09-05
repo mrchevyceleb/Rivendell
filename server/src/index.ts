@@ -6,12 +6,8 @@ import { resolve } from 'node:path';
 import { ELROND_WORKSPACE_PATH, HOST, PORT, PREWARM_AGENTS, STATIC_DIR, WORKER_RUNNER } from './config.ts';
 import { quiesceChat, registerChat } from './chat/register.ts';
 import { getOrCreateSession, isClaudeFamilyCli, type CliKind } from './chat/runner.ts';
-import { getSessionSelection } from './chat/sessions.ts';
-import { ensureAgents, listAgents } from './chat/agents.ts';
-import { cliForEngine, resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
-import { loadEventLogSync } from './chat/event-log-store.ts';
-import { lastEngineOf, threadLogKey } from './chat/threadKey.ts';
-import { ASSISTANT_HUB_PATH } from './chat/config.ts';
+import { brainForAgent, cliForAgentEngine, ensureAgents, listAgents } from './chat/agents.ts';
+import { resumeQueuedTeamDeliveries } from './chat/teamBus.ts';
 import { agentsRouter } from './routes/agents.ts';
 import { teamRouter } from './routes/team.ts';
 import { routinesRouter } from './routes/routines.ts';
@@ -183,25 +179,18 @@ server.listen(PORT, HOST, () => {
         if (typeof agent?.name !== 'string' || typeof agent?.home !== 'string' || !agent.home) {
           throw new Error('invalid agent record');
         }
-        const threadHistory = loadEventLogSync(threadLogKey(ELROND_WORKSPACE_PATH, agent.home)).events;
-        const durableCli = lastEngineOf(threadHistory);
-        const configuredCli = typeof agent.cli === 'string'
-          ? agent.cli
-          : typeof agent.engine === 'string'
-            ? cliForEngine(agent.engine)
-            : '';
-        const cli = (durableCli ?? configuredCli) as CliKind;
+        const brain = brainForAgent(agent);
+        const cli = cliForAgentEngine(brain.engine) as CliKind;
         if (!isClaudeFamilyCli(cli)) continue;
         const chatKey = agent.home;
-        const selectionCwd = cli === 'assistant' ? ASSISTANT_HUB_PATH : ELROND_WORKSPACE_PATH;
-        const selection = await getSessionSelection(cli, selectionCwd, chatKey);
         if (tearingDown) break;
         const session = await getOrCreateSession({
           cli,
           repoPath: ELROND_WORKSPACE_PATH,
           chatId: chatKey,
-          model: selection?.model,
-          effort: selection?.effort,
+          model: brain.model,
+          effort: brain.effort,
+          recycleOnMismatch: true,
         });
         if (tearingDown) {
           session.shutdown('prewarm-teardown');

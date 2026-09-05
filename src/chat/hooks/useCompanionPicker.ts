@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { CompanionId } from '../data/types';
 import { useBananaModel, useFireworksModel } from './useBananaModel';
 import {
@@ -267,6 +267,67 @@ export function useCompanionPicker(storageKey: string) {
   const setBananaEffort = persist('rivendell:banana-effort', setBananaEffortState);
   const setLocalModel = persist('rivendell:local-model', setLocalModelState);
 
+  /** Apply the server-owned brain without marking it as a device-local picker
+   * action. Used by agent chats so cross-device updates converge without
+   * remounting the conversation or erasing a draft. */
+  const applyAuthoritativeBrain = useCallback((engine: string, model?: string, effort?: string) => {
+    const lane = WORKSPACE_COMPANIONS.some((candidate) => candidate.id === engine) ? engine : 'xai';
+    setCompanionState(lane);
+    if (typeof window !== 'undefined') localStorage.setItem(storageKey, lane);
+
+    if (lane === 'claude') {
+      const nextModel = normalizeClaudeModel(model);
+      setClaudeModelState(nextModel);
+      if (effort) setClaudeEffortState(effort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:claude-model', nextModel);
+        if (effort) localStorage.setItem('rivendell:claude-effort', effort);
+      }
+    } else if (lane === 'codex') {
+      const nextModel = normalizeCodexModel(model ?? '');
+      const nextEffort = normalizeCodexEffort(nextModel, effort ?? '');
+      setCodexModelState(nextModel);
+      setCodexEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:codex-model', nextModel);
+        localStorage.setItem('rivendell:codex-effort', nextEffort);
+      }
+    } else if (lane === 'zai') {
+      const nextModel = normalizeZaiModel(model ?? '');
+      const nextEffort = normalizeZaiEffort(effort ?? '');
+      setZaiModelState(nextModel);
+      setZaiEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:zai-model', nextModel);
+        localStorage.setItem('rivendell:zai-effort', nextEffort);
+      }
+    } else if (lane === 'xai') {
+      const nextModel = normalizeXaiModel(model ?? '');
+      const nextEffort = normalizeXaiEffort(effort ?? '');
+      setXaiModelState(nextModel);
+      setXaiEffortState(nextEffort);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('rivendell:xai-model', nextModel);
+        localStorage.setItem('rivendell:xai-effort', nextEffort);
+      }
+    } else if (lane === 'banana') {
+      if (model) bananaModel.setModel(model);
+      if (effort) setBananaEffortState(effort);
+    } else if (lane === 'banana-fireworks') {
+      if (model) fireworksModel.setModel(model);
+      if (effort) setBananaEffortState(effort);
+    } else if (lane === 'banana-local') {
+      if (model) setLocalModelState(model);
+      if (effort) setBananaEffortState(effort);
+      if (typeof window !== 'undefined' && model) localStorage.setItem('rivendell:local-model', model);
+    }
+    if (
+      typeof window !== 'undefined'
+      && effort
+      && (lane === 'banana' || lane === 'banana-fireworks' || lane === 'banana-local')
+    ) localStorage.setItem('rivendell:banana-effort', effort);
+  }, [bananaModel.setModel, fireworksModel.setModel, storageKey]);
+
   const cli = entry.cli;
   const isClaude = cli === 'assistant' || cli === 'claude';
   const isCodex = cli === 'codex';
@@ -294,8 +355,9 @@ export function useCompanionPicker(storageKey: string) {
     : undefined;
 
   return {
-    companion, setCompanion,
+    companion, setCompanion, applyAuthoritativeBrain,
     cli, account, model, effort, selectionRevision: selectionRevisions[companion] ?? 0,
+    brainPending: false,
     isClaude, isCodex, isLocal, isOpenRouter, isFireworks, isZai, isXai,
     bananaModel,
     fireworksModel,

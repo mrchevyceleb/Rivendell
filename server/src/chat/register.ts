@@ -5,10 +5,12 @@ import { WebSocketServer } from 'ws';
 import { discoverRepos } from './repos.ts';
 import { readChronicle } from './chronicle.ts';
 import { readCommands } from './commands.ts';
-import { ensureStateDir } from './sessions.ts';
+import { clearThreadSessionIds, ensureStateDir } from './sessions.ts';
 import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import {
   activeClaudeSessions,
+  beginThreadReset,
+  dropSession,
   freshStart,
   getOrCreateSession,
   interruptSession,
@@ -18,6 +20,7 @@ import {
   MemoryPressureSpawnError,
   peekClaudeSession,
   pruneIdleClaudeSessions,
+  settleThreadSessionLookups,
   shutdownAllSessions,
   type AnySession,
   type CliKind,
@@ -42,6 +45,8 @@ import {
 import { emitScribe } from '../worker/scribe.ts';
 import { listChatHistory } from './history.ts';
 import { watchThread, unwatchThread, setWatchVisible } from './threadWatch.ts';
+import { agentForChatId, brainForAgent, cliForAgentEngine } from './agents.ts';
+import { loadThreadResetEpochs, persistThreadResetEpoch } from './threadResetStore.ts';
 
 type ClientSelection = {
   model?: string;
@@ -51,7 +56,7 @@ type ClientSelection = {
   selectionRevision?: number;
   reconfigure?: boolean;
 };
-type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; visible?: boolean } & ClientSelection;
+type ClientHello = { type: 'hello'; cli: CliKind; repo: string; chatId?: string; sinceSeq?: number; resetAt?: number; visible?: boolean } & ClientSelection;
 type ClientWatch = { type: 'watch'; visible?: boolean };
 // `model` / `effort` ride on send/steer. Banana and Codex apply them per turn.
 // Claude-family lanes (claude/assistant/zai/xai) apply them at spawn; a live
@@ -173,6 +178,23 @@ function selectionRevisionOf(value: unknown): number {
   return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : 0;
 }
 
+type ResolvedBrain = { cli: CliKind; model?: string; effort?: string; revision?: number };
+
+function resolvedBrain(
+  chatId: string,
+  fallback: { cli: CliKind; model?: string; effort?: string },
+): ResolvedBrain {
+  const agent = agentForChatId(chatId);
+  if (!agent) return fallback;
+  const brain = brainForAgent(agent);
+  return {
+    cli: cliForAgentEngine(brain.engine) as CliKind,
+    model: brain.model,
+    effort: brain.effort,
+    revision: brain.revision,
+  };
+}
+
 function sessionCli(session: AnySession | null | undefined): CliKind | null {
   if (!session || typeof session.cli !== 'string') return null;
   return session.cli;
@@ -185,6 +207,14 @@ function claudeSpawnOf(session: AnySession | null | undefined): { model: string;
   const spawned = session as { spawnModel?: unknown; spawnEffort?: unknown };
   if (typeof spawned.spawnModel !== 'string' || typeof spawned.spawnEffort !== 'string') return null;
   return { model: spawned.spawnModel, effort: spawned.spawnEffort };
+}
+
+function activeSelectionOf(session: AnySession | null | undefined): { model?: string; effort?: string } {
+  const claude = claudeSpawnOf(session);
+  if (claude) return claude;
+  const selected = (session as { activeSelection?: () => { model?: string; effort?: string } } | null | undefined)
+    ?.activeSelection?.();
+  return selected ?? {};
 }
 
 type DispatchSeqEvent = { seq: number; ev: any };
@@ -411,6 +441,18 @@ export async function registerChat(app: express.Express, server: Server): Promis
       (event) => userEchoClientMsgId(event.ev) === clientMsgId,
     )
   );
+  const recentDeliveredClientMsgIds = (cli: CliKind, repo: string, chatId: string, limit = 128): string[] => {
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    const events = loadEventLogSync(laneLogKey(cli, repo, chatId)).events;
+    for (let index = events.length - 1; index >= 0 && ids.length < limit; index -= 1) {
+      const clientMsgId = userEchoClientMsgId(events[index]?.ev);
+      if (!clientMsgId || seen.has(clientMsgId)) continue;
+      seen.add(clientMsgId);
+      ids.push(clientMsgId);
+    }
+    return ids;
+  };
   const rememberSendAdmission = (
     key: string,
     state: SendAdmission['state'],
@@ -429,13 +471,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (admission.state === 'accepted') sendAdmissions.delete(entryKey);
     }
   };
-  const activeSessionForLogKey = (logKey: string) => (
+  const sessionsForLogKey = (logKey: string) => (
     [...activeClaudeSessions(), ...activeCodexSessions(), ...activeBananaSessions()]
-      .find((session) => (
-        session.busy
-        && laneLogKey(session.cli, session.cwd, session.chatId) === logKey
-      ))
-      ?? null
+      .filter((session) => laneLogKey(session.cli, session.cwd, session.chatId) === logKey)
+  );
+  const activeSessionForLogKey = (logKey: string) => (
+    sessionsForLogKey(logKey).find((session) => session.busy) ?? null
   );
   const pendingAdmissionForLogKey = (logKey: string): SendAdmission | null => (
     [...sendAdmissions.values()].find((admission) => (
@@ -475,6 +516,25 @@ export async function registerChat(app: express.Express, server: Server): Promis
   // only the renumbered prefix while still replaying newer memory-only events.
   const repairedSessionThrough = new WeakMap<AnySession, number>();
   const wss = new WebSocketServer({ noServer: true });
+  type SocketThread = { cli: CliKind; repo: string; chatId: string };
+  const socketThreads = new Map<import('ws').WebSocket, SocketThread>();
+  const threadResetAt = await loadThreadResetEpochs();
+  const broadcastThreadReset = (
+    logKey: string,
+    source: import('ws').WebSocket,
+    payload: Record<string, unknown>,
+  ) => {
+    let sourceSent = false;
+    for (const [client, lane] of socketThreads) {
+      if (client.readyState !== client.OPEN) continue;
+      if (laneLogKey(lane.cli, lane.repo, lane.chatId) !== logKey) continue;
+      client.send(JSON.stringify({ ...payload, remote: client !== source }));
+      if (client === source) sourceSent = true;
+    }
+    if (!sourceSent && source.readyState === source.OPEN) {
+      source.send(JSON.stringify({ ...payload, remote: false }));
+    }
+  };
   let wsCounter = 0;
   // Backstop for a client that leaks sockets: a long-lived tab whose orphaned
   // WebSockets keep their handlers attached and keep re-helloing. One browser
@@ -539,6 +599,19 @@ export async function registerChat(app: express.Express, server: Server): Promis
     /** Last authoritative queue set sent to this socket. Keepalive sends one
      * empty transition after cancellation even when the lane just became idle. */
     let lastQueuedSignature = '';
+    // Durable admission receipts repair optimistic bubbles after a device/tab
+    // leaves between the server's synchronous _user_echo and React committing
+    // that acknowledgement to its local snapshot.
+    let deliveredClientMsgIds: string[] = [];
+    const refreshDeliveredClientMsgIds = (cli: CliKind, repo: string, id: string) => {
+      deliveredClientMsgIds = recentDeliveredClientMsgIds(cli, repo, id);
+    };
+    const rememberDeliveredClientMsgId = (clientMsgId: string) => {
+      deliveredClientMsgIds = [
+        clientMsgId,
+        ...deliveredClientMsgIds.filter((value) => value !== clientMsgId),
+      ].slice(0, 128);
+    };
     // Duplicate-hello suppression (see HELLO_DEDUPE_MS).
     let lastHelloSig = '';
     let lastHelloAt = 0;
@@ -603,7 +676,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       const signature = queuedClientMsgIds.join('\u0000');
       const queueChanged = signature !== lastQueuedSignature;
       if (!busy && !queueChanged) return;
-      safeSend({ type: 'working', busy, activeCli: cliKind, queuedClientMsgIds });
+      safeSend({ type: 'working', busy, activeCli: cliKind, queuedClientMsgIds, deliveredClientMsgIds });
       lastQueuedSignature = signature;
     }, TURN_KEEPALIVE_MS);
     keepalive.unref();
@@ -620,6 +693,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
       if (sev.type === 'event') {
         const admittedClientMsgId = userEchoClientMsgId(sev.event);
         if (admittedClientMsgId && cliKind && repoPath) {
+          rememberDeliveredClientMsgId(admittedClientMsgId);
           const logKey = laneLogKey(cliKind, repoPath, chatId);
           rememberSendAdmission(
             sendAdmissionKey(cliKind, repoPath, chatId, admittedClientMsgId),
@@ -688,7 +762,12 @@ export async function registerChat(app: express.Express, server: Server): Promis
       }
     };
 
-    const bindSession = async (promise: Promise<AnySession>, sinceSeq = -1) => {
+    const bindSession = async (
+      promise: Promise<AnySession>,
+      sinceSeq = -1,
+      resetAt = 0,
+      forceReset = false,
+    ) => {
       sessionPromise = promise;
       const session = await promise;
       unsubscribe?.();
@@ -709,9 +788,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
       const { events } = loadEventLogSync(session.logKey);
       const durableLatest = events.reduce((max, event) => Math.max(max, event.seq), 0);
       const latest = Math.max(durableLatest, session.latestSeq());
-      const resetReplay = sinceSeq >= 0 && sinceSeq > latest;
+      const resetReplay = forceReset || (sinceSeq >= 0 && sinceSeq > latest);
       const replaySince = resetReplay ? 0 : sinceSeq;
-      if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest });
+      if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest, resetAt });
 
       const liveReplay: DispatchSeqEvent[] = [];
       let replaying = replaySince >= 0;
@@ -756,6 +835,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
       repo: string,
       id: string,
       sinceSeq: number,
+      resetAt = 0,
+      forceReset = false,
     ): Promise<number> => {
       const logKey = laneLogKey(cli, repo, id);
       await flushEventLog(logKey);
@@ -766,9 +847,9 @@ export async function registerChat(app: express.Express, server: Server): Promis
       const { events } = loadEventLogSync(logKey);
       let latest = 0;
       for (const event of events) if (event.seq > latest) latest = event.seq;
-      const resetReplay = sinceSeq >= 0 && sinceSeq > latest;
+      const resetReplay = forceReset || (sinceSeq >= 0 && sinceSeq > latest);
       const replaySince = resetReplay ? 0 : sinceSeq;
-      if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest });
+      if (resetReplay) safeSend({ type: 'replayReset', latestSeq: latest, resetAt });
       if (replaySince >= 0) {
         const pending: DispatchSeqEvent[] = events
           .filter((event) => event.seq > replaySince)
@@ -855,19 +936,27 @@ export async function registerChat(app: express.Express, server: Server): Promis
             helloSeen = true;
             finishHello = settleHelloBarrier;
           }
-          cliKind = msg.cli;
           repoPath = msg.repo;
           chatId = normalizeChatId(msg.chatId);
+          const desiredBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
+          cliKind = desiredBrain.cli;
           const sinceSeq = typeof msg.sinceSeq === 'number' ? msg.sinceSeq : -1;
+          const requestedLogKey = laneLogKey(desiredBrain.cli, msg.repo, chatId);
+          const resetAt = threadResetAt.get(requestedLogKey) ?? 0;
+          const clientResetAt = typeof msg.resetAt === 'number' && Number.isFinite(msg.resetAt)
+            ? Math.max(0, msg.resetAt)
+            : 0;
+          const forceResetReplay = clientResetAt < resetAt;
+          socketThreads.set(ws, { cli: desiredBrain.cli, repo: msg.repo, chatId });
           // Same-lane re-hellos (focus/online/pageshow reconcile) refresh
           // visibility even when the replay dedupe below swallows the rest —
           // a lost or racing watch message must self-heal on the next hello.
           if (watchedLane && watchedLane.repo === msg.repo && watchedLane.chatId === chatId) {
             setWatchVisible(watchedLane.repo, watchedLane.chatId, wsId, msg.visible !== false);
           }
-          const helloSig = `${msg.cli}|${msg.repo}|${chatId}|${sinceSeq}`;
+          const helloSig = `${desiredBrain.cli}|${desiredBrain.model ?? ''}|${desiredBrain.effort ?? ''}|${desiredBrain.revision ?? 0}|${msg.repo}|${chatId}|${sinceSeq}|${clientResetAt}`;
           const helloAt = Date.now();
-          if (helloSig === lastHelloSig && helloAt - lastHelloAt < HELLO_DEDUPE_MS) {
+          if (!forceResetReplay && helloSig === lastHelloSig && helloAt - lastHelloAt < HELLO_DEDUPE_MS) {
             lastHelloAt = helloAt;
             const current = sessionPromise ? await sessionPromise.catch(() => null) : null;
             const sessionBusy = current
@@ -875,31 +964,43 @@ export async function registerChat(app: express.Express, server: Server): Promis
               : busy;
             const latestSeq = current
               ? current.latestSeq()
-              : loadEventLogSync(laneLogKey(msg.cli, msg.repo, chatId)).events.reduce(
+              : loadEventLogSync(laneLogKey(desiredBrain.cli, msg.repo, chatId)).events.reduce(
                   (max, event) => Math.max(max, event.seq),
                   0,
                 );
-            const activeCli = sessionCli(current) ?? msg.cli;
+            const activeCli = sessionCli(current) ?? desiredBrain.cli;
+            const activeSelection = activeSelectionOf(current);
             cliKind = activeCli;
             repoPath = msg.repo;
             busy = sessionBusy;
             const queuedClientMsgIds = pendingSteerIds(activeCli, msg.repo, chatId);
+            refreshDeliveredClientMsgIds(activeCli, msg.repo, chatId);
             lastQueuedSignature = queuedClientMsgIds.join('\u0000');
             safeSend({
               type: 'ready',
-              cli: msg.cli,
+              cli: desiredBrain.cli,
+              model: desiredBrain.model,
+              effort: desiredBrain.effort,
+              brainRevision: desiredBrain.revision,
               activeCli,
+              activeModel: activeSelection.model ?? desiredBrain.model,
+              activeEffort: activeSelection.effort ?? desiredBrain.effort,
+              brainPending: activeCli !== desiredBrain.cli
+                || (activeSelection.model !== undefined && activeSelection.model !== desiredBrain.model)
+                || (activeSelection.effort !== undefined && activeSelection.effort !== desiredBrain.effort),
               repo: msg.repo,
               chatId,
               latestSeq,
               busy: sessionBusy,
               queuedClientMsgIds,
+              deliveredClientMsgIds,
+              resetAt,
             });
             return;
           }
           lastHelloSig = helloSig;
           lastHelloAt = helloAt;
-          console.log(`[chat ws#${wsId}] hello cli=${msg.cli} repo=${msg.repo} chatId=${chatId} sinceSeq=${sinceSeq}`);
+          console.log(`[chat ws#${wsId}] hello cli=${desiredBrain.cli} repo=${msg.repo} chatId=${chatId} sinceSeq=${sinceSeq}`);
           if (watchedLane && (watchedLane.repo !== msg.repo || watchedLane.chatId !== chatId)) {
             unwatchThread(watchedLane.repo, watchedLane.chatId, wsId);
             watchedLane = null;
@@ -913,7 +1014,6 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // A hello is a passive attach and must never start an engine process.
           // Warm lane -> attach to it. Cold lane -> serve the durable log and
           // wait; the first real turn spawns lazily in the `send` handler.
-          const requestedLogKey = laneLogKey(msg.cli, msg.repo, chatId);
           const activeThreadOwner = activeSessionForLogKey(requestedLogKey);
           const pendingThreadOwner = pendingAdmissionForLogKey(requestedLogKey);
           const threadOwner = activeThreadOwner ?? pendingThreadOwner;
@@ -923,42 +1023,61 @@ export async function registerChat(app: express.Express, server: Server): Promis
                 repoPath: 'repo' in threadOwner ? threadOwner.repo : threadOwner.cwd,
                 chatId,
               })
-            : peekClaudeSession({ cli: msg.cli, repoPath: msg.repo, chatId });
-          if (!warm && isClaudeFamilyCli(msg.cli)) {
+            : peekClaudeSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId });
+          if (!warm && isClaudeFamilyCli(desiredBrain.cli)) {
             // Drop any session this socket was already bound to. Without it a
             // socket that re-helloes onto a different, cold lane keeps the old
             // lane's subscription - those events would stream into the new
             // lane's transcript - and `send` would reuse the stale
             // sessionPromise instead of starting the lane that was asked for.
             detachCurrentSession();
-            const coldLatestSeq = await replayFromEventLog(msg.cli, msg.repo, chatId, sinceSeq);
-            lastTurnModel = msg.model;
-            lastTurnEffort = msg.effort;
+            const coldLatestSeq = await replayFromEventLog(
+              desiredBrain.cli,
+              msg.repo,
+              chatId,
+              sinceSeq,
+              resetAt,
+              forceResetReplay,
+            );
+            lastTurnModel = desiredBrain.model;
+            lastTurnEffort = desiredBrain.effort;
             busy = false;
-            console.log(`[chat ws#${wsId}] attached cold ${laneLogKey(msg.cli, msg.repo, chatId)} latestSeq=${coldLatestSeq} (no spawn)`);
-            const queuedClientMsgIds = pendingSteerIds(msg.cli, msg.repo, chatId);
+            console.log(`[chat ws#${wsId}] attached cold ${laneLogKey(desiredBrain.cli, msg.repo, chatId)} latestSeq=${coldLatestSeq} (no spawn)`);
+            const queuedClientMsgIds = pendingSteerIds(desiredBrain.cli, msg.repo, chatId);
+            refreshDeliveredClientMsgIds(desiredBrain.cli, msg.repo, chatId);
             lastQueuedSignature = queuedClientMsgIds.join('\u0000');
             safeSend({
               type: 'ready',
-              cli: msg.cli,
-              activeCli: msg.cli,
+              cli: desiredBrain.cli,
+              model: desiredBrain.model,
+              effort: desiredBrain.effort,
+              brainRevision: desiredBrain.revision,
+              activeCli: desiredBrain.cli,
+              activeModel: desiredBrain.model,
+              activeEffort: desiredBrain.effort,
+              brainPending: false,
               repo: msg.repo,
               chatId,
               latestSeq: coldLatestSeq,
               busy: false,
               queuedClientMsgIds,
+              deliveredClientMsgIds,
+              resetAt,
             });
             return;
           }
           const session = await bindSession(
             warm
               ? Promise.resolve(warm)
-              : getOrCreateSession({ cli: msg.cli, repoPath: msg.repo, chatId, model: msg.model, effort: msg.effort }),
+              : getOrCreateSession({ cli: desiredBrain.cli, repoPath: msg.repo, chatId, model: desiredBrain.model, effort: desiredBrain.effort }),
             sinceSeq,
+            resetAt,
+            forceResetReplay,
           );
-          lastTurnModel = msg.model;
-          lastTurnEffort = msg.effort;
-          const activeCli = sessionCli(session) ?? msg.cli;
+          lastTurnModel = desiredBrain.model;
+          lastTurnEffort = desiredBrain.effort;
+          const activeCli = sessionCli(session) ?? desiredBrain.cli;
+          const activeSelection = activeSelectionOf(session);
           cliKind = activeCli;
           repoPath = msg.repo;
           const sessionBusy = (session as any).isBusy?.() === true
@@ -966,16 +1085,27 @@ export async function registerChat(app: express.Express, server: Server): Promis
           busy = sessionBusy;
           console.log(`[chat ws#${wsId}] session ready key=${session.key} latestSeq=${session.latestSeq()} busy=${sessionBusy}`);
           const queuedClientMsgIds = pendingSteerIds(activeCli, msg.repo, chatId);
+          refreshDeliveredClientMsgIds(activeCli, msg.repo, chatId);
           lastQueuedSignature = queuedClientMsgIds.join('\u0000');
           safeSend({
             type: 'ready',
-            cli: msg.cli,
+            cli: desiredBrain.cli,
+            model: desiredBrain.model,
+            effort: desiredBrain.effort,
+            brainRevision: desiredBrain.revision,
             activeCli,
+            activeModel: activeSelection.model ?? desiredBrain.model,
+            activeEffort: activeSelection.effort ?? desiredBrain.effort,
+            brainPending: activeCli !== desiredBrain.cli
+              || (activeSelection.model !== undefined && activeSelection.model !== desiredBrain.model)
+              || (activeSelection.effort !== undefined && activeSelection.effort !== desiredBrain.effort),
             repo: msg.repo,
             chatId,
             latestSeq: session.latestSeq(),
             busy: sessionBusy,
             queuedClientMsgIds,
+            deliveredClientMsgIds,
+            resetAt,
           });
           return;
         }
@@ -983,32 +1113,76 @@ export async function registerChat(app: express.Express, server: Server): Promis
         if (msg.type === 'freshStart') {
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
-          bumpLaneGen(cliKind ?? msg.cli, repoPath ?? msg.repo, chatId);
-          console.warn(`[chat ws#${wsId}] freshStart from ${peer} cli=${msg.cli} repo=${msg.repo} chatId=${chatId}`);
-          detachCurrentSession();
-          const session = await bindSession(
-            freshStart({ cli: msg.cli, repoPath: msg.repo, chatId, model: msg.model, effort: msg.effort }),
-          );
-          lastTurnModel = msg.model;
-          lastTurnEffort = msg.effort;
-          cliKind = msg.cli;
-          repoPath = msg.repo;
-          busy = false;
-          safeSend({ type: 'selectionApplied', selectionRevision: selectionRevisionOf(msg.selectionRevision) });
-          safeSend({ type: 'freshStarted', cli: msg.cli, repo: msg.repo, chatId, latestSeq: session.latestSeq() });
-          return;
+          let brain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
+          const releaseReset = beginThreadReset({ cli: brain.cli, repoPath: msg.repo, chatId });
+          if (!releaseReset) {
+            safeSend({ type: 'error', message: 'This thread is already being reset.' });
+            return;
+          }
+          try {
+            // A delivery/prewarm can be between native-id lookup and claiming
+            // its runner map. Settle it under the reset barrier so the sweep
+            // sees Claude, Codex, and Banana lanes alike.
+            await settleThreadSessionLookups({ cli: brain.cli, repoPath: msg.repo, chatId });
+            brain = resolvedBrain(chatId, brain);
+            const targetLogKey = laneLogKey(brain.cli, msg.repo, chatId);
+            const resetAt = Math.max(Date.now(), (threadResetAt.get(targetLogKey) ?? 0) + 1);
+            // Commit the generation before clearing anything. If a later RAG
+            // or process teardown fails, clients still perform a full replay
+            // of the coherent old log instead of trusting a stale high cursor.
+            await persistThreadResetEpoch(targetLogKey, resetAt);
+            threadResetAt.set(targetLogKey, resetAt);
+            const priorSessions = sessionsForLogKey(targetLogKey);
+            for (const prior of priorSessions) bumpLaneGen(prior.cli, msg.repo, chatId);
+            bumpLaneGen(brain.cli, msg.repo, chatId);
+            console.warn(`[chat ws#${wsId}] freshStart from ${peer} cli=${brain.cli} repo=${msg.repo} chatId=${chatId}`);
+            detachCurrentSession();
+            // Fresh is a visible-thread reset, not a provider-lane reset. Retire
+            // every live engine (busy or idle) and erase every native resume id
+            // before clearing the shared log, otherwise switching back to an old
+            // engine could resurrect the conversation that was just discarded.
+            for (const prior of priorSessions) {
+              await interruptSession({ cli: prior.cli, repoPath: prior.cwd, chatId });
+              dropSession(prior.cli, prior.cwd, chatId);
+            }
+            await clearThreadSessionIds(msg.repo, chatId, brain.cli);
+            deliveredClientMsgIds = [];
+            const session = await bindSession(
+              freshStart({ cli: brain.cli, repoPath: msg.repo, chatId, model: brain.model, effort: brain.effort }),
+            );
+            lastTurnModel = brain.model;
+            lastTurnEffort = brain.effort;
+            cliKind = brain.cli;
+            repoPath = msg.repo;
+            busy = false;
+            safeSend({ type: 'selectionApplied', selectionRevision: selectionRevisionOf(msg.selectionRevision), cli: brain.cli, model: brain.model ?? null, effort: brain.effort ?? null, brainRevision: brain.revision });
+            broadcastThreadReset(targetLogKey, ws, {
+              type: 'freshStarted',
+              cli: brain.cli,
+              model: brain.model,
+              effort: brain.effort,
+              brainRevision: brain.revision,
+              repo: msg.repo,
+              chatId,
+              latestSeq: session.latestSeq(),
+              resetAt,
+            });
+            return;
+          } finally {
+            releaseReset();
+          }
         }
 
         if (msg.type === 'stop') {
           turnGeneration += 1;
           const stopChatId = normalizeChatId(msg.chatId);
-          // Stop frames carry their own authoritative lane. During an
-          // overlapping model-switch hello, mutable socket state may still
-          // describe the prior engine and must never redirect the interrupt.
-          const stopCli = msg.cli;
           const stopRepo = msg.repo;
+          const stopBrain = resolvedBrain(stopChatId, { cli: msg.cli });
+          const activeOwner = activeSessionForLogKey(laneLogKey(stopBrain.cli, stopRepo, stopChatId));
+          const stopCli = (activeOwner?.cli ?? msg.cli) as CliKind;
           console.warn(`[chat ws#${wsId}] stop from ${peer} cli=${stopCli} repo=${stopRepo} chatId=${stopChatId}`);
           bumpLaneGen(stopCli, stopRepo, stopChatId);
+          if (stopBrain.cli !== stopCli) bumpLaneGen(stopBrain.cli, stopRepo, stopChatId);
           detachCurrentSession();
           await interruptSession({ cli: stopCli, repoPath: stopRepo, chatId: stopChatId });
           safeSend({ type: 'turnEnd' });
@@ -1028,6 +1202,8 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           turnGeneration += 1;
           chatId = normalizeChatId(msg.chatId);
+          const authoritativeAgent = agentForChatId(chatId);
+          let desiredSteerBrain = resolvedBrain(chatId, { cli: msg.cli, model: msg.model, effort: msg.effort });
           // Own cancellation from the first await through the final stdin
           // write. Stop, Fresh, or a newer steer aborts this path. A socket
           // close does NOT: accepted guidance must survive tab switches and
@@ -1046,10 +1222,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // Pin to the engine already bound on this socket. Counsel picker
           // drift (Grok 4.6 while a Claude turn is live, or vice versa) must
           // not respawn the wrong runner with a model it cannot accept.
-          let steerCli: CliKind = cliKind ?? msg.cli;
+          let steerCli: CliKind = cliKind ?? desiredSteerBrain.cli;
           let steerRepo = repoPath ?? msg.repo;
-          let steerModel = msg.model;
-          let steerEffort = msg.effort;
+          let steerModel = authoritativeAgent ? desiredSteerBrain.model : msg.model;
+          let steerEffort = authoritativeAgent ? desiredSteerBrain.effort : msg.effort;
           const bound = sessionPromise;
           // Register on the socket's current lane BEFORE awaiting its bind. A
           // Stop/Fresh/new steer during a cold bind can now abort this operation.
@@ -1063,13 +1239,15 @@ export async function registerChat(app: express.Express, server: Server): Promis
               if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
               const live = sessionCli(current);
               if (live) steerCli = live;
-              const spawned = isClaudeFamilyCli(steerCli) ? claudeSpawnOf(current) : null;
-              if (spawned) {
-                steerModel = spawned.model;
-                steerEffort = spawned.effort;
-              } else {
-                if (lastTurnModel !== undefined) steerModel = lastTurnModel;
-                if (lastTurnEffort !== undefined) steerEffort = lastTurnEffort;
+              if (!authoritativeAgent) {
+                const spawned = isClaudeFamilyCli(steerCli) ? claudeSpawnOf(current) : null;
+                if (spawned) {
+                  steerModel = spawned.model;
+                  steerEffort = spawned.effort;
+                } else {
+                  if (lastTurnModel !== undefined) steerModel = lastTurnModel;
+                  if (lastTurnEffort !== undefined) steerEffort = lastTurnEffort;
+                }
               }
             } catch {
               // Dead bind — fall through with hello/picker values.
@@ -1102,15 +1280,27 @@ export async function registerChat(app: express.Express, server: Server): Promis
             await session.prewarm().catch(() => {});
             if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
           }
+          if (authoritativeAgent) desiredSteerBrain = resolvedBrain(chatId, desiredSteerBrain);
+          const boundSelection = activeSelectionOf(session);
+          const needsAuthoritativeBoundary = Boolean(
+            authoritativeAgent
+            && session
+            && (
+              sessionCli(session) !== desiredSteerBrain.cli
+              || (isClaudeFamilyCli(desiredSteerBrain.cli) && (
+                boundSelection.model !== desiredSteerBrain.model
+                || boundSelection.effort !== desiredSteerBrain.effort
+              ))
+            )
+          );
           // Claude Code's native stream-json input is trustworthy only while a
           // tool is actively executing: guidance then lands before the next
-          // provider request. If inference has already begun, stdin still
-          // accepts and echoes the message but that request can silently ignore
-          // it. canAcceptNativeHumanSteer() exposes only the safe tool window;
-          // every other phase finishes naturally and starts a separate turn.
-          // Scheduled automation never absorbs human input as mission guidance.
+          // provider request. A pending authoritative brain change must instead
+          // wait for the natural boundary and start on the centrally configured
+          // model; it can never be absorbed by the old process.
           const nativeClaudeSteer = Boolean(
             session
+            && !needsAuthoritativeBoundary
             && (!msg.images || msg.images.length === 0)
             && isClaudeFamilyCli(steerCli)
             && (session as { canAcceptNativeHumanSteer?: () => boolean })
@@ -1134,6 +1324,46 @@ export async function registerChat(app: express.Express, server: Server): Promis
             console.warn(`[chat ws#${wsId}] guidance ${nativeClaudeSteer ? 'queued natively in active Claude turn' : 'queued after natural turn completion'}`);
           }
           if (session && (session as { isAlive?: () => boolean }).isAlive?.() === false) session = null;
+          if (authoritativeAgent && !nativeClaudeSteer) {
+            // Another device may have changed the global brain while this
+            // guidance waited. Resolve again at the actual admission boundary.
+            desiredSteerBrain = resolvedBrain(chatId, desiredSteerBrain);
+            steerCli = desiredSteerBrain.cli;
+            steerModel = desiredSteerBrain.model;
+            steerEffort = desiredSteerBrain.effort;
+            const currentSelection = activeSelectionOf(session);
+            const mustReplace = Boolean(
+              session
+              && (
+                sessionCli(session) !== steerCli
+                || (isClaudeFamilyCli(steerCli) && (
+                  currentSelection.model !== steerModel
+                  || currentSelection.effort !== steerEffort
+                ))
+              )
+            );
+            if (mustReplace) {
+              detachCurrentSession();
+              session = await bindSession(getOrCreateSession({
+                cli: steerCli,
+                repoPath: steerRepo,
+                chatId,
+                model: steerModel,
+                effort: steerEffort,
+                recycleOnMismatch: true,
+              }));
+              if (steerAborter.signal.aborted) { rejectSteer(); releaseSteer(); return; }
+            }
+            const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
+            if (desiredKey !== waitKey) {
+              if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+              deletePendingSteer(waitKey, msg.clientMsgId);
+              laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
+              waitKey = desiredKey;
+              laneWaiters.set(waitKey, steerAborter);
+              addPendingSteer(waitKey, msg.clientMsgId);
+            }
+          }
           if (!session) {
             // The old process is already gone; starting its normal replacement
             // is recovery, not an interrupt. Never call interruptSession here.
@@ -1166,6 +1396,38 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
           }
           if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+          if (authoritativeAgent && !nativeClaudeSteer) {
+            while (true) {
+              const latestBrain = resolvedBrain(chatId, desiredSteerBrain);
+              const unchanged = latestBrain.revision === desiredSteerBrain.revision
+                && latestBrain.cli === desiredSteerBrain.cli
+                && latestBrain.model === desiredSteerBrain.model
+                && latestBrain.effort === desiredSteerBrain.effort;
+              if (unchanged) break;
+              desiredSteerBrain = latestBrain;
+              steerCli = latestBrain.cli;
+              steerModel = latestBrain.model;
+              steerEffort = latestBrain.effort;
+              const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
+              if (desiredKey !== waitKey) {
+                if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+                deletePendingSteer(waitKey, msg.clientMsgId);
+                laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
+                waitKey = desiredKey;
+                laneWaiters.set(waitKey, steerAborter);
+                addPendingSteer(waitKey, msg.clientMsgId);
+              }
+              session = await bindSession(getOrCreateSession({
+                cli: steerCli,
+                repoPath: steerRepo,
+                chatId,
+                model: steerModel,
+                effort: steerEffort,
+                recycleOnMismatch: true,
+              }));
+              if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+            }
+          }
           if ((session as { isAlive?: () => boolean }).isAlive?.() === false) {
             rejectSteer('Guidance target closed before delivery — try again.');
             releaseSteer();
@@ -1207,6 +1469,16 @@ export async function registerChat(app: express.Express, server: Server): Promis
           }
           lastTurnModel = steerModel;
           lastTurnEffort = steerEffort;
+          if (authoritativeAgent) {
+            safeSend({
+              type: 'selectionApplied',
+              selectionRevision: selectionRevisionOf(msg.selectionRevision),
+              cli: desiredSteerBrain.cli,
+              model: desiredSteerBrain.model ?? null,
+              effort: desiredSteerBrain.effort ?? null,
+              brainRevision: desiredSteerBrain.revision,
+            });
+          }
           // Guidance is never auto-resubmitted after acceptance: a cross-device
           // Stop/Fresh must not be undone by the stale-resume retry helper.
           return;
@@ -1223,13 +1495,21 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           const requestedChatId = normalizeChatId(msg.chatId ?? chatId);
-          const hintedLaneMismatch = (msg.cli !== undefined && msg.cli !== cliKind)
-            || (msg.repo !== undefined && msg.repo !== repoPath);
-          if (requestedChatId !== chatId || hintedLaneMismatch || !cliKind || !repoPath) {
+          const authoritativeAgent = agentForChatId(requestedChatId);
+          let sendBrain = resolvedBrain(requestedChatId, {
+            cli: msg.cli ?? cliKind ?? 'xai',
+            model: msg.model,
+            effort: msg.effort,
+          });
+          const hintedLaneMismatch = !authoritativeAgent && (
+            (msg.cli !== undefined && msg.cli !== cliKind)
+            || (msg.repo !== undefined && msg.repo !== repoPath)
+          );
+          if (requestedChatId !== chatId || hintedLaneMismatch || !repoPath) {
             sendHandshakePending(msg.clientMsgId);
             return;
           }
-          const sendCli = cliKind;
+          let sendCli = authoritativeAgent ? sendBrain.cli : cliKind!;
           const sendRepo = repoPath;
           const logKey = laneLogKey(sendCli, sendRepo, chatId);
           const owner = msg.clientMsgId
@@ -1287,16 +1567,24 @@ export async function registerChat(app: express.Express, server: Server): Promis
             rememberSendAdmission(admissionKey, 'pending', owner);
             reservedSendAdmission = { key: admissionKey, clientMsgId: owner.clientMsgId };
           }
-          const sendKey = laneGenKey(sendCli, sendRepo, chatId);
           const sendAborter = new AbortController();
-          const sendLaneGeneration = bumpLaneGen(sendCli, sendRepo, chatId);
-          laneWaiters.set(sendKey, sendAborter);
+          const claimedSendLanes = new Map<string, number>();
+          const claimSendLane = (laneCli: CliKind) => {
+            const key = laneGenKey(laneCli, sendRepo, chatId);
+            if (claimedSendLanes.has(key)) return;
+            const generation = bumpLaneGen(laneCli, sendRepo, chatId);
+            claimedSendLanes.set(key, generation);
+            laneWaiters.set(key, sendAborter);
+          };
+          claimSendLane(sendCli);
           ownedSteerWaiters.add(sendAborter);
           const sendCanceled = () => sendAborter.signal.aborted
-            || laneGenerations.get(sendKey) !== sendLaneGeneration;
+            || [...claimedSendLanes].some(([key, generation]) => laneGenerations.get(key) !== generation);
           const releaseSend = () => {
             ownedSteerWaiters.delete(sendAborter);
-            if (laneWaiters.get(sendKey) === sendAborter) laneWaiters.delete(sendKey);
+            for (const key of claimedSendLanes.keys()) {
+              if (laneWaiters.get(key) === sendAborter) laneWaiters.delete(key);
+            }
           };
           try {
           if (!sessionPromise && cliKind && repoPath) {
@@ -1316,11 +1604,11 @@ export async function registerChat(app: express.Express, server: Server): Promis
               // every cold lane's first turn. That is the cost this outage fix
               // exists to kill.
               await bindSession(getOrCreateSession({
-                cli: cliKind,
+                cli: sendCli,
                 repoPath,
                 chatId,
-                model: msg.model,
-                effort: msg.effort,
+                model: authoritativeAgent ? sendBrain.model : msg.model,
+                effort: authoritativeAgent ? sendBrain.effort : msg.effort,
               }));
               if (sendCanceled()) return;
             } finally {
@@ -1335,36 +1623,49 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'error', message: 'codex is on a turn - wait for the result' });
             return;
           }
-          // Model/effort values are device-local. Only the explicit dirty bit
-          // advanced by a real picker click may recycle a warm Claude-family
-          // process. Defaults/hydration/reconnects always send false.
-          const selectionChangeRequested = msg.reconfigure === true;
+          // Studio model/effort values remain device-local and recycle only on
+          // an explicit picker revision. Named teammate turns always opt in to
+          // reconciling against their server-authoritative brain.
+          const selectionChangeRequested = Boolean(authoritativeAgent) || msg.reconfigure === true;
           const requestedSelectionRevision = selectionRevisionOf(msg.selectionRevision);
           let selectionApplied = false;
           const generation = ++turnGeneration;
           let session: AnySession | null = await sessionPromise;
           if (sendCanceled()) return;
 
-          if (!session && cliKind && repoPath) {
+          if (!session && sendCli && repoPath) {
             // sessionPromise resolved to a dead/null session — rebind a fresh
             // one rather than crashing on `null.send`.
-            session = await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId }));
+            session = await bindSession(getOrCreateSession({ cli: sendCli, repoPath, chatId, model: sendBrain.model, effort: sendBrain.effort }));
             if (sendCanceled()) return;
           }
-          const initiallyBusy = Boolean(session && (session as { isBusy?: () => boolean }).isBusy?.() === true);
+          let initiallyBusy = Boolean(session && (session as { isBusy?: () => boolean }).isBusy?.() === true);
+          if (authoritativeAgent && session && !initiallyBusy && sessionCli(session) !== sendCli) {
+            session = await bindSession(getOrCreateSession({
+              cli: sendCli,
+              repoPath,
+              chatId,
+              model: sendBrain.model,
+              effort: sendBrain.effort,
+              recycleOnMismatch: true,
+            }));
+            cliKind = sendCli;
+            initiallyBusy = (session as { isBusy?: () => boolean }).isBusy?.() === true;
+            if (sendCanceled()) return;
+          }
 
           // Persistent CLIs (claude/assistant): reconcile the spawned model/effort
           // with the current pick before an idle turn. An attach-only lookup on
           // every idle send also resolves a replacement made by another socket;
           // recycleOnMismatch remains explicit, so stale device defaults cannot
           // cause replacement themselves.
-          if (!initiallyBusy && isClaudeFamilyCli(cliKind) && repoPath) {
+          if (!initiallyBusy && isClaudeFamilyCli(sendCli) && repoPath) {
             const reconciled = await getOrCreateSession({
-              cli: cliKind,
+              cli: sendCli,
               repoPath,
               chatId,
-              model: msg.model,
-              effort: msg.effort,
+              model: authoritativeAgent ? sendBrain.model : msg.model,
+              effort: authoritativeAgent ? sendBrain.effort : msg.effort,
               recycleOnMismatch: selectionChangeRequested,
             });
             if (reconciled !== session) session = await bindSession(Promise.resolve(reconciled));
@@ -1381,13 +1682,65 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
           }
           if (session && (session as { isAlive?: () => boolean }).isAlive?.() === false) {
-            session = repoPath && cliKind
-              ? await bindSession(getOrCreateSession({ cli: cliKind, repoPath, chatId, model: msg.model, effort: msg.effort }))
+            session = repoPath && sendCli
+              ? await bindSession(getOrCreateSession({ cli: sendCli, repoPath, chatId, model: authoritativeAgent ? sendBrain.model : msg.model, effort: authoritativeAgent ? sendBrain.effort : msg.effort }))
               : null;
             if (sendCanceled()) return;
           }
           if (!session) throw new Error('session unavailable, please retry');
           if (sendCanceled()) return;
+
+          // Brain PATCHes and send admission share the Node event loop but not
+          // one request. Re-resolve after every awaited spawn/reconcile and keep
+          // rebinding until the revision is stable. Once stable, there are no
+          // more awaits before session.send() captures this exact selection, so
+          // a later PATCH is correctly a pending change for the next boundary.
+          if (authoritativeAgent) {
+            while (true) {
+              const latestBrain = resolvedBrain(requestedChatId, sendBrain);
+              const unchanged = latestBrain.revision === sendBrain.revision
+                && latestBrain.cli === sendBrain.cli
+                && latestBrain.model === sendBrain.model
+                && latestBrain.effort === sendBrain.effort;
+              if (unchanged) break;
+              if ((session as { isBusy?: () => boolean }).isBusy?.() === true) {
+                throw new Error('This agent started another turn before admission. Please send again when it finishes.');
+              }
+
+              const previousCli = sendCli;
+              sendBrain = latestBrain;
+              sendCli = latestBrain.cli;
+              claimSendLane(sendCli);
+              if (reservedSendAdmission && previousCli !== sendCli) {
+                const priorKey = reservedSendAdmission.key;
+                const current = sendAdmissions.get(priorKey);
+                if (current) {
+                  sendAdmissions.delete(priorKey);
+                  const nextOwner = {
+                    cli: sendCli,
+                    repo: sendRepo,
+                    chatId,
+                    logKey: laneLogKey(sendCli, sendRepo, chatId),
+                    clientMsgId: current.clientMsgId,
+                  };
+                  const nextKey = sendAdmissionKey(sendCli, sendRepo, chatId, current.clientMsgId);
+                  rememberSendAdmission(nextKey, current.state, nextOwner);
+                  reservedSendAdmission.key = nextKey;
+                }
+              }
+              session = await bindSession(getOrCreateSession({
+                cli: sendCli,
+                repoPath: sendRepo,
+                chatId,
+                model: sendBrain.model,
+                effort: sendBrain.effort,
+                recycleOnMismatch: true,
+              }));
+              cliKind = sendCli;
+              if (sendCanceled()) return;
+            }
+          }
+
           // Recompute after every awaited owner/rebind operation. Another send
           // may have started this session while we yielded.
           const wasBusy = (session as { isBusy?: () => boolean }).isBusy?.() === true;
@@ -1404,6 +1757,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             safeSend({ type: 'turnEnd' });
             return;
           }
+          if (authoritativeAgent) selectionApplied = true;
           logChatTurn(wsId, 'send', cliKind, repoPath, chatId, msg.text);
           if (reservedSendAdmission) {
             const admission = reservedSendAdmission;
@@ -1415,19 +1769,35 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }, session.latestSeq(), false);
           }
           await (session as any).send(msg.text, msg.images, {
-            model: msg.model,
-            effort: msg.effort,
+            model: authoritativeAgent ? sendBrain.model : msg.model,
+            effort: authoritativeAgent ? sendBrain.effort : msg.effort,
             clientMsgId: msg.clientMsgId,
             voiceMode: msg.voice === true,
             signal: sendAborter.signal,
           });
           if (sendCanceled()) return;
           if (selectionApplied) {
-            safeSend({ type: 'selectionApplied', selectionRevision: requestedSelectionRevision });
+            safeSend({
+              type: 'selectionApplied',
+              selectionRevision: requestedSelectionRevision,
+              cli: authoritativeAgent ? sendBrain.cli : undefined,
+              model: authoritativeAgent ? sendBrain.model ?? null : undefined,
+              effort: authoritativeAgent ? sendBrain.effort ?? null : undefined,
+              brainRevision: authoritativeAgent ? sendBrain.revision : undefined,
+            });
           }
-          lastTurnModel = msg.model;
-          lastTurnEffort = msg.effort;
-          void retryOnceAfterStaleResume(session, msg.text, generation, msg.images, msg.model, msg.effort, msg.clientMsgId, msg.voice === true);
+          lastTurnModel = authoritativeAgent ? sendBrain.model : msg.model;
+          lastTurnEffort = authoritativeAgent ? sendBrain.effort : msg.effort;
+          void retryOnceAfterStaleResume(
+            session,
+            msg.text,
+            generation,
+            msg.images,
+            authoritativeAgent ? sendBrain.model : msg.model,
+            authoritativeAgent ? sendBrain.effort : msg.effort,
+            msg.clientMsgId,
+            msg.voice === true,
+          );
           } finally {
             releaseSend();
           }
@@ -1470,6 +1840,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
     });
 
     ws.on('close', () => {
+      socketThreads.delete(ws);
       clearInterval(heartbeat);
       clearInterval(keepalive);
       // Do not abort ownedSteerWaiters here. The server already accepted those

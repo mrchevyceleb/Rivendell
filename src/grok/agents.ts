@@ -9,8 +9,12 @@ export type Agent = {
   id: string;
   name: string;
   role: string;
-  /** WORKSPACE_COMPANIONS lane id ('claude', 'xai', …). */
+  /** Server-authoritative brain shared by every device and delivery path. */
   engine: string;
+  model?: string;
+  effort?: string;
+  brainRevision?: number;
+  brainUpdatedAt?: number;
   /** home thread chatId (bot-<id>). */
   home: string;
   createdAt: number;
@@ -46,13 +50,15 @@ export function useAgents(): { agents: Agent[]; reload: () => void } {
   }, []);
   useEffect(() => {
     reload();
-    const iv = window.setInterval(reload, 10_000);
+    // Agent brains are server-authoritative; keep other open devices close to
+    // real time without turning every picker into a competing local control.
+    const iv = window.setInterval(reload, 3_000);
     return () => window.clearInterval(iv);
   }, [reload]);
   return { agents, reload };
 }
 
-export async function createAgent(input: { name: string; role?: string; engine?: string; voice?: string; scope?: string }): Promise<Agent> {
+export async function createAgent(input: { name: string; role?: string; engine?: string; model?: string; effort?: string; voice?: string; scope?: string }): Promise<Agent> {
   const r = await apiJson<{ agent: Agent }>('/api/agents', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -61,13 +67,30 @@ export async function createAgent(input: { name: string; role?: string; engine?:
   return r.agent;
 }
 
-export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; voice?: string; pinned?: boolean; scope?: string }): Promise<Agent> {
-  const r = await apiJson<{ agent: Agent }>(`/api/agents/${encodeURIComponent(id)}`, {
+export class AgentUpdateConflictError extends Error {
+  constructor(readonly current: Agent, message = 'Agent brain changed on another device.') {
+    super(message);
+    this.name = 'AgentUpdateConflictError';
+  }
+}
+
+export async function updateAgentReq(id: string, patch: { name?: string; role?: string; engine?: string; model?: string; effort?: string; brainRevision?: number; voice?: string; pinned?: boolean; scope?: string }): Promise<Agent> {
+  const response = await fetch(`/api/agents/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   });
-  return r.agent;
+  const text = await response.text();
+  let payload: { agent?: Agent; error?: string } = {};
+  try { payload = text ? JSON.parse(text) as typeof payload : {}; } catch { /* handled below */ }
+  if (!response.ok) {
+    if ((response.status === 409 || response.status === 428) && payload.agent) {
+      throw new AgentUpdateConflictError(payload.agent, payload.error);
+    }
+    throw new Error(payload.error || text || `${response.status} ${response.statusText}`);
+  }
+  if (!payload.agent) throw new Error('Agent update returned no agent.');
+  return payload.agent;
 }
 
 export async function reorderAgentIds(ids: string[]): Promise<Agent[]> {

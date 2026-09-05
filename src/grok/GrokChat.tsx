@@ -6,7 +6,15 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import { useChat } from '../chat/hooks/useChat';
-import { useCompanionPicker } from '../chat/hooks/useCompanionPicker';
+import {
+  normalizeXaiEffort,
+  normalizeXaiModel,
+  normalizeZaiEffort,
+  normalizeZaiModel,
+  useCompanionPicker,
+} from '../chat/hooks/useCompanionPicker';
+import { normalizeCodexEffort, normalizeCodexModel } from '../chat/codexModels';
+import { normalizeClaudeModel } from '../chat/components/CodexEnginePicker';
 import { useChatShell } from '../chat/components/reimagine/useChatShell';
 import { companionAgentLabel } from '../shell/studio/ChatTab';
 import type { CompanionId, Repo } from '../chat/data/types';
@@ -31,6 +39,7 @@ export type GrokChatProps = {
   onToggleTheme: () => void;
   onOpenStudio: () => void;
   onOpenAgentEditor: () => void;
+  onAgentBrainSaved: () => void;
   onMeta: (meta: ChatMeta) => void;
 };
 
@@ -42,11 +51,30 @@ export function GrokChat(props: GrokChatProps) {
   const seededRef = useRef(false);
   if (!seededRef.current && typeof window !== 'undefined') {
     seededRef.current = true;
-    const seed = lane ?? cli;
+    const seed = props.agent?.engine ?? lane ?? cli;
     if (seed) {
       try {
         if (localStorage.getItem(storageKey) !== seed) localStorage.setItem(storageKey, seed);
-      } catch { /* storage unavailable — picker default wins */ }
+        const model = props.agent?.model;
+        const effort = props.agent?.effort;
+        const modelKey = seed === 'claude' ? 'rivendell:claude-model'
+          : seed === 'codex' ? 'rivendell:codex-model'
+          : seed === 'zai' ? 'rivendell:zai-model'
+          : seed === 'xai' ? 'rivendell:xai-model'
+          : seed === 'banana' ? 'rivendell:banana-model'
+          : seed === 'banana-fireworks' ? 'rivendell:fireworks-model'
+          : seed === 'banana-local' ? 'rivendell:local-model'
+          : null;
+        if (model && modelKey) localStorage.setItem(modelKey, model);
+        if (effort) {
+          const effortKey = seed === 'claude' ? 'rivendell:claude-effort'
+            : seed === 'codex' ? 'rivendell:codex-effort'
+            : seed === 'zai' ? 'rivendell:zai-effort'
+            : seed === 'xai' ? 'rivendell:xai-effort'
+            : 'rivendell:banana-effort';
+          localStorage.setItem(effortKey, effort);
+        }
+      } catch { /* storage unavailable — server brain still wins */ }
     }
   }
   const picker = useCompanionPicker(storageKey);
@@ -62,6 +90,50 @@ export function GrokChat(props: GrokChatProps) {
     effort: picker.effort,
     selectionRevision: picker.selectionRevision,
   });
+
+  type BrainDraft = { engine: string; model?: string; effort?: string };
+  const appliedBrainRevision = useRef<number | null>(null);
+  const serverBrainRevision = useRef(props.agent?.brainRevision ?? 1);
+  const desiredBrain = useRef<BrainDraft>({
+    engine: props.agent?.engine ?? picker.companion,
+    model: props.agent?.model ?? picker.model,
+    effort: props.agent?.effort ?? picker.effort,
+  });
+  useEffect(() => {
+    if (!props.agent) return;
+    const revision = props.agent.brainRevision ?? 1;
+    if (revision < serverBrainRevision.current || appliedBrainRevision.current === revision) return;
+    appliedBrainRevision.current = revision;
+    serverBrainRevision.current = revision;
+    desiredBrain.current = {
+      engine: props.agent.engine,
+      model: props.agent.model,
+      effort: props.agent.effort,
+    };
+    picker.applyAuthoritativeBrain(props.agent.engine, props.agent.model, props.agent.effort);
+    if (chat.serverBrain && chat.serverBrain.revision !== revision) {
+      window.setTimeout(chat.reconnect, 0);
+    }
+  }, [chat.reconnect, chat.serverBrain, picker.applyAuthoritativeBrain, props.agent?.brainRevision, props.agent?.effort, props.agent?.engine, props.agent?.model]);
+
+  useEffect(() => {
+    if (!props.agent || !chat.serverBrain?.revision) return;
+    const revision = chat.serverBrain.revision;
+    if (revision <= serverBrainRevision.current) return;
+    serverBrainRevision.current = revision;
+    appliedBrainRevision.current = revision;
+    desiredBrain.current = {
+      engine: chat.serverBrain.cli,
+      model: chat.serverBrain.model,
+      effort: chat.serverBrain.effort,
+    };
+    picker.applyAuthoritativeBrain(
+      chat.serverBrain.cli,
+      chat.serverBrain.model,
+      chat.serverBrain.effort,
+    );
+    props.onAgentBrainSaved();
+  }, [chat.serverBrain, picker.applyAuthoritativeBrain, props.agent, props.onAgentBrainSaved]);
 
   // Esc stops a streaming turn.
   useEffect(() => {
@@ -79,37 +151,94 @@ export function GrokChat(props: GrokChatProps) {
   const agentId = props.agent?.id;
   const persistGen = useRef(0);
   const persistChain = useRef(Promise.resolve());
-  const desiredEngine = useRef<string | null>(null);
-  const persistEngine = useCallback((next: string) => {
-    if (!agentId) return;
-    desiredEngine.current = next;
+  const selectionForLane = (engine: string, modelOverride?: string, effortOverride?: string) => {
+    const model = modelOverride ?? (
+      engine === 'claude' ? picker.claudeModel
+      : engine === 'codex' ? picker.codexModel
+      : engine === 'zai' ? picker.zaiModel
+      : engine === 'xai' ? picker.xaiModel
+      : engine === 'banana' ? picker.bananaModel.model
+      : engine === 'banana-fireworks' ? picker.fireworksModel.model
+      : engine === 'banana-local' ? picker.localModel || undefined
+      : undefined
+    );
+    const effort = effortOverride ?? (
+      engine === 'claude' ? picker.claudeEffort
+      : engine === 'codex' ? picker.codexEffort
+      : engine === 'zai' ? picker.zaiEffort
+      : engine === 'xai' ? picker.xaiEffort
+      : picker.bananaEffort
+    );
+    return { engine, model, effort };
+  };
+  const persistBrain = useCallback((patch: Partial<BrainDraft>) => {
+    const next: BrainDraft = { ...desiredBrain.current, ...patch };
+    desiredBrain.current = next;
+    if (!agentId) {
+      picker.applyAuthoritativeBrain(next.engine, next.model, next.effort);
+      return;
+    }
     const gen = ++persistGen.current;
     persistChain.current = persistChain.current.catch(() => {}).then(async () => {
       if (gen !== persistGen.current) return;
-      const want = desiredEngine.current;
-      if (!want) return;
+      const wanted = { ...desiredBrain.current };
       try {
-        await updateAgentReq(agentId, { engine: want });
-      } catch {
-        if (gen !== persistGen.current) return;
-        const retry = desiredEngine.current;
-        if (!retry) return;
-        try {
-          await updateAgentReq(agentId, { engine: retry });
-        } catch {
-          /* picker already shows the user's choice; the next pick retries */
+        const saved = await updateAgentReq(agentId, {
+          ...wanted,
+          brainRevision: serverBrainRevision.current,
+        });
+        serverBrainRevision.current = saved.brainRevision ?? serverBrainRevision.current + 1;
+        if (gen === persistGen.current) {
+          desiredBrain.current = { engine: saved.engine, model: saved.model, effort: saved.effort };
+          picker.applyAuthoritativeBrain(saved.engine, saved.model, saved.effort);
         }
+        props.onAgentBrainSaved();
+      } catch {
+        // A 409 means another device won. Never overwrite it with stale fields;
+        // reload the central brain and let the explicit next click retry.
+        props.onAgentBrainSaved();
       }
     });
-  }, [agentId]);
+  }, [agentId, picker.applyAuthoritativeBrain, props.onAgentBrainSaved]);
 
-  const setCompanion = picker.setCompanion;
-  const pickerForUi = {
+  const pickerForUi = !agentId ? picker : {
     ...picker,
-    setCompanion: (next: string) => {
-      setCompanion(next);
-      persistEngine(next);
+    brainPending: chat.serverBrain?.pending ?? false,
+    bananaModel: {
+      ...picker.bananaModel,
+      setModel: (model: string) => persistBrain({ engine: 'banana', model }),
     },
+    fireworksModel: {
+      ...picker.fireworksModel,
+      setModel: (model: string) => persistBrain({ engine: 'banana-fireworks', model }),
+    },
+    setCompanion: (engine: string) => persistBrain(selectionForLane(engine)),
+    setClaudeModel: (value: string) => persistBrain({
+      engine: 'claude',
+      model: normalizeClaudeModel(value),
+    }),
+    setClaudeEffort: (effort: string) => persistBrain({ engine: 'claude', effort }),
+    setCodexModel: (value: string) => {
+      const model = normalizeCodexModel(value);
+      persistBrain({
+        engine: 'codex',
+        model,
+        effort: normalizeCodexEffort(model, desiredBrain.current.effort),
+      });
+    },
+    setCodexEffort: (value: string) => persistBrain({
+      engine: 'codex',
+      effort: normalizeCodexEffort(
+        desiredBrain.current.model ?? picker.codexModel,
+        value,
+      ),
+    }),
+    setZaiModel: (value: string) => persistBrain({ engine: 'zai', model: normalizeZaiModel(value) }),
+    setZaiEffort: (value: string) => persistBrain({ engine: 'zai', effort: normalizeZaiEffort(value) }),
+    setXaiModel: (value: string) => persistBrain({ engine: 'xai', model: normalizeXaiModel(value) }),
+    setXaiEffort: (value: string) => persistBrain({ engine: 'xai', effort: normalizeXaiEffort(value) }),
+    setBananaEffort: (effort: string) => persistBrain({ engine: desiredBrain.current.engine, effort }),
+    setLocalModel: (model: string) => persistBrain({ engine: 'banana-local', model }),
   };
 
   const s = useChatShell({ chat, picker: pickerForUi });

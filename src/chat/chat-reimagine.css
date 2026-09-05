@@ -347,6 +347,8 @@
   border: 1px solid color-mix(in oklch, var(--accent) 50%, transparent); color: var(--accent-glow);
   font-family: var(--font-display); font-size: 10px; }
 .rc .model-chip .eff { color: var(--faint); }
+.rc .model-chip.pending { border-color: color-mix(in oklch, var(--gold) 55%, transparent); }
+.rc .model-chip.pending .eff { color: var(--gold); }
 
 .rc .modelpop { right: auto; width: 348px; max-height: 430px; overflow-y: auto; }
 .rc .lane { display: flex; align-items: center; gap: 11px; width: 100%; padding: 9px 14px; text-align: left; min-height: 44px; transition: background .15s ease; }

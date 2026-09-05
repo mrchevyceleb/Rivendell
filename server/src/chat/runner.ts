@@ -931,7 +931,7 @@ class ClaudeSession {
         },
       });
       noteUserTurn(this.logKey); // forever-thread compaction cadence (monotonic)
-      noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
+      noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
     }
     if (visionNote) {
       console.log(`[chat zai] vision adapter: ${visionNote}`);
@@ -1153,13 +1153,6 @@ class ClaudeSession {
 
   hasResumeFailed(): boolean {
     return this.resumeFailed;
-  }
-
-  /** True once the CLI has emitted its system/init event. Until then the
-   *  process is still loading (MCP servers can take 30-70s); recycling it for
-   *  a model/effort change would throw away the whole startup. */
-  hasInitialized(): boolean {
-    return this.initSeen;
   }
 
   /** True while this session is actively processing a turn (between user send and result event). */
@@ -1448,7 +1441,7 @@ class ClaudeSession {
     }
 
     // Detect init + silent-resume-failure.
-    if (ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
+    if (!this.disposed && ev?.type === 'system' && ev.subtype === 'init' && typeof ev.session_id === 'string') {
       const pending = this.pendingResumeId;
       this.pendingResumeId = null;
       this.initSeen = true;
@@ -1467,7 +1460,7 @@ class ClaudeSession {
 
     // Track session_id from any event that carries it (some events carry it
     // as well as init; persisting on every change keeps us safe across forks).
-    if (ev && typeof ev === 'object' && typeof ev.session_id === 'string'
+    if (!this.disposed && ev && typeof ev === 'object' && typeof ev.session_id === 'string'
         && ev.session_id !== this.currentSessionId) {
       this.currentSessionId = ev.session_id;
       void setSessionId(this.cli, this.cwd, ev.session_id, this.chatId);
@@ -1580,6 +1573,53 @@ export function markBusyLanesRestarting(signal: string): number {
 
 const sessions = new Map<string, ClaudeSession>();
 let sessionsShuttingDown = false;
+const resettingThreadLogs = new Set<string>();
+const inFlightSessionLookups = new Map<string, Set<Promise<void>>>();
+
+function trackedThreadLogKey(opts: { cli: CliKind; repoPath: string; chatId?: string }): string {
+  const chatId = opts.chatId || 'main';
+  const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
+  return logKeyFor(opts.cli, cwd, chatId);
+}
+
+function beginSessionLookup(logKey: string): () => void {
+  let resolve!: () => void;
+  const token = new Promise<void>((done) => { resolve = done; });
+  const pending = inFlightSessionLookups.get(logKey) ?? new Set<Promise<void>>();
+  pending.add(token);
+  inFlightSessionLookups.set(logKey, pending);
+  return () => {
+    pending.delete(token);
+    if (pending.size === 0) inFlightSessionLookups.delete(logKey);
+    resolve();
+  };
+}
+
+/** Wait for lookups that entered before a Fresh barrier to finish claiming
+ * their runner maps. New lookups are refused while the barrier is held. */
+export async function settleThreadSessionLookups(opts: { cli: CliKind; repoPath: string; chatId?: string }): Promise<void> {
+  const logKey = trackedThreadLogKey(opts);
+  while (true) {
+    const pending = [...(inFlightSessionLookups.get(logKey) ?? [])];
+    if (pending.length === 0) return;
+    await Promise.allSettled(pending);
+  }
+}
+
+
+/** Claim an engine-neutral Fresh Thread barrier. All normal delivery paths enter
+ * through getOrCreateSession and are refused until the reset has retired every
+ * native lane and cleared the durable history. */
+export function beginThreadReset(opts: { cli: CliKind; repoPath: string; chatId?: string }): (() => void) | null {
+  const logKey = trackedThreadLogKey(opts);
+  if (resettingThreadLogs.has(logKey)) return null;
+  resettingThreadLogs.add(logKey);
+  return () => { resettingThreadLogs.delete(logKey); };
+}
+
+export function isThreadResetting(opts: { cli: CliKind; repoPath: string; chatId?: string }): boolean {
+  return resettingThreadLogs.has(trackedThreadLogKey(opts));
+}
 
 function keyOf(cli: CliKind, cwd: string, chatId = 'main'): string {
   const normalized = chatId || 'main';
@@ -1605,16 +1645,21 @@ export async function getOrCreateSession(opts: {
 }): Promise<AnySession> {
   if (sessionsShuttingDown) throw new Error('Rivendell is shutting down');
   const chatId = opts.chatId || 'main';
+  if (isThreadResetting({ cli: opts.cli, repoPath: opts.repoPath, chatId })) {
+    throw new Error('This thread is being reset — retry in a moment.');
+  }
+  const finishLookup = beginSessionLookup(trackedThreadLogKey({ ...opts, chatId }));
+  try {
   retireOtherEnginesOnThread(opts.cli, opts.repoPath, chatId);
   if (opts.cli === 'codex' || opts.cli === 'codex-personal') {
-    return getOrCreateCodexSession({
+    return await getOrCreateCodexSession({
       repoPath: opts.repoPath,
       chatId,
       cli: opts.cli,
     });
   }
   if (opts.cli === 'banana' || opts.cli === 'banana-local' || opts.cli === 'banana-fireworks') {
-    return getOrCreateBananaSession({ repoPath: opts.repoPath, chatId, cli: opts.cli });
+    return await getOrCreateBananaSession({ repoPath: opts.repoPath, chatId, cli: opts.cli });
   }
   const cwd = opts.cli === 'assistant' ? ASSISTANT_HUB_PATH : opts.repoPath;
   const key = keyOf(opts.cli, cwd, chatId);
@@ -1641,23 +1686,18 @@ export async function getOrCreateSession(opts: {
         sessions.delete(key);
         continue;
       }
-      // Recycle only an IDLE, FULLY-INITIALIZED session whose model/effort
-      // differs, and only when the caller explicitly opted in (a real user
-      // turn). session_id is preserved so the replacement --resumes the same
-      // conversation. NEVER recycle:
-      //   - a busy session — SIGTERMs an in-flight turn and races the
-      //     event-log/session-id writes;
-      //   - a session that hasn't emitted init yet — throws away the 30-70s MCP
-      //     startup and, under reconnect floods, storms into a process that
-      //     never finishes initializing.
-      // In every protected case we attach as-is; the change lands on the next
-      // idle turn once the session is settled.
+      // Recycle only an IDLE session whose model/effort differs, and only when
+      // the caller explicitly opted in (a real authoritative turn). session_id
+      // is preserved so the replacement --resumes the same conversation. A
+      // control-only boot prewarm may have passed the readiness grace without
+      // emitting `init`; it is still safe and necessary to replace before its
+      // first real turn. Passive hello/reconnect callers never opt in, which is
+      // what prevents replacement storms during normal startup.
       const matches = existing.spawnModel === wantModel && existing.spawnEffort === wantEffort;
       const recyclable =
         opts.recycleOnMismatch === true &&
         !matches &&
-        !existing.isBusy() &&
-        existing.hasInitialized();
+        !existing.isBusy();
       if (!recyclable) return existing;
       existing.shutdown('model/effort change');
       sessions.delete(key);
@@ -1673,7 +1713,10 @@ export async function getOrCreateSession(opts: {
     // can't start, surfacing a clear error instead of a silent wrong-provider spawn.
     await ensureXaiProxy();
   }
-  return spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
+  return await spawnSessionOnce(opts.cli, cwd, chatId, key, wantModel, wantEffort);
+  } finally {
+    finishLookup();
+  }
 }
 
 /** One live engine per thread.
@@ -1919,6 +1962,14 @@ export function activeClaudeSessions(): LiveSession[] {
     });
   }
   return out;
+}
+
+export function activeChatSessions(): LiveSession[] {
+  return [
+    ...activeClaudeSessions(),
+    ...activeCodexSessions(),
+    ...activeBananaSessions(),
+  ];
 }
 
 export function pruneIdleClaudeSessions(ttlMs: number, now = Date.now()): number {

@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
-import { listAgents, type Agent } from './agents.ts';
+import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
 import { logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
 import { isThreadWatched } from './threadWatch.ts';
@@ -20,6 +20,9 @@ type SessionLike = {
   send: (text: string, images?: unknown, opts?: Record<string, unknown>) => Promise<void>;
   isBusy?: () => boolean;
   canAcceptNativeHumanSteer?: () => boolean;
+  activeSelection?: () => { model?: string; effort?: string };
+  spawnModel?: string;
+  spawnEffort?: string;
   latestSeq: () => number;
   subscribe: (
     fn: (event: {
@@ -36,19 +39,13 @@ type SessionLike = {
 async function getRunner() {
   const mod = await import('./runner.ts');
   return mod as unknown as {
-    getOrCreateSession: (opts: { cli: string; repoPath: string; chatId: string }) => Promise<SessionLike>;
+    getOrCreateSession: (opts: { cli: string; repoPath: string; chatId: string; model?: string; effort?: string; recycleOnMismatch?: boolean }) => Promise<SessionLike>;
+    activeChatSessions: () => Array<{ cli: string; cwd: string; chatId: string; busy: boolean }>;
   };
 }
 
-/** Engine lane → session cli kind. Mirrors WORKSPACE_COMPANIONS ids. */
-export function cliForEngine(engine: string): string {
-  if (engine.startsWith('claude')) return 'claude';
-  if (engine.startsWith('banana')) return engine; // banana | banana-local | banana-fireworks
-  if (engine.startsWith('codex')) return 'codex';
-  if (engine === 'zai') return 'zai';
-  if (engine === 'xai') return 'xai';
-  return 'claude';
-}
+/** Backward-compatible export for callers that resolve an engine lane. */
+export const cliForEngine = cliForAgentEngine;
 
 function findAgent(ref: string): Agent | undefined {
   const needle = ref.trim().toLowerCase();
@@ -292,22 +289,45 @@ async function getRecipientSessionForDelivery(
   deadline: number,
   signal?: AbortSignal,
   deferIfBusy = false,
-): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean }> {
-  const { cli, chatKey } = agentLogKey(agent);
+): Promise<{ session: SessionLike; waited: boolean; nativeSteer: boolean; model?: string; effort?: string }> {
   const runner = await getRunner();
   let waited = false;
 
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error('sender stopped before delivery');
+    const currentAgent = findAgent(agent.id) ?? agent;
+    const { cli, chatKey, model, effort } = agentLogKey(currentAgent);
     let session: SessionLike;
     try {
-      session = await runner.getOrCreateSession({ cli, repoPath: ELROND_WORKSPACE_PATH, chatId: chatKey });
+      const conflictingBusyLane = runner.activeChatSessions().some((active) => (
+        active.busy && active.chatId === chatKey && active.cli !== cli
+      ));
+      if (conflictingBusyLane) {
+        throw new Error('the recipient is finishing a turn on its previous brain');
+      }
+      session = await runner.getOrCreateSession({
+        cli,
+        repoPath: ELROND_WORKSPACE_PATH,
+        chatId: chatKey,
+        model,
+        effort,
+        recycleOnMismatch: true,
+      });
     } catch (error) {
       throw new Error(`recipient engine failed to start: ${(error as Error).message}`);
     }
     if (signal?.aborted) throw new Error('sender stopped before delivery');
+    // The brain can change while a cold runner is spawning. Resolve again at
+    // the no-await admission edge; if it moved, loop and bind the new canonical
+    // engine/model instead of handing the caller a stale session.
+    const latestAgent = findAgent(agent.id) ?? agent;
+    const latest = agentLogKey(latestAgent);
+    if (latest.cli !== cli || latest.model !== model || latest.effort !== effort) {
+      waited = true;
+      continue;
+    }
     const recipientBusy = session.isBusy?.() === true;
-    if (!recipientBusy) return { session, waited, nativeSteer: false };
+    if (!recipientBusy) return { session, waited, nativeSteer: false, model, effort };
     // A synchronous MCP tool call must never sit behind somebody else's long
     // turn until Claude Code's ~5 minute tool timeout. The message is already
     // durable; let the outbox worker steer/wait in the background and return to
@@ -316,8 +336,14 @@ async function getRecipientSessionForDelivery(
     // Background workers can use Claude's verified safe tool-execution window
     // for immediate non-destructive steering. During inference they wait for
     // the natural boundary instead.
-    if (session.canAcceptNativeHumanSteer?.() === true) {
-      return { session, waited, nativeSteer: true };
+    const selected = session.activeSelection?.() ?? {
+      model: session.spawnModel,
+      effort: session.spawnEffort,
+    };
+    const brainMatches = (!model || selected.model === model)
+      && (!effort || selected.effort === effort);
+    if (brainMatches && session.canAcceptNativeHumanSteer?.() === true) {
+      return { session, waited, nativeSteer: true, model, effort };
     }
     waited = true;
     const outcome = await waitForIdleBoundary(session, Math.max(1, deadline - Date.now()), signal);
@@ -334,9 +360,14 @@ async function getRecipientSessionForDelivery(
 
 /** Resolve an agent's live session key. Account routing, when configured, is
  * derived server-side from the workspace rather than baked into public IDs. */
-export function agentLogKey(agent: Agent): { cli: string; chatKey: string } {
-  const cli = agent.cli || cliForEngine(agent.engine);
-  return { cli, chatKey: agent.home };
+export function agentLogKey(agent: Agent): { cli: string; chatKey: string; model?: string; effort?: string } {
+  const brain = brainForAgent(agent);
+  return {
+    cli: cliForAgentEngine(brain.engine),
+    chatKey: agent.home,
+    model: brain.model,
+    effort: brain.effort,
+  };
 }
 
 /** Fire-and-forget delivery into an agent's home thread (routines path). */
@@ -345,7 +376,7 @@ export async function sendToAgentHome(
   text: string,
   opts: { peerFrom: string; peerFromRole?: string; peerText?: string },
 ): Promise<{ delivered: boolean; reason?: string }> {
-  const { cli, chatKey } = agentLogKey(agent);
+  const { chatKey } = agentLogKey(agent);
   const watchedByHuman = () => opts.peerFromRole === 'automation'
     && isThreadWatched(ELROND_WORKSPACE_PATH, chatKey);
   // Human conversation always owns a visible home thread. Do not even spawn a
@@ -353,15 +384,21 @@ export async function sendToAgentHome(
   if (watchedByHuman()) {
     return { delivered: false, reason: 'agent thread is actively watched — routine deferred' };
   }
-  const runner = await getRunner();
   let session: SessionLike;
+  let model: string | undefined;
+  let effort: string | undefined;
   try {
-    session = await runner.getOrCreateSession({ cli, repoPath: ELROND_WORKSPACE_PATH, chatId: chatKey });
+    const admission = await getRecipientSessionForDelivery(
+      agent,
+      Date.now() + 30_000,
+      undefined,
+      true,
+    );
+    session = admission.session;
+    model = admission.model;
+    effort = admission.effort;
   } catch (e) {
-    return { delivered: false, reason: `engine failed to start: ${(e as Error).message}` };
-  }
-  if (session.isBusy?.() === true) {
-    return { delivered: false, reason: 'agent is mid-turn — routine skipped this cycle' };
+    return { delivered: false, reason: `engine unavailable: ${(e as Error).message}` };
   }
   // Recheck after the async bind: the user may have opened the thread while a
   // cold engine was starting.
@@ -383,6 +420,8 @@ export async function sendToAgentHome(
       peerFromRole: opts.peerFromRole,
       peerText: opts.peerText,
       peerDeliveryId: deliveryId,
+      model,
+      effort,
     });
   } catch (e) {
     return { delivered: false, reason: `delivery failed: ${(e as Error).message}` };
@@ -456,10 +495,14 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
   while (Date.now() < deadline) {
     let session: SessionLike;
     let nativeSteer = false;
+    let model: string | undefined;
+    let effort: string | undefined;
     try {
       const admission = await getRecipientSessionForDelivery(to, deadline, signal, deferIfBusy);
       session = admission.session;
       nativeSteer = admission.nativeSteer;
+      model = admission.model;
+      effort = admission.effort;
       waited ||= admission.waited;
     } catch (error) {
       return { delivered: false, to: to.name, hop, queued: waited || undefined, reason: (error as Error).message };
@@ -535,6 +578,8 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
         peerText: text,
         peerDeliveryId: deliveryId,
         allowNativePeerSteer: nativeSteer,
+        model,
+        effort,
         signal,
       });
     } catch (error) {
@@ -884,7 +929,10 @@ async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIV
 // ---- introspection ------------------------------------------------------------
 
 export function teamRoster() {
-  return listAgents().map((a) => ({ id: a.id, name: a.name, role: a.role, engine: a.engine }));
+  return listAgents().map((agent) => {
+    const brain = brainForAgent(agent);
+    return { id: agent.id, name: agent.name, role: agent.role, engine: brain.engine, model: brain.model, effort: brain.effort };
+  });
 }
 
 /** Recent visible texts from an agent's authoritative shared home thread. */

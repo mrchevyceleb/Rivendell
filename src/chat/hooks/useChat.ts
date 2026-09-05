@@ -7,6 +7,17 @@ import { isAutomationPeer } from '../utils/routineNoise';
 type Status = 'idle' | 'connecting' | 'ready' | 'streaming' | 'closed' | 'error';
 type ChatSendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 
+export type ServerBrainState = {
+  cli: CompanionId;
+  model?: string;
+  effort?: string;
+  activeCli: CompanionId;
+  activeModel?: string;
+  activeEffort?: string;
+  revision?: number;
+  pending: boolean;
+};
+
 export type ContextUsage = {
   inputTokens: number;
   cacheReadTokens: number;
@@ -500,11 +511,12 @@ function cancelOutbound(key: string): QueuedOutbound[] {
   return queued;
 }
 
-// v6 discards snapshots that may predate durable synthetic-error scrubbing.
-const CHAT_CACHE_VERSION = 'v6';
+// v7 discards snapshots whose receive cursor may have advanced before React
+// committed the matching durable blocks during a tab/device handoff.
+const CHAT_CACHE_VERSION = 'v7';
 
 function blocksStorageKey(cli: CompanionId, repoPath: string, chatId = 'main'): string {
-  // v6 preserves only completed routine deliverables as labeled boundaries. The
+  // v7 preserves only completed routine deliverables as labeled boundaries. The
   // durable server log rebuilds each thread once; future snapshots contain
   // only what the user could actually see.
   return `rivendell:chat-blocks:${CHAT_CACHE_VERSION}:${conversationKey(cli, repoPath, chatId)}`;
@@ -514,6 +526,7 @@ type StoredChatSnapshot = {
   version: typeof CHAT_CACHE_VERSION;
   blocks: ChatBlock[];
   seq: number;
+  resetAt: number;
 };
 
 function parseStoredSnapshot(raw: string | null): StoredChatSnapshot | null {
@@ -529,7 +542,10 @@ function parseStoredSnapshot(raw: string | null): StoredChatSnapshot | null {
       if (block.kind === 'tool' && (block.open || block.running)) return { ...block, open: false, running: false };
       return block;
     });
-    return { version: CHAT_CACHE_VERSION, blocks, seq: parsed.seq };
+    const resetAt = typeof parsed.resetAt === 'number' && Number.isFinite(parsed.resetAt) && parsed.resetAt > 0
+      ? parsed.resetAt
+      : 0;
+    return { version: CHAT_CACHE_VERSION, blocks, seq: parsed.seq, resetAt };
   } catch {
     return null;
   }
@@ -574,13 +590,21 @@ function blocksForStorage(blocks: ChatBlock[]): ChatBlock[] {
     });
 }
 
-function writeStoredState(cli: CompanionId, repoPath: string, chatId: string, blocks: ChatBlock[], seq: number): void {
+function writeStoredState(
+  cli: CompanionId,
+  repoPath: string,
+  chatId: string,
+  blocks: ChatBlock[],
+  seq: number,
+  resetAt = 0,
+): void {
   if (typeof window === 'undefined') return;
   const key = blocksStorageKey(cli, repoPath, chatId);
   const snapshot: StoredChatSnapshot = {
     version: CHAT_CACHE_VERSION,
     blocks: blocksForStorage(blocks),
     seq: Math.max(0, seq),
+    resetAt: Math.max(0, resetAt),
   };
   try {
     // One atomic localStorage value: another tab can never observe filtered
@@ -720,6 +744,14 @@ export function useChat(opts: {
     reconfigure: selectionRevisionRef.current !== appliedSelectionRevisionRef.current,
   });
   const [blocks, setBlocks] = useState<ChatBlock[]>(() => initialStoredBlocks(enabled, repo, cli, chatId));
+  // Cursor committed in the same React batch as the corresponding block
+  // reductions. Persistence must use this state, never the receive-ahead ref.
+  const [appliedSeq, setAppliedSeq] = useState(() => (
+    enabled && repo ? readStoredSnapshot(cli, repo.path, chatId)?.seq ?? 0 : 0
+  ));
+  const cacheResetAtRef = useRef(
+    enabled && repo ? readStoredSnapshot(cli, repo.path, chatId)?.resetAt ?? 0 : 0,
+  );
   /** True between a user send/steer and the next turnStart/turnEnd/error. */
   const pendingSendRef = useRef(false);
   /** Guidance waiting behind a natural turnEnd. Keep the UI streaming across
@@ -730,13 +762,16 @@ export function useChat(opts: {
   const restoreKeyRef = useRef(restoreKey);
   if (restoreKeyRef.current !== restoreKey) {
     restoreKeyRef.current = restoreKey;
-    const restored = initialStoredBlocks(enabled, repo, cli, chatId);
+    const snapshot = enabled && repo ? readStoredSnapshot(cli, repo.path, chatId) : null;
+    const restored = restoreBlocksWithUniqueIds(snapshot?.blocks ?? []);
     const queued = [...restored].reverse().find((block) => (
       block.kind === 'user' && block.deliveryState === 'queued' && block.clientMsgId
     ));
     queuedSteerRef.current = queued?.kind === 'user' ? queued.clientMsgId ?? null : null;
     pendingSendRef.current = Boolean(queuedSteerRef.current);
     setBlocks(restored);
+    setAppliedSeq(snapshot?.seq ?? 0);
+    cacheResetAtRef.current = snapshot?.resetAt ?? 0;
   }
   const [status, setStatus] = useState<Status>('idle');
   // Mirror status into a ref so WS handlers can read the latest value
@@ -744,6 +779,7 @@ export function useChat(opts: {
   const statusRef = useRef<Status>('idle');
   statusRef.current = status;
   const [error, setError] = useState<string | null>(null);
+  const [serverBrain, setServerBrain] = useState<ServerBrainState | null>(null);
   const [usage, setUsage] = useState<ContextUsage | null>(null);
   // Window size for the active CLI. Seeded from the per-CLI default and
   // refined by the `system/init` event (claude) or by the safety ratchet
@@ -799,25 +835,57 @@ export function useChat(opts: {
     initialClientMsgIdRef.current = null;
     onInitialMessageSentRef.current?.();
   };
-  /** Reconcile optimistic queued bubbles with the server's lane-owned IDs.
-   * Older servers omit the field, so only an explicit array is authoritative. */
-  const reconcileQueuedState = (rawIds: unknown, serverBusy: boolean) => {
-    if (!Array.isArray(rawIds)) return;
-    const ids = new Set(rawIds.filter((value): value is string => typeof value === 'string'));
+  const markBlockDelivered = (clientMsgId: string) => {
     setBlocks((prev) => prev.map((block) => (
       block.kind === 'user'
-      && block.deliveryState === 'queued'
-      && block.clientMsgId
-      && !ids.has(block.clientMsgId)
-        ? { ...block, deliveryState: 'failed' as const }
+      && block.clientMsgId === clientMsgId
+      && block.deliveryState !== undefined
+        ? { ...block, deliveryState: undefined }
         : block
     )));
+  };
+  /** Reconcile optimistic bubbles with both sides of the server lifecycle.
+   * `queuedClientMsgIds` contains guidance still waiting for a boundary;
+   * `deliveredClientMsgIds` contains durable _user_echo receipts. A missing
+   * queue id while the lane is busy can mean it is the ACTIVE turn, never a
+   * failure. Older servers omit receipt fields, so only arrays are authoritative. */
+  const reconcileQueuedState = (rawQueuedIds: unknown, rawDeliveredIds: unknown, serverBusy: boolean) => {
+    const hasQueuedState = Array.isArray(rawQueuedIds);
+    const hasDeliveredState = Array.isArray(rawDeliveredIds);
+    if (!hasQueuedState && !hasDeliveredState) return;
+    const queuedIds = new Set(
+      hasQueuedState
+        ? (rawQueuedIds as unknown[]).filter((value): value is string => typeof value === 'string')
+        : [],
+    );
+    const deliveredIds = new Set(
+      hasDeliveredState
+        ? (rawDeliveredIds as unknown[]).filter((value): value is string => typeof value === 'string')
+        : [],
+    );
+    setBlocks((prev) => prev.map((block) => {
+      if (block.kind !== 'user' || !block.clientMsgId) return block;
+      if (deliveredIds.has(block.clientMsgId) && block.deliveryState !== undefined) {
+        return { ...block, deliveryState: undefined };
+      }
+      if (
+        hasQueuedState
+        && !serverBusy
+        && block.deliveryState === 'queued'
+        && !queuedIds.has(block.clientMsgId)
+      ) return { ...block, deliveryState: 'failed' as const };
+      return block;
+    }));
     const current = queuedSteerRef.current;
-    if (current && !ids.has(current)) {
+    if (current && deliveredIds.has(current)) {
+      queuedSteerRef.current = null;
+      pendingSendRef.current = false;
+      setError(null);
+    } else if (current && hasQueuedState && !serverBusy && !queuedIds.has(current)) {
       queuedSteerRef.current = null;
       pendingSendRef.current = false;
       setError('Queued guidance was not retained by the server. Please send it again.');
-      if (!serverBusy) setStatus('ready');
+      setStatus('ready');
     }
   };
   const flushOutbound = () => {
@@ -953,8 +1021,8 @@ export function useChat(opts: {
     // proves the terminal turnEnd/ready boundary landed. Advancing sooner would
     // strand its eventual deliverable without the automation boundary.
     if (status !== 'ready' && automationTurnPending(blocks)) return;
-    writeStoredState(cli, repo.path, chatId, blocks, lastSeqRef.current);
-  }, [blocks, status, repo?.path, cli, chatId]);
+    writeStoredState(cli, repo.path, chatId, blocks, appliedSeq, cacheResetAtRef.current);
+  }, [blocks, appliedSeq, status, repo?.path, cli, chatId]);
 
   useEffect(() => {
     if (!enabled || !repo) return;
@@ -966,6 +1034,7 @@ export function useChat(opts: {
     // (re)connect. The system/init event will refine it for Claude.
     windowTokensRef.current = windowForCli(cli, modelRef.current, contextWindowTokens);
     setUsage(null);
+    setServerBrain(null);
     // Restore prior blocks from localStorage so a page reload doesn't wipe
     // the chat. Server replay then fills in events newer than what we have.
     const snapshot = readStoredSnapshot(cli, repo.path, chatId);
@@ -981,9 +1050,11 @@ export function useChat(opts: {
     clearTurnStarted();
     reconnectAttemptRef.current = 0;
     // The atomic envelope distinguishes a valid, fully-filtered empty thread
-    // from a missing/corrupt cache. Missing v5 state asks for a full replay;
+    // from a missing/corrupt cache. Missing state asks for a full replay;
     // an intentionally empty settled snapshot safely resumes at its cursor.
     lastSeqRef.current = snapshot?.seq ?? 0;
+    setAppliedSeq(snapshot?.seq ?? 0);
+    cacheResetAtRef.current = snapshot?.resetAt ?? 0;
     // Mark this conversation as restored so the persistence-write effect can
     // safely begin saving updates back to storage.
     restoredKeyRef.current = conversationKey(cli, repo.path, chatId);
@@ -1034,6 +1105,7 @@ export function useChat(opts: {
           repo: repo.path,
           chatId,
           sinceSeq: lastSeqRef.current,
+          resetAt: cacheResetAtRef.current,
           model: modelRef.current,
           effort: effortRef.current,
           ...selectionIntent(),
@@ -1053,15 +1125,19 @@ export function useChat(opts: {
         if (typeof msg.seq === 'number') {
           if (msg.seq <= lastSeqRef.current) return;
           lastSeqRef.current = msg.seq;
+          setAppliedSeq((current) => Math.max(current, msg.seq));
         }
         if (typeof msg.latestSeq === 'number' && msg.latestSeq > lastSeqRef.current) {
           lastSeqRef.current = msg.latestSeq;
+          // `latestSeq` is emitted only after hello replay has sent every
+          // durable event through that boundary, so it is safe to commit.
+          setAppliedSeq((current) => Math.max(current, msg.latestSeq));
         }
         if (msg.type === 'working') {
           // Transport keepalive while the engine is on a tool/think pause.
           // It also carries authoritative queued-steer ownership so a cached
           // bubble cannot remain "will run next" after a lost operation.
-          reconcileQueuedState(msg.queuedClientMsgIds, msg.busy === true);
+          reconcileQueuedState(msg.queuedClientMsgIds, msg.deliveredClientMsgIds, msg.busy === true);
           // Server busy state is authoritative. If a re-hello or transient
           // transport error briefly painted this lane idle, restore liveness
           // instead of leaving the user with no indicator while work continues.
@@ -1075,11 +1151,26 @@ export function useChat(opts: {
         }
         if (msg.type === 'ready') {
           socketReady = true;
+          if (typeof msg.resetAt === 'number' && Number.isFinite(msg.resetAt)) {
+            cacheResetAtRef.current = Math.max(cacheResetAtRef.current, msg.resetAt);
+          }
           socketReadyRef.current = true;
           serverCliRef.current = typeof msg.activeCli === 'string'
             ? msg.activeCli as CompanionId
             : cli;
-          reconcileQueuedState(msg.queuedClientMsgIds, msg.busy === true);
+          if (typeof msg.cli === 'string') {
+            setServerBrain({
+              cli: msg.cli as CompanionId,
+              model: typeof msg.model === 'string' ? msg.model : undefined,
+              effort: typeof msg.effort === 'string' ? msg.effort : undefined,
+              activeCli: serverCliRef.current,
+              activeModel: typeof msg.activeModel === 'string' ? msg.activeModel : undefined,
+              activeEffort: typeof msg.activeEffort === 'string' ? msg.activeEffort : undefined,
+              revision: Number.isSafeInteger(msg.brainRevision) ? msg.brainRevision : undefined,
+              pending: msg.brainPending === true,
+            });
+          }
+          reconcileQueuedState(msg.queuedClientMsgIds, msg.deliveredClientMsgIds, msg.busy === true);
           // If the server says we attached to a busy session (Sam is mid-turn
           // because the user reconnected from a phone unlock or tab switch),
           // jump straight to 'streaming' so the UI shows tending instead of
@@ -1112,12 +1203,39 @@ export function useChat(opts: {
           if (Number.isSafeInteger(msg.selectionRevision) && msg.selectionRevision >= 0) {
             appliedSelectionRevisionRef.current = msg.selectionRevision;
           }
+          setServerBrain((current) => {
+            const appliedCli = typeof msg.cli === 'string'
+              ? msg.cli as CompanionId
+              : current?.cli;
+            if (!appliedCli) return current;
+            const appliedModel = Object.prototype.hasOwnProperty.call(msg, 'model')
+              ? typeof msg.model === 'string' ? msg.model : undefined
+              : current?.model;
+            const appliedEffort = Object.prototype.hasOwnProperty.call(msg, 'effort')
+              ? typeof msg.effort === 'string' ? msg.effort : undefined
+              : current?.effort;
+            return {
+              cli: appliedCli,
+              model: appliedModel,
+              effort: appliedEffort,
+              activeCli: appliedCli,
+              activeModel: appliedModel,
+              activeEffort: appliedEffort,
+              revision: Number.isSafeInteger(msg.brainRevision) ? msg.brainRevision : current?.revision,
+              pending: false,
+            };
+          });
         }
         else if (msg.type === 'replayReset') {
-          // Server detected an impossible browser cursor (usually an older
-          // cross-engine sequence regression) and is about to replay the
-          // durable thread from its beginning. Drop the stale cached rendering
-          // first so lower historical seqs are accepted exactly once.
+          // Server detected an impossible/stale browser generation and is about
+          // to replay the durable thread from its beginning. Retire every local
+          // outbound owner too: an offline device must never flush a pre-Fresh
+          // draft into the newly reset conversation after ready arrives.
+          cancelOutbound(conversationKey(cli, repo.path, chatId));
+          sentOutboundRef.current = null;
+          settleInitialMessage();
+          queuedSteerRef.current = null;
+          pendingSendRef.current = false;
           setBlocks([]);
           setUsage(null);
           setError(null);
@@ -1125,10 +1243,15 @@ export function useChat(opts: {
           turnIdRef.peerId = undefined;
           clearTurnStarted();
           lastSeqRef.current = 0;
-          writeStoredState(cli, repo.path, chatId, [], 0);
+          setAppliedSeq(0);
+          if (typeof msg.resetAt === 'number' && Number.isFinite(msg.resetAt)) {
+            cacheResetAtRef.current = Math.max(cacheResetAtRef.current, msg.resetAt);
+          }
+          writeStoredState(cli, repo.path, chatId, [], 0, cacheResetAtRef.current);
         }
         else if (msg.type === 'sessionRebound') {
           lastSeqRef.current = 0;
+          setAppliedSeq(0);
           setError(null);
         }
         else if (msg.type === 'turnStart') {
@@ -1194,17 +1317,28 @@ export function useChat(opts: {
           });
         }
         else if (msg.type === 'freshStarted') {
+          const key = conversationKey(cli, repo.path, chatId);
+          cancelOutbound(key);
+          sentOutboundRef.current = null;
+          settleInitialMessage();
           queuedSteerRef.current = null;
+          pendingSendRef.current = false;
+          socketReadyRef.current = msg.remote !== true;
           setBlocks([]);
           setUsage(null);
           setError(null);
-          setStatus('ready');
+          setStatus(msg.remote === true ? 'connecting' : 'ready');
           turnIdRef.current = '';
           turnIdRef.peerId = undefined;
           clearTurnStarted();
           lastSeqRef.current = 0;
-          if (repo) {
-            writeStoredState(cli, repo.path, chatId, [], 0);
+          setAppliedSeq(0);
+          if (typeof msg.resetAt === 'number' && Number.isFinite(msg.resetAt)) {
+            cacheResetAtRef.current = Math.max(cacheResetAtRef.current, msg.resetAt);
+          }
+          writeStoredState(cli, repo.path, chatId, [], 0, cacheResetAtRef.current);
+          if (msg.remote === true) {
+            window.setTimeout(() => forceReconnectRef.current(), 0);
           }
         }
         else if (msg.type === 'sessionClosed') {
@@ -1359,6 +1493,7 @@ export function useChat(opts: {
           }
           if (msg.state === 'accepted') {
             acknowledgeOutbound(key, msg.clientMsgId);
+            markBlockDelivered(msg.clientMsgId);
             if (sentOutboundRef.current?.clientMsgId === msg.clientMsgId) {
               sentOutboundRef.current = null;
             }
@@ -1546,6 +1681,7 @@ export function useChat(opts: {
             repo: repo.path,
             chatId,
             sinceSeq: lastSeqRef.current,
+            resetAt: cacheResetAtRef.current,
             model: modelRef.current,
             effort: effortRef.current,
             ...selectionIntent(),
@@ -1602,10 +1738,25 @@ export function useChat(opts: {
       if (!isCurrentConnection()) return;
       if (e.key !== snapshotStorageKey || e.newValue == null) return;
       const snapshot = parseStoredSnapshot(e.newValue);
-      if (!snapshot || snapshot.seq <= lastSeqRef.current) return;
-      if (statusRef.current === 'streaming' || pendingSendRef.current) return;
+      if (!snapshot || snapshot.resetAt < cacheResetAtRef.current) return;
+      const newerReset = snapshot.resetAt > cacheResetAtRef.current;
+      if (!newerReset && snapshot.seq <= lastSeqRef.current) return;
+      if (!newerReset && (statusRef.current === 'streaming' || pendingSendRef.current)) return;
+      if (newerReset) {
+        cancelOutbound(conversationKey(cli, repo.path, chatId));
+        sentOutboundRef.current = null;
+        settleInitialMessage();
+        queuedSteerRef.current = null;
+        pendingSendRef.current = false;
+        socketReadyRef.current = false;
+        cacheResetAtRef.current = snapshot.resetAt;
+        setError(null);
+        setStatus('connecting');
+      }
       setBlocks(restoreBlocksWithUniqueIds(snapshot.blocks));
       lastSeqRef.current = snapshot.seq;
+      setAppliedSeq(snapshot.seq);
+      if (newerReset) window.setTimeout(() => forceReconnectRef.current(), 0);
     };
     window.addEventListener('storage', onStorage);
 
@@ -1810,7 +1961,7 @@ export function useChat(opts: {
   const automationBusy = useMemo(() => automationTurnInFlight(blocks), [blocks]);
 
   return {
-    blocks: visibleBlocks, status, error, send, steer, freshStart, stop, reconnect, usage, automationBusy,
+    blocks: visibleBlocks, status, error, send, steer, freshStart, stop, reconnect, usage, serverBrain, automationBusy,
     turnStartedAt,
     lastActivityRef: lastMessageAtRef, turnStartRef, compactingRef,
   };

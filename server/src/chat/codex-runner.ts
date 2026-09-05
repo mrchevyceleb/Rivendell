@@ -278,6 +278,7 @@ export class CodexSession {
   /** Model of the most recent turn — stamped onto persisted events so a merged
    *  thread log can say which brain produced which turn. */
   private turnModel: string | null = null;
+  private turnEffort: string | null = null;
   /** Codex doesn't need a warmup turn — ready immediately. */
   readonly ready: Promise<boolean> = Promise.resolve(true);
 
@@ -383,6 +384,13 @@ export class CodexSession {
     return this.busy;
   }
 
+  activeSelection(): { model?: string; effort?: string } {
+    return {
+      model: this.turnModel ?? undefined,
+      effort: this.turnEffort ?? undefined,
+    };
+  }
+
   sessionId(): string | null {
     return this.threadId;
   }
@@ -460,6 +468,7 @@ export class CodexSession {
       opts.effort,
     );
     this.turnModel = codexModel;
+    this.turnEffort = codexEffort;
     this.busy = true;
     this.cancellationEmitted = false;
     const recoverContextThisTurn = this.recoverContextOnNextTurn;
@@ -511,7 +520,7 @@ export class CodexSession {
         throw error;
       }
       noteUserTurn(this.logKey); // compaction cadence (monotonic)
-      noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
+      noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
     }
 
     try {

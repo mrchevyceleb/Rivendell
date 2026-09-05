@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { AccessToken, RoomAgentDispatch, RoomConfiguration } from 'livekit-server-sdk';
-import { listAgents } from '../chat/agents.ts';
+import { brainForAgent, cliForAgentEngine, listAgents } from '../chat/agents.ts';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { discoverRepos } from '../chat/repos.ts';
 
@@ -50,11 +50,14 @@ jarvisRouter.get('/token', async (req, res) => {
       res.status(404).json({ error: 'voice teammate not found' });
       return;
     }
-    const cli = typeof req.query.cli === 'string' && req.query.cli.trim()
-      ? req.query.cli.trim()
-      : agent?.engine || 'xai';
-    const model = typeof req.query.model === 'string' && req.query.model.trim() ? req.query.model.trim() : undefined;
-    const effort = typeof req.query.effort === 'string' && req.query.effort.trim() ? req.query.effort.trim() : undefined;
+    const storedBrain = agent ? brainForAgent(agent) : null;
+    const cli = storedBrain
+      ? cliForAgentEngine(storedBrain.engine)
+      : typeof req.query.cli === 'string' && req.query.cli.trim() ? req.query.cli.trim() : 'xai';
+    const model = storedBrain?.model
+      ?? (typeof req.query.model === 'string' && req.query.model.trim() ? req.query.model.trim() : undefined);
+    const effort = storedBrain?.effort
+      ?? (typeof req.query.effort === 'string' && req.query.effort.trim() ? req.query.effort.trim() : undefined);
     const repo = typeof req.query.repo === 'string' && req.query.repo.trim()
       ? req.query.repo.trim()
       : ELROND_WORKSPACE_PATH;

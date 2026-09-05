@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import express from 'express';
 import { asyncHandler } from './helpers.ts';
-import { listAgents, createAgent, updateAgent, deleteAgent, setAgentAvatar, clearAgentAvatar, agentAvatarPath, reorderAgents } from '../chat/agents.ts';
+import { AgentBrainConflictError, AgentBrainRevisionRequiredError, listAgents, createAgent, updateAgent, deleteAgent, setAgentAvatar, clearAgentAvatar, agentAvatarPath, reorderAgents } from '../chat/agents.ts';
 import { personaScopeFor } from '../chat/personaPrompts.ts';
 import { agentUnread, markAgentRead, agentLatestSeq } from '../chat/reads.ts';
 
@@ -33,20 +33,39 @@ agentsRouter.post('/reorder', asyncHandler(async (req, res) => {
 }));
 
 agentsRouter.post('/', asyncHandler(async (req, res) => {
-  const { name, role, engine, voice, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, voice, scope } = req.body ?? {};
   if (typeof name !== 'string' || !name.trim()) {
     res.status(400).json({ error: 'name is required' });
     return;
   }
-  res.status(201).json({ agent: createAgent({ name, role, engine, voice, scope }) });
+  res.status(201).json({ agent: createAgent({ name, role, engine, model, effort, voice, scope }) });
 }));
 
 agentsRouter.patch('/:id', asyncHandler(async (req, res) => {
-  const { name, role, engine, voice, pinned, scope } = req.body ?? {};
+  const { name, role, engine, model, effort, brainRevision, voice, pinned, scope } = req.body ?? {};
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const agent = updateAgent(id, { name, role, engine, voice, pinned, scope });
-  if (!agent) { res.status(404).json({ error: 'agent not found' }); return; }
-  res.json({ agent });
+  try {
+    const expectedRevision = Number.isSafeInteger(brainRevision) && brainRevision > 0
+      ? brainRevision as number
+      : undefined;
+    const agent = updateAgent(
+      id,
+      { name, role, engine, model, effort, voice, pinned, scope },
+      expectedRevision,
+    );
+    if (!agent) { res.status(404).json({ error: 'agent not found' }); return; }
+    res.json({ agent });
+  } catch (error) {
+    if (error instanceof AgentBrainConflictError) {
+      res.status(409).json({ error: error.message, agent: error.current });
+      return;
+    }
+    if (error instanceof AgentBrainRevisionRequiredError) {
+      res.status(428).json({ error: error.message, agent: error.current });
+      return;
+    }
+    throw error;
+  }
 }));
 
 agentsRouter.delete('/:id', asyncHandler(async (req, res) => {

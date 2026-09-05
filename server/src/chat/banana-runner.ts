@@ -2380,6 +2380,7 @@ export class BananaSession {
   readonly logKey: string;
   /** Model of the most recent turn — stamped onto persisted events. */
   private turnModel: string | null = null;
+  private turnEffort: string | null = null;
   readonly cli: CliKind;
   readonly cwd: string;
   readonly chatId: string;
@@ -2558,6 +2559,13 @@ export class BananaSession {
 
   isBusy(): boolean {
     return this.busy;
+  }
+
+  activeSelection(): { model?: string; effort?: string } {
+    return {
+      model: this.turnModel ?? undefined,
+      effort: this.turnEffort ?? undefined,
+    };
   }
 
   sessionId(): string | null {
@@ -2749,7 +2757,7 @@ export class BananaSession {
         throw error;
       }
       noteUserTurn(this.logKey); // compaction cadence (monotonic)
-      noteAgentLane(this.chatId, this.cli); // team bus routes by live lane
+      noteAgentLane(this.chatId, this.cli); // historical lane diagnostics
     }
 
     // Vision adapter: a text-only OpenRouter model (or any local LM Studio chat
@@ -2873,6 +2881,10 @@ export class BananaSession {
           this.failTurn('banana session.create returned no id');
           return;
         }
+        // Fresh/Stop may have retired this lane while session.create was in
+        // flight. Never let that obsolete completion restore a native id after
+        // the engine-neutral thread reset has cleared every provider lane.
+        if (this.dead) return;
         this.threadId = newId;
         this.threadServeGeneration = serveGeneration;
         await this.queueSessionId(newId);
@@ -2958,6 +2970,7 @@ export class BananaSession {
     }
     const model = parseModel(requestedModelId);
     this.turnModel = requestedModelId ?? null;
+    this.turnEffort = opts.effort ?? null;
     const slashCommand = await parseBananaSlashCommand(text, this.cwd);
     const needsContextRecovery = this.wipedThisTurn || recoverContextThisTurn;
     const seedWindow = this.consumeWindowSeed() || needsContextRecovery;

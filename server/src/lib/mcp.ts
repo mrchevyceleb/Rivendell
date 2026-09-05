@@ -15,6 +15,9 @@ export async function callMcp<T = unknown>(tool: string, payload: unknown): Prom
 
   const response = await fetch(`${MCP_BASE_URL.replace(/\/$/, '')}/tools/call`, {
     method: 'POST',
+    // Fresh Thread and rolling compaction must never hold a lane forever when
+    // the optional remote memory mirror is unreachable.
+    signal: AbortSignal.timeout(30_000),
     headers: {
       'Content-Type': 'application/json',
       ...(MCP_BEARER_TOKEN ? { Authorization: `Bearer ${MCP_BEARER_TOKEN}` } : {}),

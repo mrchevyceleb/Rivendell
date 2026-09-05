@@ -111,6 +111,34 @@ export async function setSessionSelection(
   await writeQueue;
 }
 
+/** Remove provider-native resume ids for a Fresh Thread reset. Named teammate
+ * logs are engine-neutral, so every provider lane is cleared; ordinary Studio
+ * threads retain their historical selected-engine-only reset semantics. Keep
+ * model/effort metadata only as harmless diagnostics/cold migration data. */
+export async function clearThreadSessionIds(repoPath: string, chatId = 'main', cli?: Cli): Promise<void> {
+  const all = await load();
+  const normalized = chatId || 'main';
+  const threadSuffix = normalized === 'main' ? `|${repoPath}` : `|${repoPath}|${normalized}`;
+  const agentSuffix = normalized.startsWith('bot-') ? `|${normalized}` : null;
+  let changed = false;
+  for (const [storageKey, existing] of Object.entries(all)) {
+    const matches = storageKey.endsWith(threadSuffix)
+      || (normalized !== 'main' && storageKey.includes(`${threadSuffix}__acct__`))
+      || Boolean(agentSuffix && (
+        storageKey.endsWith(agentSuffix)
+        || storageKey.includes(`${agentSuffix}__acct__`)
+      ));
+    const providerMatches = agentSuffix !== null || !cli || storageKey.startsWith(`${cli}|`);
+    if (!matches || !providerMatches || !existing.sessionId) continue;
+    const { sessionId: _discard, ...selection } = existing;
+    all[storageKey] = { ...selection, updatedAt: Date.now() };
+    changed = true;
+  }
+  if (!changed) return;
+  writeQueue = writeQueue.then(flush, flush);
+  await writeQueue;
+}
+
 export async function ensureStateDir(): Promise<void> {
   await mkdir(STATE_DIR, { recursive: true });
 }

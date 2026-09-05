@@ -78,10 +78,16 @@ export function ModelChip({
 }) {
   const { ring, name, effort } = counselChipInfo(picker);
   return (
-    <button type="button" className="model-chip" onClick={onClick} aria-label={ariaLabel ?? 'Choose companion and model'}>
+    <button
+      type="button"
+      className={`model-chip${picker.brainPending ? ' pending' : ''}`}
+      onClick={onClick}
+      aria-label={ariaLabel ?? `Choose companion and model${picker.brainPending ? '; change applies after the active turn' : ''}`}
+      title={picker.brainPending ? 'This brain is saved globally and will take over after the active turn.' : undefined}
+    >
       <span className="ring">{ring}</span>
       <span>{name}</span>
-      <span className="eff">· {effort}</span>
+      <span className="eff">· {effort}{picker.brainPending ? ' · pending' : ''}</span>
     </button>
   );
 }

@@ -263,7 +263,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
           {view.kind === 'chat' ? (
             <GrokChat
-              key={`${view.lane ?? view.cli ?? 'auto'}:${view.chatId}`}
+              key={`${view.chatId}:${chatRepo?.path ?? ''}`}
               chatId={view.chatId}
               cli={view.cli}
               lane={view.lane}
@@ -272,6 +272,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               paneOpen={paneOpen}
               onTogglePane={() => setPaneOpen((o) => !o)}
               onOpenAgentEditor={() => { setEditTarget(agent); setEditorOpen(true); }}
+              onAgentBrainSaved={reloadAgents}
               onVoice={(settings) => (agent && chatRepo ? setCallTarget({ agent, settings, repoPath: chatRepo.path }) : jarvis.summon())}
               voiceActive={jarvis.wakeActive}
               theme={theme}

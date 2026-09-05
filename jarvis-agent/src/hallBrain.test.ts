@@ -54,7 +54,16 @@ test('named voice emits only text after its matching durable user echo', async (
     while (!connections[0]) await delay(5);
     const socket = connections[0];
     await waitForMessage(socket, (message) => message.type === 'hello');
-    send(socket, { type: 'ready', busy: false, activeCli: 'xai', latestSeq: 0, queuedClientMsgIds: [] });
+    send(socket, {
+      type: 'ready',
+      cli: 'claude',
+      model: 'claude-fable-5-1',
+      effort: 'high',
+      busy: false,
+      activeCli: 'claude',
+      latestSeq: 0,
+      queuedClientMsgIds: [],
+    });
     assert.equal(await connected, true);
 
     const events = brain.runTurn('check it');
@@ -63,6 +72,10 @@ test('named voice emits only text after its matching durable user echo', async (
     assert.equal(outbound.chatId, 'bot-kate');
     assert.equal(outbound.repo, '/workspace');
     assert.equal(outbound.voice, true);
+    assert.deepEqual(
+      [outbound.cli, outbound.model, outbound.effort],
+      ['claude', 'claude-fable-5-1', 'high'],
+    );
 
     send(socket, { type: 'stream', seq: 1, event: { type: 'assistant', message: { content: [{ type: 'text', text: 'OLD TURN' }] } } });
     assert.equal(await Promise.race([first.then(() => 'event'), delay(60).then(() => 'quiet')]), 'quiet');

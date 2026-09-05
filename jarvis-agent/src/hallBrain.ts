@@ -238,6 +238,13 @@ export class HallBrain {
         return;
       case 'ready': {
         this.isReady = true;
+        if (this.threadVoice && typeof msg.cli === 'string') {
+          this.settings = {
+            cli: msg.cli,
+            model: typeof msg.model === 'string' ? msg.model : undefined,
+            effort: typeof msg.effort === 'string' ? msg.effort : undefined,
+          };
+        }
         this.activeCli = typeof msg.activeCli === 'string' ? msg.activeCli : this.settings.cli;
         const attempt = this.currentAttempt;
         const queued = Boolean(
@@ -255,6 +262,17 @@ export class HallBrain {
           return;
         }
         if (!attempt.admitted && !queued) this.submitCurrentAttempt();
+        return;
+      }
+      case 'selectionApplied': {
+        if (this.threadVoice && typeof msg.cli === 'string') {
+          this.settings = {
+            cli: msg.cli,
+            model: typeof msg.model === 'string' ? msg.model : undefined,
+            effort: typeof msg.effort === 'string' ? msg.effort : undefined,
+          };
+          this.activeCli = msg.cli;
+        }
         return;
       }
       case 'turnStart': {
