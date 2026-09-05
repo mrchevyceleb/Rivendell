@@ -71,17 +71,33 @@ type ResumeWatchableSession = AnySession & {
   waitForInitOrExit?: (timeoutMs: number) => Promise<'initialized' | 'closed' | 'timeout'>;
 };
 
-type SteerBoundary = 'turn-complete' | 'closed' | 'timeout' | 'aborted';
+type SteerBoundary = 'steerable' | 'turn-complete' | 'closed' | 'timeout' | 'aborted';
 
 function sessionHasActiveBoundary(session: AnySession): boolean {
   return (session as { isBusy?: () => boolean }).isBusy?.() === true;
 }
 
-/** Every engine finishes its current turn naturally before guidance is sent.
- * This is the only steering policy that can guarantee no tool/process abort. */
-function waitForNaturalTurnEnd(session: AnySession, signal: AbortSignal, timeoutMs = 30 * 60_000): Promise<SteerBoundary> {
+function supportsNativeTurnSteer(cli: CliKind): boolean {
+  return isClaudeFamilyCli(cli) || cli === 'codex';
+}
+
+function sessionCanAcceptNativeSteer(session: AnySession): boolean {
+  return (session as { canAcceptNativeHumanSteer?: () => boolean })
+    .canAcceptNativeHumanSteer?.() === true;
+}
+
+/** Wait without interrupting until guidance can join the active turn or the
+ * natural boundary arrives. This closes the readiness race for a Codex adapter
+ * still starting and for Claude entering a tool window after guidance queued. */
+function waitForSteerOrTurnEnd(
+  session: AnySession,
+  signal: AbortSignal,
+  timeoutMs = 30 * 60_000,
+  allowNativeSteer = false,
+): Promise<SteerBoundary> {
   if (signal.aborted) return Promise.resolve('aborted');
   if (!sessionHasActiveBoundary(session)) return Promise.resolve('turn-complete');
+  if (allowNativeSteer && sessionCanAcceptNativeSteer(session)) return Promise.resolve('steerable');
   return new Promise((resolve) => {
     let settled = false;
     let unsubscribe: () => void = () => {};
@@ -104,10 +120,12 @@ function waitForNaturalTurnEnd(session: AnySession, signal: AbortSignal, timeout
       }).subscribe((se) => {
         if (se.ev?.type === 'turnEnd') done('turn-complete');
         else if (se.ev?.type === 'closed') done('closed');
+        else if (allowNativeSteer && sessionCanAcceptNativeSteer(session)) done('steerable');
       }, -1, false);
-      // Close the check/subscribe race: the result can land after the first
-      // isBusy read but before the listener is attached.
+      // Close both check/subscribe races: the turn can end or the native steer
+      // channel can become ready before the listener is attached.
       if (!sessionHasActiveBoundary(session)) done('turn-complete');
+      else if (allowNativeSteer && sessionCanAcceptNativeSteer(session)) done('steerable');
     } catch {
       done('timeout');
     }
@@ -1287,30 +1305,36 @@ export async function registerChat(app: express.Express, server: Server): Promis
             && session
             && (
               sessionCli(session) !== desiredSteerBrain.cli
-              || (isClaudeFamilyCli(desiredSteerBrain.cli) && (
+              || (supportsNativeTurnSteer(desiredSteerBrain.cli) && (
                 boundSelection.model !== desiredSteerBrain.model
                 || boundSelection.effort !== desiredSteerBrain.effort
               ))
             )
           );
-          // Claude Code's native stream-json input is trustworthy only while a
-          // tool is actively executing: guidance then lands before the next
-          // provider request. A pending authoritative brain change must instead
-          // wait for the natural boundary and start on the centrally configured
-          // model; it can never be absorbed by the old process.
-          const nativeClaudeSteer = Boolean(
+          // Claude stream-json accepts same-turn input in a verified tool
+          // window. Codex app-server accepts it through turn/steer throughout
+          // an active turn. A pending authoritative brain change must still
+          // wait for the natural boundary so guidance cannot land on the old
+          // model after a central reconfiguration.
+          let nativeActiveSteer = Boolean(
             session
             && !needsAuthoritativeBoundary
             && (!msg.images || msg.images.length === 0)
-            && isClaudeFamilyCli(steerCli)
+            && supportsNativeTurnSteer(steerCli)
             && (session as { canAcceptNativeHumanSteer?: () => boolean })
               .canAcceptNativeHumanSteer?.() === true,
           );
           const steerDeadline = Date.now() + 30 * 60_000;
-          while (!nativeClaudeSteer && session && sessionHasActiveBoundary(session)) {
+          while (!nativeActiveSteer && session && sessionHasActiveBoundary(session)) {
             const remaining = Math.max(1, steerDeadline - Date.now());
-            const boundary = await waitForNaturalTurnEnd(session, steerAborter.signal, remaining);
+            const boundary = await waitForSteerOrTurnEnd(
+              session,
+              steerAborter.signal,
+              remaining,
+              !needsAuthoritativeBoundary && supportsNativeTurnSteer(steerCli),
+            );
             if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
+            if (boundary === 'steerable') { nativeActiveSteer = true; break; }
             if (boundary === 'closed') { session = null; break; }
             if (boundary === 'timeout') {
               rejectSteer('Guidance is still waiting for the current turn to finish. The running agent was not interrupted; try again later or use Stop.');
@@ -1321,10 +1345,10 @@ export async function registerChat(app: express.Express, server: Server): Promis
             // turnEnd. Loop until the session is genuinely idle.
           }
           if (session) {
-            console.warn(`[chat ws#${wsId}] guidance ${nativeClaudeSteer ? 'queued natively in active Claude turn' : 'queued after natural turn completion'}`);
+            console.warn(`[chat ws#${wsId}] guidance ${nativeActiveSteer ? `accepted in active ${steerCli} turn` : 'queued after natural turn completion'}`);
           }
           if (session && (session as { isAlive?: () => boolean }).isAlive?.() === false) session = null;
-          if (authoritativeAgent && !nativeClaudeSteer) {
+          if (authoritativeAgent && !nativeActiveSteer) {
             // Another device may have changed the global brain while this
             // guidance waited. Resolve again at the actual admission boundary.
             desiredSteerBrain = resolvedBrain(chatId, desiredSteerBrain);
@@ -1336,7 +1360,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               session
               && (
                 sessionCli(session) !== steerCli
-                || (isClaudeFamilyCli(steerCli) && (
+                || (supportsNativeTurnSteer(steerCli) && (
                   currentSelection.model !== steerModel
                   || currentSelection.effort !== steerEffort
                 ))
@@ -1396,7 +1420,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             }
           }
           if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
-          if (authoritativeAgent && !nativeClaudeSteer) {
+          if (authoritativeAgent && !nativeActiveSteer) {
             while (true) {
               const latestBrain = resolvedBrain(chatId, desiredSteerBrain);
               const unchanged = latestBrain.revision === desiredSteerBrain.revision
@@ -1428,6 +1452,62 @@ export async function registerChat(app: express.Express, server: Server): Promis
               if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
             }
           }
+          // The native channel can close between the earlier snapshot and the
+          // actual write. Wait for the next steerable event or natural end,
+          // then rebind the authoritative brain before turning this into a new
+          // turn. CodexSession/ClaudeSession still revalidate at send() as the
+          // final no-await race guard.
+          while (nativeActiveSteer && !sessionCanAcceptNativeSteer(session)) {
+            if (!sessionHasActiveBoundary(session)) {
+              nativeActiveSteer = false;
+              break;
+            }
+            const boundary = await waitForSteerOrTurnEnd(
+              session,
+              steerAborter.signal,
+              Math.max(1, steerDeadline - Date.now()),
+              true,
+            );
+            if (steerAborter.signal.aborted || laneGenStale() || boundary === 'aborted') { rejectSteer(); releaseSteer(); return; }
+            if (boundary === 'steerable') continue;
+            if (boundary === 'closed') { session = null; break; }
+            if (boundary === 'timeout') {
+              rejectSteer('Guidance is still waiting for a safe delivery point. The running agent was not interrupted; try again later or use Stop.');
+              releaseSteer();
+              return;
+            }
+            nativeActiveSteer = false;
+          }
+          if (!session) {
+            rejectSteer('Guidance target closed before delivery — try again.');
+            releaseSteer();
+            safeSend({ type: 'turnEnd' });
+            return;
+          }
+          if (authoritativeAgent && !nativeActiveSteer) {
+            desiredSteerBrain = resolvedBrain(chatId, desiredSteerBrain);
+            steerCli = desiredSteerBrain.cli;
+            steerModel = desiredSteerBrain.model;
+            steerEffort = desiredSteerBrain.effort;
+            const desiredKey = laneGenKey(steerCli, steerRepo, chatId);
+            if (desiredKey !== waitKey) {
+              if (waitKey && laneWaiters.get(waitKey) === steerAborter) laneWaiters.delete(waitKey);
+              deletePendingSteer(waitKey, msg.clientMsgId);
+              laneGen = bumpLaneGen(steerCli, steerRepo, chatId);
+              waitKey = desiredKey;
+              laneWaiters.set(waitKey, steerAborter);
+              addPendingSteer(waitKey, msg.clientMsgId);
+            }
+            session = await bindSession(getOrCreateSession({
+              cli: steerCli,
+              repoPath: steerRepo,
+              chatId,
+              model: steerModel,
+              effort: steerEffort,
+              recycleOnMismatch: true,
+            }));
+            if (steerAborter.signal.aborted || laneGenStale()) { rejectSteer(); releaseSteer(); return; }
+          }
           if ((session as { isAlive?: () => boolean }).isAlive?.() === false) {
             rejectSteer('Guidance target closed before delivery — try again.');
             releaseSteer();
@@ -1447,7 +1527,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
           // An idle/after-turn delivery starts a new turn. Native Claude steer
           // remains inside the already-running turn; its _user_echo carries the
           // clientMsgId that clears the client's queued state.
-          if (!nativeClaudeSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
+          if (!nativeActiveSteer) safeSend({ type: 'turnStart', clientMsgId: msg.clientMsgId });
           logChatTurn(wsId, 'steer', steerCli, steerRepo, chatId, msg.text);
           ++turnGeneration;
           try {
@@ -1455,7 +1535,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
               model: steerModel,
               effort: steerEffort,
               clientMsgId: msg.clientMsgId,
-              allowNativeHumanSteer: nativeClaudeSteer,
+              allowNativeHumanSteer: nativeActiveSteer,
               voiceMode: msg.voice === true,
               signal: steerAborter.signal,
             });

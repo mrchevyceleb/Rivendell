@@ -1,12 +1,20 @@
-/**
- * Codex `exec --image` is variadic on fresh sessions. Passing
- * `--image`, `path`, `prompt` makes the parser consume the prompt as another
- * image and then fall back to empty stdin. The equals form binds exactly one
- * path per option and leaves the positional prompt intact.
- */
-export function codexImageArgs(paths: readonly string[]): string[] {
-  return paths.map((path) => `--image=${path}`);
+/** Rivendell owns teammate identity, routing, durability, and cycle guards.
+ * Codex's unrelated native multi-agent runtime creates a second `/root/...`
+ * roster and exposes `send_message`, which looks deceptively correct but cannot
+ * reach Rivendell teammates. Keep that competing bus out of every agent turn. */
+export function codexRivendellIsolationArgs(): string[] {
+  return ['--disable', 'multi_agent'];
 }
+
+export function buildCodexAppServerArgs(mcpArgs: readonly string[]): string[] {
+  return [
+    'app-server',
+    '--listen', 'stdio://',
+    ...codexRivendellIsolationArgs(),
+    ...mcpArgs,
+  ];
+}
+
 
 export function shouldRetryEmptyCodexTurn(input: {
   code: number | null;

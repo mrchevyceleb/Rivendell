@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { codexImageArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
+import { buildCodexAppServerArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 
-test('binds each Codex image path without consuming the positional prompt', () => {
+test('isolates the steerable Codex app-server from the competing native agent bus', () => {
   assert.deepEqual(
-    codexImageArgs(['/tmp/receipt one.png', '/tmp/receipt-two.jpg']),
-    ['--image=/tmp/receipt one.png', '--image=/tmp/receipt-two.jpg'],
+    buildCodexAppServerArgs(['-c', 'mcp_servers.rivendell-team.command="node"']),
+    [
+      'app-server', '--listen', 'stdio://',
+      '--disable', 'multi_agent',
+      '-c', 'mcp_servers.rivendell-team.command="node"',
+    ],
   );
-  assert.equal(codexImageArgs(['/tmp/receipt.png']).includes('--image'), false);
 });
+
 
 test('retries only a first empty Codex crash with no side-effect activity', () => {
   const emptyFailure = {

@@ -9,19 +9,29 @@ export const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '
 /** Absolute path to the team-bus MCP. `npm --workspace server` sets cwd to
  *  `server/`, so `join(process.cwd(), 'server/scripts/...')` resolves to a
  *  missing `server/server/scripts` path and every agent’s team_message dies. */
-export const TEAM_MCP_SCRIPT = (() => {
-  if (process.env.RIVENDELL_TEAM_MCP) return process.env.RIVENDELL_TEAM_MCP;
+function resolveServerScript(envPath: string | undefined, filename: string): string {
+  if (envPath) return envPath;
   const candidates = [
-    join(APP_ROOT, 'server', 'scripts', 'team-mcp.mjs'),
-    join(process.cwd(), 'scripts', 'team-mcp.mjs'),
-    join(process.cwd(), 'server', 'scripts', 'team-mcp.mjs'),
+    join(APP_ROOT, 'server', 'scripts', filename),
+    join(process.cwd(), 'scripts', filename),
+    join(process.cwd(), 'server', 'scripts', filename),
   ];
   const resolved = candidates.find((p) => existsSync(p)) ?? candidates[0];
-  if (!existsSync(resolved)) {
-    console.warn(`[config] rivendell-team MCP missing at ${resolved}`);
-  }
+  if (!existsSync(resolved)) console.warn(`[config] server script missing at ${resolved}`);
   return resolved;
-})();
+}
+
+export const TEAM_MCP_SCRIPT = resolveServerScript(
+  process.env.RIVENDELL_TEAM_MCP,
+  'team-mcp.mjs',
+);
+
+/** Codex app-server → exec-JSONL adapter. App-server is required for true
+ * same-turn `turn/steer`; `codex exec` cannot accept a second prompt. */
+export const CODEX_APP_TURN_SCRIPT = resolveServerScript(
+  process.env.RIVENDELL_CODEX_APP_TURN,
+  'codex-app-turn.mjs',
+);
 
 export const PORT = Number(process.env.PORT || process.env.RIVENDELL_PORT) || 8091;
 // Safe-by-default: Rivendell exposes filesystem and agent-control APIs and has

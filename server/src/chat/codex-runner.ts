@@ -1,9 +1,10 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TEAM_MCP_SCRIPT } from '../config.ts';
+import { CODEX_APP_TURN_SCRIPT, PORT, TEAM_MCP_SCRIPT } from '../config.ts';
 import type { CliKind, SessionEvent, SeqEvent } from './runner.ts';
 import { getSessionId, setSessionId } from './sessions.ts';
 import { appendEventLog, appendEventLogSync, clearEventLog, compactEventLog, flushEventLog, isPlumbingEvent, latestEventLogSeq, loadEventLogForCompactionSync, loadEventLogSync, reserveEventLogSeq, type PersistedEvent } from './event-log-store.ts';
@@ -17,7 +18,7 @@ import { fileProviderErrorMessage, isTransientFileProviderError } from '../lib/f
 import { assertMemoryAvailableForSpawn, MemoryPressureSpawnError } from './memory.ts';
 import { accountEnv, accountEnvForAccount, accountFromChatId } from '../lib/accountResolver.ts';
 import { resolveCodexSelection } from './codex-models.ts';
-import { codexImageArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
+import { buildCodexAppServerArgs, shouldRetryEmptyCodexTurn } from './codex-args.ts';
 import { HUB_WRITE_LOCK_PROMPT } from '../lib/hubPaths.ts';
 import { saveChatAttachments } from '../routes/chatAttachments.ts';
 import { conversationGuidanceForTurn } from './conversation-guidance.ts';
@@ -55,9 +56,9 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void
 
 /** Resolve once the child has fully exited. SIGTERM first; SIGKILL after 3s
  *  if still alive. Returns immediately if the child is already dead.
- *  Used by shutdown() so the next `codex exec resume` only starts after the
- *  prior child has released the rollout JSONL. Without this, steer races
- *  against the dying child's final writes and the resume reads partial state. */
+ *  Used by shutdown() so the next app-server resume only starts after the
+ *  prior child has released the rollout. Without this, a replacement races
+ *  the dying turn's final writes and can read partial state. */
 async function waitForTreeExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return;
   const exited = new Promise<void>((resolve) => {
@@ -141,12 +142,11 @@ async function probeProjectConfig(cwd: string): Promise<ProjectConfigProbeResult
 
 const EVENT_BUFFER_SIZE = 2000;
 
-// Codex doesn't have a stdin-streaming mode (the way claude does with
-// --input-format stream-json), so each turn spawns a fresh `codex exec --json`
-// process that runs to completion. We normalize codex's `item.started` /
-// `item.completed` events into the same claude-shaped stream-json event
-// vocabulary the front-end already understands, so the reducer doesn't need
-// to know there's a second CLI behind the curtain.
+// Each turn uses a fresh Codex app-server adapter process. Unlike `codex exec`,
+// app-server exposes true same-turn `turn/steer`; the adapter preserves the
+// existing `item.started` / `item.completed` JSONL contract. We normalize those
+// events into the same claude-shaped stream vocabulary the front-end already
+// understands, so the reducer does not need engine-specific state.
 
 export type Listener = (e: SeqEvent) => void;
 
@@ -160,6 +160,9 @@ type CodexSendOptions = {
   peerFromRole?: string;
   peerText?: string;
   peerDeliveryId?: string;
+  /** App-server `turn/steer` admission was checked by teamBus/register. */
+  allowNativePeerSteer?: boolean;
+  allowNativeHumanSteer?: boolean;
   signal?: AbortSignal;
   clientMsgId?: string;
   skipAttachments?: boolean;
@@ -187,6 +190,10 @@ type CodexTurnState = {
   toolUseBlocks: Map<string, ToolUseBlock>;
   usage: CodexUsage | null;
 };
+type NativeSteerWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
 
 const CODEX_TURN_PREAMBLE = [
   '<samwise-codex-runtime>',
@@ -194,6 +201,7 @@ const CODEX_TURN_PREAMBLE = [
   'If you see "stdin is closed for this session", rerun the command with tty=true.',
   'When searching files, use `rg` or `rg --files` with scoped paths and exclusions for `node_modules`, `.git`, build output, and cloud-sync trees. Do not run broad recursive `grep` or `find` over the home directory, workspace hubs, or ASSISTANT-HUB.',
   'Give spawned subagents the same search constraint before asking them to inspect code.',
+  'Rivendell teammates are reached ONLY through the rivendell-team team_message MCP tool (mcp__rivendell_team__team_message in Codex). They are not Codex collaboration agents. Never use native send_message, list_agents, spawn_agent, followup_task, or a /root/... route for a teammate handoff. A busy teammate is durably queued, not unavailable. Never claim a handoff attempt unless the rivendell-team MCP call actually occurred.',
   HUB_WRITE_LOCK_PROMPT,
   '</samwise-codex-runtime>',
 ].join('\n');
@@ -265,6 +273,9 @@ export class CodexSession {
   private busy = false;
   private dead = false;
   private currentChild: ChildProcess | null = null;
+  /** True after app-server announces turn/started and until turn/completed. */
+  private nativeSteerReady = false;
+  private nativeSteerWaiters = new Map<string, NativeSteerWaiter>();
   /** Set by shutdown() before the SIGTERM so the in-flight send()'s exit
    *  handler knows not to emit a stray result/turnEnd — the steer/stop
    *  caller is driving the next state itself. */
@@ -391,6 +402,52 @@ export class CodexSession {
     };
   }
 
+  /** Codex app-server accepts true same-turn input through `turn/steer` during
+   * inference and tool execution. Unlike `codex exec`, no turn boundary or
+   * process interruption is required. */
+  canAcceptNativeHumanSteer(): boolean {
+    return this.busy
+      && this.nativeSteerReady
+      && this.currentChild?.exitCode === null
+      && this.currentChild.stdin?.writable === true;
+  }
+
+  private settleNativeSteer(requestId: string, error?: Error): void {
+    const waiter = this.nativeSteerWaiters.get(requestId);
+    if (!waiter) return;
+    this.nativeSteerWaiters.delete(requestId);
+    if (error) waiter.reject(error);
+    else waiter.resolve();
+  }
+
+  private rejectNativeSteers(error: Error): void {
+    for (const requestId of this.nativeSteerWaiters.keys()) {
+      this.settleNativeSteer(requestId, error);
+    }
+  }
+
+  private sendNativeSteer(text: string, requestId: string): Promise<void> {
+    const child = this.currentChild;
+    if (!this.canAcceptNativeHumanSteer() || !child?.stdin) {
+      return Promise.reject(new Error('the active Codex turn closed before steering'));
+    }
+    const existing = this.nativeSteerWaiters.get(requestId);
+    if (existing) {
+      return new Promise((resolve, reject) => {
+        const priorResolve = existing.resolve;
+        const priorReject = existing.reject;
+        existing.resolve = () => { priorResolve(); resolve(); };
+        existing.reject = (error) => { priorReject(error); reject(error); };
+      });
+    }
+    return new Promise((resolve, reject) => {
+      this.nativeSteerWaiters.set(requestId, { resolve, reject });
+      child.stdin!.write(`${JSON.stringify({ type: 'steer', requestId, text })}\n`, (error) => {
+        if (error) this.settleNativeSteer(requestId, error);
+      });
+    });
+  }
+
   sessionId(): string | null {
     return this.threadId;
   }
@@ -403,13 +460,15 @@ export class CodexSession {
     return this.lastActivityAtMs;
   }
 
-  /** Async so steering can await the child's full exit (SIGKILL fallback at
-   *  3s) before the next `codex exec resume` spawns. Without the await, the
-   *  dying child's final writes to the rollout JSONL race the resume read. */
+  /** Async so Stop/Fresh can await the child's full exit (SIGKILL fallback at
+   *  3s) before the next app-server resume. Without the await, the dying
+   *  child's final rollout writes race the resume read. */
   async shutdown(): Promise<void> {
     if (this.dead) return;
     const shouldEmitCancellation = this.busy;
     this.dead = true;
+    this.nativeSteerReady = false;
+    this.rejectNativeSteers(new Error('Codex session stopped'));
     const latestThreadId = this.threadId ?? latestThreadIdFromEvents(this.eventLog);
     if (latestThreadId) {
       await this.persistThreadId(latestThreadId);
@@ -446,6 +505,8 @@ export class CodexSession {
     this.cancellationEmitted = true;
     this.busy = false;
     this.currentChild = null;
+    this.nativeSteerReady = false;
+    this.rejectNativeSteers(new Error('Codex turn interrupted'));
     this.emit({ type: 'event', event: { type: '_interrupted', ts: Date.now() } });
     this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
   }
@@ -453,13 +514,63 @@ export class CodexSession {
   async send(text: string, images?: ChatImage[], opts: CodexSendOptions = {}): Promise<void> {
     if (opts.signal?.aborted) return;
     if (this.busy) {
-      // Internal team delivery retries at the natural boundary. Do not leak a
-      // transient admission race into the human transcript as a Codex error.
-      if (!opts.peerFrom) {
+      const nativeSteerAllowed = opts.peerFrom
+        ? opts.allowNativePeerSteer === true
+        : opts.allowNativeHumanSteer === true;
+      if (!nativeSteerAllowed) {
+        // A caller that did not win native admission must wait for a boundary;
+        // never turn concurrent stdin into implicit steering.
+        if (!opts.peerFrom) {
+          this.emit({
+            type: 'error',
+            message: 'Codex is still answering. Queue guidance or wait for the current turn.',
+          });
+        }
+        return;
+      }
+      if (!this.canAcceptNativeHumanSteer()) {
+        throw new Error('the active Codex steer channel closed before delivery');
+      }
+      if (images?.length) throw new Error('images cannot be added to an active Codex turn');
+
+      await this.sendNativeSteer(
+        text,
+        opts.peerDeliveryId ?? opts.clientMsgId ?? randomUUID(),
+      );
+      // Echo only after app-server accepted turn/steer. This is the same durable
+      // admission contract used for a brand-new turn, without a fake turnStart.
+      if (opts.peerFrom) {
         this.emit({
-          type: 'error',
-          message: 'codex is still answering — wait for the current turn to finish',
+          type: 'event',
+          event: {
+            type: 'peer_message',
+            from: opts.peerFrom,
+            fromRole: opts.peerFromRole ?? '',
+            text: opts.peerText !== undefined ? opts.peerText : text,
+            ...(opts.peerDeliveryId ? { deliveryId: opts.peerDeliveryId } : {}),
+            ts: Date.now(),
+          },
         });
+        if (opts.peerDeliveryId) {
+          this.emit({
+            type: 'event',
+            event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
+          });
+        }
+      } else {
+        this.emit({
+          type: 'event',
+          event: {
+            type: '_user_echo',
+            text,
+            imageCount: 0,
+            attachments: [],
+            clientMsgId: opts.clientMsgId,
+            ts: Date.now(),
+          },
+        });
+        noteUserTurn(this.logKey);
+        noteAgentLane(this.chatId, this.cli);
       }
       return;
     }
@@ -563,7 +674,6 @@ export class CodexSession {
       return;
     }
 
-    const imageArgs = codexImageArgs(imagePaths);
     const hasSeedOverride = typeof opts.seedOverride === 'string';
     const seedWindow = !hasSeedOverride && (this.consumeWindowSeed() || recoverContextThisTurn);
     const seed = hasSeedOverride
@@ -589,10 +699,6 @@ export class CodexSession {
       peerFromRole: opts.peerFromRole,
     });
     const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
-    // Selection was validated before the session became busy. effort is
-    // interpolated into this config fragment, so only allow-listed strings
-    // can reach the CLI.
-    const codexReasoning = `model_reasoning_effort="${codexEffort}"`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
     // scoped to Rivendell.
@@ -610,30 +716,9 @@ export class CodexSession {
       '-c', 'mcp_servers.rivendell-team.command="node"',
       '-c', `mcp_servers.rivendell-team.args=${JSON.stringify([TEAM_MCP_SCRIPT])}`,
       '-c', `mcp_servers.rivendell-team.env.RIVENDELL_AGENT_NAME=${JSON.stringify(agentForChatId(this.chatId)?.name ?? 'Teammate')}`,
+      '-c', `mcp_servers.rivendell-team.env.RIVENDELL_TEAM_URL=${JSON.stringify(`http://127.0.0.1:${PORT}`)}`,
     );
-    const args: string[] = this.threadId
-      ? [
-          'exec',
-          'resume',
-          '--json',
-          '-m', codexModel,
-          '-c', codexReasoning,
-          ...browserMcpArgs,
-          '--dangerously-bypass-approvals-and-sandbox',
-          ...imageArgs,
-          this.threadId,
-          prompt,
-        ]
-      : [
-          'exec',
-          '--json',
-          '-m', codexModel,
-          '-c', codexReasoning,
-          ...browserMcpArgs,
-          '--dangerously-bypass-approvals-and-sandbox',
-          ...imageArgs,
-          prompt,
-        ];
+    const appServerArgs = buildCodexAppServerArgs(browserMcpArgs);
 
     // Wait for OneDrive to release its sync lock on .codex/config.toml so
     // codex's own read at startup doesn't fail with EDEADLK and kill the turn.
@@ -660,13 +745,16 @@ export class CodexSession {
     // login; everything else keeps the per-repo account-map resolution.
     const forcedAccount = accountFromChatId(this.chatId);
     const turnStartedAtMs = Date.now();
-    const child = spawn(CODEX_BIN, args, {
+    const child = spawn(process.execPath, [CODEX_APP_TURN_SCRIPT], {
       cwd: this.cwd,
       env: forcedAccount ? accountEnvForAccount(forcedAccount, this.cwd) : accountEnv(this.cwd),
       detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.currentChild = child;
+    // The adapter queues turn/steer requests received during app-server startup
+    // and flushes them against the announced active turn id.
+    this.nativeSteerReady = true;
 
     // Synthesize a claude-shaped message_start so the reducer's turn handling
     // stays consistent across CLIs.
@@ -717,12 +805,26 @@ export class CodexSession {
       if (!line) return;
       try {
         const ev = JSON.parse(line);
-        if (ev?.type === 'turn.started' && opts.peerDeliveryId && !peerAdmissionSettled) {
-          this.emit({
-            type: 'event',
-            event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
-          });
-          settlePeerAdmission(true);
+        if (ev?.type === 'rivendell.steer.accepted' && typeof ev.request_id === 'string') {
+          this.settleNativeSteer(ev.request_id);
+          return;
+        }
+        if (ev?.type === 'rivendell.steer.rejected' && typeof ev.request_id === 'string') {
+          this.settleNativeSteer(
+            ev.request_id,
+            new Error(typeof ev.message === 'string' ? ev.message : 'Codex rejected same-turn steering'),
+          );
+          return;
+        }
+        if (ev?.type === 'turn.started') {
+          this.nativeSteerReady = true;
+          if (opts.peerDeliveryId && !peerAdmissionSettled) {
+            this.emit({
+              type: 'event',
+              event: { type: 'peer_delivery_accepted', deliveryId: opts.peerDeliveryId, ts: Date.now() },
+            });
+            settlePeerAdmission(true);
+          }
         }
         if (ev?.type === 'item.completed' && ev?.item?.type === 'agent_message') {
           producedAgentMessage = true;
@@ -734,7 +836,10 @@ export class CodexSession {
         ) {
           sawActionableItem = true;
         }
-        if (ev?.type === 'turn.completed') sawTurnCompleted = true;
+        if (ev?.type === 'turn.completed') {
+          sawTurnCompleted = true;
+          this.nativeSteerReady = false;
+        }
         this.handleCodexEvent(ev, turnState);
       } catch {
         // Non-JSON line — ignore.
@@ -786,6 +891,8 @@ export class CodexSession {
       // here allowed team delivery to start during the persistence awaits below;
       // this old turn's delayed turnEnd then completed the NEW delivery waiter.
       this.currentChild = null;
+      this.nativeSteerReady = false;
+      this.rejectNativeSteers(new Error('Codex turn process closed'));
       cleanupImages();
       // Intentional kill (shutdown driven by steer/stop): the WS register
       // layer is already binding a new session and emitting its own turnStart.
@@ -925,10 +1032,26 @@ export class CodexSession {
       settlePeerAdmission(false);
       this.busy = false;
       this.currentChild = null;
+      this.nativeSteerReady = false;
+      this.rejectNativeSteers(err);
       cleanupImages();
       this.closeDanglingToolBlocks(turnState, null, err.message);
       this.emit({ type: 'error', message: `codex spawn failed: ${err.message}` });
       this.emit({ type: 'turnEnd', sessionId: this.threadId ?? undefined });
+    });
+
+    child.stdin!.write(`${JSON.stringify({
+      type: 'start',
+      codexBin: CODEX_BIN,
+      appServerArgs,
+      cwd: this.cwd,
+      threadId: this.threadId,
+      model: codexModel,
+      effort: codexEffort,
+      prompt,
+      imagePaths,
+    })}\n`, (error) => {
+      if (error) child.emit('error', error);
     });
 
     if (peerAdmission) await peerAdmission;
@@ -1250,9 +1373,9 @@ export function shutdownAllCodexSessions(): void {
   codexSessions.clear();
 }
 
-/** Kill the in-flight codex child and wait for it to fully exit before
- *  returning. Caller (steer/stop) needs the await so the next `codex exec
- *  resume` doesn't race the dying child's writes to the rollout JSONL. */
+/** Kill the in-flight Codex adapter and wait for it to fully exit before
+ *  returning. Stop/Fresh need the await so the next app-server resume does not
+ *  race the dying child's writes to the rollout. */
 export async function interruptCodex(opts: { repoPath: string; chatId?: string; cli?: CliKind }): Promise<void> {
   const cwd = opts.repoPath;
   const key = keyOf(opts.cli ?? 'codex', cwd, opts.chatId || 'main');
