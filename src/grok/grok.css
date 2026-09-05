@@ -1018,6 +1018,10 @@
 .bt-agent-field textarea { font-family: var(--r-mono); font-size: 12.5px; line-height: 1.6; resize: vertical; }
 .bt-agent-field input:focus, .bt-agent-field select:focus, .bt-agent-field textarea:focus { border-color: rgba(119, 119, 119, 0.5); }
 .bt-agent-field select { appearance: none; }
+.bt-agent-brain-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(140px, 0.7fr); gap: 10px; }
+@media (max-width: 600px) {
+  .bt-agent-brain-grid { grid-template-columns: 1fr; gap: 0; }
+}
 
 /* voice picker — current voice pill + hear-it button, listbox with per-voice play */
 .bt-voice-wrap { position: relative; display: flex; gap: 8px; }
@@ -1081,7 +1085,7 @@
 .bt-conv:hover .bt-row-edit { display: grid; }
 .bt-row-edit:hover { background: var(--r-line); color: var(--r-ink); }
 
-/* peer (agent-to-agent) message — compact by default, fully readable on open */
+/* peer request stays compact; the receiving agent's real prose remains visible. */
 .bt-peer {
   margin: 6px 0;
   width: min(560px, 86%);
@@ -1163,6 +1167,8 @@
 .bt-peer-response .m-elrond .prose,
 .bot-app .rc .bt-peer-response .m-elrond .prose { font-size: 13px; line-height: 1.55; }
 .bt-peer-response .m-elrond .acts { margin-bottom: 0; }
+.bt-peer-public-response { width: 100%; min-width: 0; }
+.bt-peer-public-response .m-elrond { margin-top: 0; }
 [data-theme='light'] .bt-peer-body { background: #F4F4F4; }
 @media (max-width: 600px) {
   .bt-peer { width: 92%; }

@@ -325,6 +325,8 @@ function PeerBubble({
   const text = cleanPeerMessageText(block.text);
   const bodyId = `peer-message-${block.id}`;
   const hasResponse = responseBlocks.length > 0;
+  const publicResponseBlocks = responseBlocks.filter((item) => item.kind !== 'tool');
+  const responseToolCount = responseBlocks.filter((item) => item.kind === 'tool').length;
   // The peer boundary, not individual content-block open flags, owns progress.
   // Providers can briefly close one block before opening the next; the exchange
   // must not flicker to "done" while its turn is still running.
@@ -339,6 +341,7 @@ function PeerBubble({
   const subject = hasResponse ? 'exchange' : 'message';
 
   return (
+    <>
     <div className={`bt-peer${routineResult ? ' routine-result' : ''}${open ? ' open' : ''}`}>
       <button
         type="button"
@@ -353,7 +356,11 @@ function PeerBubble({
           <span className="bt-peer-role">{role}</span>
           {hasResponse || responseBusy ? (
             <span className={`bt-peer-status${responseBusy ? ' working' : ''}`} role="status" aria-live="polite">
-              <i aria-hidden="true" /> {responseBusy ? 'working' : 'done'}
+              <i aria-hidden="true" /> {responseBusy
+                ? 'working'
+                : responseToolCount > 0
+                  ? `done · ${responseToolCount} tool${responseToolCount === 1 ? '' : 's'}`
+                  : 'done'}
             </span>
           ) : null}
           <span className="bt-peer-action">{open ? 'hide' : 'show'} {subject}</span>
@@ -382,6 +389,18 @@ function PeerBubble({
         </div>
       ) : null}
     </div>
+    {!open && publicResponseBlocks.length > 0 ? (
+      <div className="bt-peer-public-response" aria-label="Agent response to teammate message">
+        <ElrondGroup
+          blocks={publicResponseBlocks}
+          streaming={streaming}
+          mobile={mobile}
+          collapseSteps={collapseSteps}
+          pin={pin}
+        />
+      </div>
+    ) : null}
+    </>
   );
 }
 
