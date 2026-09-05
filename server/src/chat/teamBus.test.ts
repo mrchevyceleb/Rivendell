@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agentLogKey, extendTeamChain, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
+import { ELROND_WORKSPACE_PATH } from '../config.ts';
+import { agentLogKey, extendTeamChain, teamAvailability, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
 import type { Agent } from './agents.ts';
 
 test('raw API preserves its reply default while the MCP can request async delivery', () => {
@@ -49,6 +50,38 @@ test('queued delivery wakes when a long busy turn enters a safe steering window'
 
   assert.equal(await waiting, 'steerable');
   assert.equal(unsubscribed, true);
+});
+
+test('team availability reports process truth separately from queued work', () => {
+  const agent: Agent = {
+    id: 'christina',
+    name: 'Christina',
+    role: 'Developer',
+    engine: 'codex',
+    home: 'bot-christina',
+    createdAt: 1,
+  };
+  assert.deepEqual(teamAvailability(agent, [{
+    cli: 'codex',
+    cwd: ELROND_WORKSPACE_PATH,
+    chatId: `${agent.home}__acct__kim`,
+    busy: true,
+  }], [{ toId: agent.id }]), {
+    status: 'working',
+    busy: true,
+    queuedMessages: 1,
+    activeCli: 'codex',
+  });
+  assert.deepEqual(teamAvailability(agent, [], [{ toId: agent.id }]), {
+    status: 'queued',
+    busy: false,
+    queuedMessages: 1,
+  });
+  assert.deepEqual(teamAvailability(agent, [], []), {
+    status: 'idle',
+    busy: false,
+    queuedMessages: 0,
+  });
 });
 
 test('team delivery uses the persisted agent brain instead of a stale live-lane stamp', () => {

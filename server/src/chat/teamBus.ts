@@ -9,7 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import { ELROND_WORKSPACE_PATH } from '../config.ts';
 import { brainForAgent, cliForAgentEngine, listAgents, type Agent } from './agents.ts';
-import { logKeyFor } from './threadKey.ts';
+import { bareChatId, logKeyFor } from './threadKey.ts';
 import { extractVisibleTurns } from './threadWindow.ts';
 import { isThreadWatched } from './threadWatch.ts';
 import { JsonStore, type StoredRecord } from '../lib/jsonStore.ts';
@@ -987,10 +987,50 @@ async function readLastReply(logKey: string, minSeq = 0, maxSeq = Number.POSITIV
 
 // ---- introspection ------------------------------------------------------------
 
-export function teamRoster() {
+type TeamAvailabilitySession = {
+  cli: string;
+  cwd: string;
+  chatId: string;
+  busy: boolean;
+};
+
+export function teamAvailability(
+  agent: Agent,
+  sessions: readonly TeamAvailabilitySession[],
+  queued: readonly Pick<QueuedTeamDelivery, 'toId'>[],
+): { status: 'working' | 'queued' | 'idle'; busy: boolean; queuedMessages: number; activeCli?: string } {
+  const active = sessions.find((session) => (
+    session.cwd === ELROND_WORKSPACE_PATH
+    && bareChatId(session.chatId) === bareChatId(agent.home)
+    && session.busy
+  ));
+  const queuedMessages = queued.filter((delivery) => delivery.toId === agent.id).length;
+  return {
+    status: active ? 'working' : queuedMessages > 0 ? 'queued' : 'idle',
+    busy: Boolean(active),
+    queuedMessages,
+    ...(active ? { activeCli: active.cli } : {}),
+  };
+}
+
+/** Ground-truth process activity, not inferred assignments or intentions. */
+export async function teamRoster() {
+  const runner = await getRunner();
+  // Queue first, live sessions second. A delivery transitions queue → busy in
+  // that order; this snapshot order cannot observe neither side of the handoff.
+  const queued = await queueStoreOperation(() => queuedDeliveryStore.list());
+  const sessions = runner.activeChatSessions();
   return listAgents().map((agent) => {
     const brain = brainForAgent(agent);
-    return { id: agent.id, name: agent.name, role: agent.role, engine: brain.engine, model: brain.model, effort: brain.effort };
+    return {
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      engine: brain.engine,
+      model: brain.model,
+      effort: brain.effort,
+      ...teamAvailability(agent, sessions, queued),
+    };
   });
 }
 

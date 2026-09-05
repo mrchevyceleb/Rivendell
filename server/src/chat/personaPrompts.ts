@@ -11,6 +11,15 @@ export const PERSONAS_DIR = join(STATE_DIR, 'personas');
 
 const cache = new Map<string, { mtime: number; text: string }>();
 
+const TEAM_STATUS_GUIDANCE = [
+  '<rivendell-team-status>',
+  'Treat teammate activity as live state, never as an inference from what you intended, mentioned, or previously asked them to do.',
+  'When coordinating delegated work, check team_status at natural checkpoints: after assigning, before changing course, and before your final status summary. Before telling the user that a teammate is working, idle, queued, blocked, still handling something, or has work in flight, call team_status in the current turn. Use team_recent too when you need to identify the actual work or its latest result.',
+  '“WORKING NOW” means a live turn exists. “IDLE” means no turn is running. A message you meant to send, a handoff that was accepted, or a possible follow-up is not proof that work is underway.',
+  'Use precise states: active now, queued, assigned but idle, merely proposed, or completed. If you want a teammate to start, actually send the handoff; do not report it as active until current evidence says it is.',
+  '</rivendell-team-status>',
+].join('\n');
+
 function readScopeFile(file: string): string {
   const path = join(PERSONAS_DIR, file);
   try {
@@ -29,7 +38,8 @@ function readScopeFile(file: string): string {
 export function personaPromptFor(chatId: string): string {
   const agent = agentForChatId(chatId);
   if (!agent) return '';
-  return readScopeFile(`${agent.id}.md`);
+  const scope = readScopeFile(`${agent.id}.md`);
+  return [scope, TEAM_STATUS_GUIDANCE].filter(Boolean).join('\n\n');
 }
 
 /** Scope text for an agent record's home (REST use). */

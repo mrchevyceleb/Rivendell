@@ -7,7 +7,7 @@ import { deliverTeamMessage, teamRoster, teamRecent } from '../chat/teamBus.ts';
 export const teamRouter = Router();
 
 teamRouter.get('/', asyncHandler(async (_req, res) => {
-  res.json({ agents: teamRoster() });
+  res.json({ agents: await teamRoster() });
 }));
 
 teamRouter.post('/message', asyncHandler(async (req, res) => {

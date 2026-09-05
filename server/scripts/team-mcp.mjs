@@ -8,7 +8,8 @@
  * --mcp-config / codex -c overrides / banana config mirroring.
  *
  * Tools:
- *   team_list    — the roster (id, name, role, engine)
+ *   team_list    — roster plus live working/queued/idle state
+ *   team_status  — authoritative current teammate activity
  *   team_message — durable async handoff; waits only when explicitly requested
  *   team_recent  — recent visible messages from a teammate's thread
  *
@@ -25,9 +26,22 @@ const TOOLS = [
   {
     name: 'team_list',
     description:
-      'List your AI teammates on this Rivendell instance (id, name, role, engine). ' +
-      'Use the exact name with team_message.',
+      'List teammates plus ground-truth current activity (working, queued, or idle). ' +
+      'Call this before telling the user that a teammate is working or idle. An intended or sent assignment is not proof of active work. ' +
+      'Use the exact teammate name with team_message.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'team_status',
+    description:
+      'Check ground-truth live activity for one teammate or the whole team. You MUST call this in the current turn before reporting who is working, idle, queued, blocked, or still handling an item. Pair it with team_recent when the work itself matters.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Optional exact teammate name or id; omit for everyone' },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: 'team_message',
@@ -82,12 +96,25 @@ async function api(path, init, signal) {
   return body;
 }
 
+function formatAgentStatus(agent) {
+  const activity = agent.status === 'working'
+    ? `WORKING NOW${agent.activeCli ? ` via ${agent.activeCli}` : ''}`
+    : agent.status === 'queued'
+      ? `QUEUED · no live turn · ${agent.queuedMessages} handoff${agent.queuedMessages === 1 ? '' : 's'}`
+      : 'IDLE';
+  return `- ${agent.name} (${agent.id}) — ${agent.role} [${activity} · ${agent.engine}${agent.model ? ` · ${agent.model}` : ''}${agent.effort ? ` · ${agent.effort}` : ''}]`;
+}
+
 async function callTool(name, args, signal) {
-  if (name === 'team_list') {
+  if (name === 'team_list' || name === 'team_status') {
     const { agents } = await api('/api/team', undefined, signal);
-    return `Teammates (${agents.length}):\n` + agents
-      .map((a) => `- ${a.name} (${a.id}) — ${a.role} [${a.engine}${a.model ? ` · ${a.model}` : ''}${a.effort ? ` · ${a.effort}` : ''}]`)
-      .join('\n');
+    const needle = typeof args.name === 'string' ? args.name.trim().toLowerCase() : '';
+    const matches = needle
+      ? agents.filter((agent) => agent.id.toLowerCase() === needle || agent.name.trim().toLowerCase() === needle)
+      : agents;
+    if (!matches.length) return `No teammate named ${JSON.stringify(args.name)}. Call team_list for the roster.`;
+    const heading = name === 'team_status' ? 'Ground-truth activity right now' : `Teammates (${agents.length})`;
+    return `${heading}:\n${matches.map(formatAgentStatus).join('\n')}\n\nWORKING NOW means a live agent turn exists. IDLE means no turn is running; do not describe intended, assigned, or outstanding work as in progress.`;
   }
   if (name === 'team_message') {
     const result = await api('/api/team/message', {
