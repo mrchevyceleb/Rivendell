@@ -9,7 +9,7 @@
  *
  * Tools:
  *   team_list    — the roster (id, name, role, engine)
- *   team_message — message a teammate; waits for their reply by default
+ *   team_message — durable async handoff; waits only when explicitly requested
  *   team_recent  — recent visible messages from a teammate's thread
  *
  * The server uses active-cycle detection and rate limits rather than a hard
@@ -32,11 +32,10 @@ const TOOLS = [
   {
     name: 'team_message',
     description:
-      'Send a message to a teammate by name. They receive it in their own thread, think, ' +
-      'and (by default) their reply is returned when they are immediately available. Busy teammates ' +
-      'are durably queued/steered in the background so this tool returns immediately; their result ' +
-      'arrives back through team_message. Never poll or retry. Use wait:false for an explicit ' +
-      'fire-and-forget handoff. Legitimate teammate chains have no fixed depth limit.',
+      'Send a durable message or correction to a teammate by name. Delivery is asynchronous by default ' +
+      'and steers a compatible active turn, so the sender never locks behind the recipient. Use wait:true ' +
+      'only when this turn genuinely cannot continue without the reply. Busy teammates are accepted and ' +
+      'delivered automatically; never poll or retry. Legitimate teammate chains have no fixed depth limit.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -44,7 +43,7 @@ const TOOLS = [
         to: { type: 'string', description: "Teammate name, e.g. 'Chief of Staff'" },
         text: { type: 'string', description: 'What to say or ask' },
         hop: { type: 'number', description: 'Optional legacy handoff sequence metadata; there is no fixed depth limit' },
-        wait: { type: 'boolean', description: 'Wait for the reply (default true)' },
+        wait: { type: 'boolean', description: 'Wait for the reply (default false; use true only for a required synchronous answer)' },
       },
       required: ['from', 'to', 'text'],
       additionalProperties: false,
@@ -98,7 +97,9 @@ async function callTool(name, args, signal) {
         to: args.to,
         text: args.text,
         hop: args.hop,
-        wait: args.wait,
+        // Version the async-default behavior at the MCP boundary. The raw HTTP
+        // API keeps its historical synchronous default for non-MCP callers.
+        wait: args.wait === true,
       }),
     }, signal);
     if (!result.delivered) return `NOT DELIVERED: ${result.reason}`;

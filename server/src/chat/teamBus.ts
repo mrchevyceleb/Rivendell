@@ -140,7 +140,6 @@ export function extendTeamChain(
   toId: string,
 ): { chain: TeamChain; repeatsEdge: boolean } {
   const edge = replyEdge(fromId, toId);
-  if (parent?.edges.includes(edge)) return { chain: parent, repeatsEdge: true };
   if (parent) {
     return {
       chain: {
@@ -148,7 +147,9 @@ export function extendTeamChain(
         edges: [...parent.edges, edge],
         route: [...parent.route, toId],
       },
-      repeatsEdge: false,
+      // Retained as diagnostic metadata only. Repeating a historical edge is
+      // normal collaboration; only a currently blocked reply path is a cycle.
+      repeatsEdge: parent.edges.includes(edge),
     };
   }
   return {
@@ -642,18 +643,16 @@ async function runTeamDelivery(delivery: TeamDelivery): Promise<TeamMessageResul
       // delete the outbox row or accept another turn's completion; retry.
       unsubscribe?.();
       waited = true;
-      // Re-enter admission promptly. If the safe tool window closed during
-      // preparation, getRecipientSessionForDelivery will subscribe for the next
-      // one. When a runner reports a stale-open window, wait for a new event (or
-      // a short backstop) so retries cannot become an unbounded microtask loop.
-      if (session.canAcceptNativeHumanSteer?.() === true) {
-        await waitForSessionProgress(
-          session,
-          session.latestSeq(),
-          Math.min(250, Math.max(1, deadline - Date.now())),
-          signal,
-        );
-      }
+      // Re-enter admission promptly, but always cross an event-loop boundary.
+      // A failed idle admission may report neither busy nor steerable; without
+      // this bounded progress wait it can spin in microtasks and repeatedly
+      // spawn/claim the same recipient for the full 30-minute deadline.
+      await waitForSessionProgress(
+        session,
+        session.latestSeq(),
+        Math.min(250, Math.max(1, deadline - Date.now())),
+        signal,
+      );
       continue;
     }
 
@@ -822,6 +821,13 @@ export async function resumeQueuedTeamDeliveries(): Promise<number> {
   return records.length;
 }
 
+export function teamMessageWaitRequested(wait: boolean | undefined): boolean {
+  // Preserve the original raw HTTP contract. team-mcp.mjs explicitly sends
+  // false when its caller omits wait, giving agents async-by-default behavior
+  // without silently changing other API clients.
+  return wait !== false;
+}
+
 export async function deliverTeamMessage(input: {
   from: string;
   to: string;
@@ -841,29 +847,11 @@ export async function deliverTeamMessage(input: {
     return { delivered: false, reason: 'that is you — no need to message yourself' };
   }
 
-  const { chain, repeatsEdge } = inheritedTeamChain(from.id, to.id);
-  const requestedWaitForReply = input.wait !== false;
-  // The repeat-edge rule exists to stop a SYNCHRONOUS loop (A waits on B, B
-  // waits on C, C waits back on A). A fire-and-forget handoff cannot close such
-  // a loop: nothing blocks on it, so re-sending the same edge just enqueues
-  // another delivery. Blocking it here was collapsing an orchestrator's whole
-  // turn into "one message per teammate", because the inbound chain is keyed on
-  // the sender and only cleared at turnEnd. A long turn that steers the same
-  // teammate several times had every message after the first silently dropped,
-  // which is exactly when steering matters most.
-  //
-  // The genuinely dangerous case is still covered, and covered better: the
-  // `closesReplyCycle` check below detects a wait path back to the sender and
-  // degrades that leg to fire-and-forget rather than discarding its text.
-  if (repeatsEdge && requestedWaitForReply) {
-    return {
-      delivered: true,
-      to: to.name,
-      hop,
-      loopClosed: true,
-      reason: 'This exact teammate route already ran in the current collaboration and this send would wait on a reply, so Rivendell closed a repeat loop. Re-send with wait:false if you need to steer them again.',
-    };
-  }
+  const { chain } = inheritedTeamChain(from.id, to.id);
+  const requestedWaitForReply = teamMessageWaitRequested(input.wait);
+  // Historical route repetition is never a reason to discard a message. Only
+  // a CURRENT synchronous wait path can deadlock; that exact case is degraded
+  // to durable fire-and-forget below so the text still reaches its recipient.
   // If adding from -> to closes any active wait path (A -> B -> C -> A), the
   // closing leg becomes durable fire-and-forget. Its text is preserved and all
   // blocked turns can finish; direct and longer cycles behave identically.

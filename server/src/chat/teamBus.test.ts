@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { agentLogKey, extendTeamChain, type TeamChain } from './teamBus.ts';
+import { agentLogKey, extendTeamChain, teamMessageWaitRequested, waitForDeliveryBoundary, type TeamChain } from './teamBus.ts';
 import type { Agent } from './agents.ts';
 
-test('team chains have no arbitrary depth ceiling and stop only repeated edges', () => {
+test('raw API preserves its reply default while the MCP can request async delivery', () => {
+  assert.equal(teamMessageWaitRequested(undefined), true);
+  assert.equal(teamMessageWaitRequested(false), false);
+  assert.equal(teamMessageWaitRequested(true), true);
+});
+
+test('team chains record repeated edges without muting later collaboration', () => {
   let chain: TeamChain | undefined;
   for (let index = 0; index < 100; index += 1) {
     const next = extendTeamChain(chain, `agent-${index}`, `agent-${index + 1}`);
@@ -16,7 +22,33 @@ test('team chains have no arbitrary depth ceiling and stop only repeated edges',
   assert.equal(returnViaNewEdge.repeatsEdge, false);
   const repeated = extendTeamChain(returnViaNewEdge.chain, 'agent-0', 'agent-1');
   assert.equal(repeated.repeatsEdge, true);
-  assert.equal(repeated.chain.edges.length, 101);
+  assert.equal(repeated.chain.edges.length, 102);
+  assert.equal(repeated.chain.route.at(-1), 'agent-1');
+});
+
+test('queued delivery wakes when a long busy turn enters a safe steering window', async () => {
+  let steerable = false;
+  let unsubscribed = false;
+  let notify: Parameters<Parameters<typeof waitForDeliveryBoundary>[0]['subscribe']>[0] = () => {};
+  const session: Parameters<typeof waitForDeliveryBoundary>[0] = {
+    send: async () => {},
+    isBusy: () => true,
+    canAcceptNativeHumanSteer: () => steerable,
+    latestSeq: () => 12,
+    subscribe: (listener) => {
+      notify = listener;
+      return () => { unsubscribed = true; };
+    },
+    key: 'claude|workspace|bot-kip',
+    logKey: 'thread|workspace|bot-kip',
+  };
+
+  const waiting = waitForDeliveryBoundary(session, 1_000);
+  steerable = true;
+  notify({ seq: 13, ev: { type: 'event', event: { type: 'assistant' } } });
+
+  assert.equal(await waiting, 'steerable');
+  assert.equal(unsubscribed, true);
 });
 
 test('team delivery uses the persisted agent brain instead of a stale live-lane stamp', () => {
