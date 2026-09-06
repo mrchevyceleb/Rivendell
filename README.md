@@ -136,6 +136,10 @@ curl http://127.0.0.1:8091/api/health
 
 Do not restart while `busyTurns` is greater than zero unless you intentionally accept an interrupted agent turn.
 
+## Native apps
+
+TARDIS also ships as a desktop app for Windows, macOS, and Linux and as a sideloadable Android app. Both are thin shells over one always-on server: download them from the GitHub Releases page, enter your server address once, and every device shows the same console. Setup, updates, and signing are covered in **[Native apps](docs/NATIVE.md)**.
+
 ## Data and privacy
 
 Runtime state is stored outside Git by default under `~/.rivendell/`, including agent definitions, event logs, session metadata, attachments, and OAuth tokens. Workspace content remains in the directory configured by `ELROND_WORKSPACE_PATH`.

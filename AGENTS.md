@@ -2,7 +2,7 @@
 
 ## Project
 
-TARDIS (formerly Rivendell) is a local-first, always-on multi-agent office. It serves a React PWA and an Express/WebSocket backend from one Node process. There is no app-layer authentication; loopback or a trusted private proxy is the security boundary.
+TARDIS (formerly Rivendell) is a local-first, always-on multi-agent office. It serves a React PWA and an Express/WebSocket backend from one Node process. There is no app-layer authentication; loopback or a trusted private proxy is the security boundary. Native shells for desktop (`desktop/`, Electron) and Android (`android/`, Kotlin WebView) are thin clients over that same server; see `docs/NATIVE.md`.
 
 Internal identifiers keep the old name on purpose and must never be renamed: `RIVENDELL_*` / `ELROND_WORKSPACE_PATH` env vars, `~/.rivendell`, `rivendell:*` localStorage keys and DOM events, the `rivendell://` scheme and `rivendell-doc:` / `rivendell-folder:` links, the `rivendell-team` / `rivendell-browser` MCPs and `<rivendell-…>` prompt tags, `_rivendellTombstone`, the `rivendell_jobs` tables, the manifest `id`, and the `x-rivendell-*` headers. User-facing copy lives in `src/theme/voice.ts` and room labels in `src/data/roomNames.ts`.
 
@@ -43,8 +43,10 @@ server/src/
   worker/                  optional queue and Scribe stream
   lib/                     persistence, workspace, integrations
 jarvis-agent/              optional standalone LiveKit voice worker
+desktop/                   Electron desktop shell (thin client, own package)
+android/                   Android WebView shell (Kotlin, Gradle)
 supabase/migrations/       optional queue/event schema
-scripts/                   startup, Tailscale, PWA assets, Windows handler
+scripts/                   startup, Tailscale, PWA and native icons, Windows handler
 ```
 
 ## Architecture rules
@@ -61,6 +63,7 @@ scripts/                   startup, Tailscale, PWA assets, Windows handler
 - A new room belongs in `src/rooms/` and must be registered in the Grok shell/sidebar.
 - A new API belongs in `server/src/routes/`, is mounted in `server/src/index.ts`, and is mirrored in `src/data/api.ts`.
 - UI work should remain responsive, tactile, and accessible.
+- The native shells stay thin: no server code, no state beyond the server address and window chrome. Behaviour belongs in the web app.
 
 ## Open-source safety
 

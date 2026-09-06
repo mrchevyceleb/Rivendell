@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:" />
+  <title>Connect · TARDIS</title>
+  <link rel="stylesheet" href="shell.css" />
+</head>
+<body>
+  <main class="card">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <circle class="lamp" cx="16" cy="3.6" r="5" fill="#f2b95f" opacity="0.28" />
+      <path fill="#1d3557" stroke="currentColor" stroke-width="0.6" stroke-linejoin="round"
+            d="M7 30.5 H25 V28.5 H24 V10.5 H24.6 V8.6 H22.2 V6.6 H19 V4.9 H17 V4 H15 V4.9 H13 V6.6 H9.8 V8.6 H7.4 V10.5 H8 V28.5 H7 Z" />
+      <rect x="8" y="10.5" width="16" height="2.6" fill="#0b1526" />
+      <rect x="10" y="11.5" width="12" height="0.7" fill="#7fb0e0" opacity="0.9" />
+      <rect x="9.6" y="14.2" width="5.2" height="3.4" fill="#f2d9a0" />
+      <rect x="17.2" y="14.2" width="5.2" height="3.4" fill="#f2d9a0" />
+      <rect x="9.6" y="18.8" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.7" />
+      <rect x="17.2" y="18.8" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.7" />
+      <rect x="15.6" y="23.2" width="0.8" height="4.8" fill="#08080a" opacity="0.8" />
+      <circle class="lamp" cx="16" cy="3.4" r="1.6" fill="#f2b95f" />
+    </svg>
+    <div class="sign">TARDIS</div>
+    <h1>Where is the ship?</h1>
+    <p>Enter the address of the machine that runs your TARDIS. Usually that is the HTTPS address printed by <code>tailscale serve status</code> on that box.</p>
+    <form id="form" autocomplete="off">
+      <input id="url" type="text" inputmode="url" spellcheck="false" placeholder="https://your-server.your-tailnet.ts.net" aria-label="Server address" />
+      <div class="row">
+        <button id="go" class="btn btn-primary" type="submit">Materialise</button>
+      </div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+      <button id="force" class="link" type="button" hidden>Save this address without checking it</button>
+    </form>
+    <div id="version" class="foot"></div>
+  </main>
+  <script src="connect.js"></script>
+</body>
+</html>

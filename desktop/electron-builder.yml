@@ -1,0 +1,52 @@
+# TARDIS desktop shell packaging. The app is a thin window over a TARDIS server;
+# it bundles no server, so one installer works on every machine.
+appId: app.tardis.desktop
+productName: TARDIS
+copyright: MIT licensed
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+asar: true
+directories:
+  output: out
+  buildResources: build
+files:
+  - dist/**
+  - pages/**
+  - build/icon.png
+  - package.json
+# Update metadata (latest*.yml) is generated for the GitHub provider; the
+# workflow attaches every file to the tagged release itself.
+publish:
+  provider: github
+  releaseType: release
+win:
+  target:
+    - nsis
+  icon: build/icon.png
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  artifactName: ${productName}-Setup-${version}.${ext}
+  shortcutName: TARDIS
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  category: public.app-category.productivity
+  icon: build/icon.png
+  # Unsigned by default. Set CSC_LINK/CSC_KEY_PASSWORD in CI to sign.
+  identity: null
+  hardenedRuntime: false
+dmg:
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+linux:
+  target:
+    - AppImage
+  icon: build/icon.png
+  category: Office
+  synopsis: Bigger on the inside.
+  description: Desktop shell for a TARDIS server.
+appImage:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}

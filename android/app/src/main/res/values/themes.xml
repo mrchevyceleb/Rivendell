@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.TARDIS" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/void_bg</item>
+        <item name="android:statusBarColor">@color/void_bg</item>
+        <item name="android:navigationBarColor">@color/void_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorPrimary">@color/void_bg</item>
+        <item name="android:colorPrimaryDark">@color/void_bg</item>
+        <item name="android:colorAccent">@color/brass</item>
+        <item name="android:textColorPrimary">@color/ink</item>
+        <item name="android:textColorSecondary">@color/ink_mute</item>
+        <item name="android:textColorHighlight">@color/line_strong</item>
+    </style>
+
+    <style name="Theme.TARDIS.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/void_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.TARDIS</item>
+    </style>
+</resources>

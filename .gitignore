@@ -6,6 +6,19 @@ dist/
 dist-ssr/
 build/
 
+# Native shells
+desktop/dist/
+desktop/out/
+!desktop/build/
+android/.gradle/
+android/.kotlin/
+android/app/build/
+android/out/
+android/local.properties
+android/keystore.properties
+android/*.jks
+android/*.keystore
+
 # Logs
 logs
 *.log

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TARDIS</string>
+    <string name="server_title">TARDIS address</string>
+    <string name="sign">TARDIS</string>
+    <string name="where_is_the_ship">Where is the ship?</string>
+    <string name="server_help">Enter the address of the machine that runs your TARDIS. Usually that is the HTTPS address printed by tailscale serve status on that box.</string>
+    <string name="server_hint">https://your-server.your-tailnet.ts.net</string>
+    <string name="materialise">Materialise</string>
+    <string name="materialising">Materialising…</string>
+    <string name="enter_full_address">Enter a full address, like https://your-server.your-tailnet.ts.net</string>
+    <string name="save_without_check">Save this address without checking it</string>
+    <string name="version_line">Type 40 TT Capsule · v%1$s</string>
+    <string name="shortcut_change_server">Change address</string>
+    <string name="shortcut_change_server_long">Change TARDIS address</string>
+    <string name="no_app_for_link">No app on this phone can open that link.</string>
+    <string name="download_unsupported">That file can\'t be saved from here.</string>
+    <string name="download_started">Saving %1$s to Downloads</string>
+    <string name="ship_mark">TARDIS</string>
+</resources>

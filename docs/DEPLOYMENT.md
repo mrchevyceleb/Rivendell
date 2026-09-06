@@ -108,6 +108,8 @@ Keep the app bound to `127.0.0.1`. Tailscale Serve terminates the private connec
 RIVENDELL_ALLOWED_ORIGINS=https://your-server.your-tailnet.ts.net
 ```
 
+The desktop and Android apps connect to this same HTTPS address; see [Native apps](NATIVE.md).
+
 This allowlist protects local WebSockets from DNS rebinding. Use tailnet ACLs to restrict which users and devices can reach the machine.
 
 ## Other operating systems

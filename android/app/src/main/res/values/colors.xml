@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="void_bg">#FF08080A</color>
+    <color name="raised">#FF15151B</color>
+    <color name="ink">#FFEBE6DA</color>
+    <color name="ink_mute">#FFA39E91</color>
+    <color name="ink_faint">#FF7D786C</color>
+    <color name="brass">#FFD9A85A</color>
+    <color name="on_brass">#FF1A120A</color>
+    <color name="line_strong">#4DD9A85A</color>
+    <color name="tardis_lit">#FF3D6EA6</color>
+    <color name="ic_launcher_background">#FF08080A</color>
+</resources>

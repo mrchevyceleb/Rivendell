@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Dematerialised · TARDIS</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #08080a; color: #ebe6da; font-family: -apple-system, 'Inter', system-ui, sans-serif; font-size: 15px; line-height: 1.5; }
+    body {
+      display: grid; place-items: center; min-height: 100vh; padding: 32px 22px;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'><circle cx='48' cy='48' r='31' fill='none' stroke='%23d9a85a' stroke-opacity='0.055' stroke-width='1'/><circle cx='48' cy='48' r='24' fill='none' stroke='%23d9a85a' stroke-opacity='0.03' stroke-width='0.8'/></svg>");
+      -webkit-user-select: none; user-select: none;
+    }
+    .card { width: min(420px, 100%); display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; }
+    .mark { width: 84px; height: 84px; color: #8a6a32; margin-bottom: 6px; }
+    .mark .lamp { animation: lamp 1.8s ease-in-out infinite; }
+    .sign { font-family: 'Michroma', 'Eurostile', system-ui, sans-serif; font-size: 12px; letter-spacing: 0.34em; text-transform: uppercase; color: #d9a85a; padding-left: 0.34em; }
+    h1 { margin: 0; font-weight: 500; font-size: 26px; line-height: 1.15; }
+    p { margin: 0; color: #a39e91; max-width: 40ch; }
+    .where { font-family: ui-monospace, Menlo, monospace; font-size: 13px; color: #ebe6da; word-break: break-all; -webkit-user-select: text; user-select: text; }
+    .reason { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #7d786c; word-break: break-word; }
+    .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+    .btn { appearance: none; border: 1px solid transparent; border-radius: 12px; padding: 12px 20px; font: inherit; font-weight: 600; }
+    .btn-primary { background: #d9a85a; color: #1a120a; }
+    .btn-ghost { background: transparent; color: #a39e91; border-color: rgba(217, 168, 90, 0.14); }
+    .status { min-height: 1.5em; font-size: 13.5px; color: #a39e91; }
+    .foot { margin-top: 26px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #7d786c; }
+    @keyframes lamp { 0%, 100% { opacity: 0.2; } 50% { opacity: 0.55; } }
+    @media (prefers-reduced-motion: reduce) { .mark .lamp { animation: none; } }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+      <circle class="lamp" cx="16" cy="3.6" r="5" fill="#f2b95f" opacity="0.28" />
+      <path fill="#0f1a2c" stroke="currentColor" stroke-width="0.6" stroke-linejoin="round"
+            d="M7 30.5 H25 V28.5 H24 V10.5 H24.6 V8.6 H22.2 V6.6 H19 V4.9 H17 V4 H15 V4.9 H13 V6.6 H9.8 V8.6 H7.4 V10.5 H8 V28.5 H7 Z" />
+      <rect x="8" y="10.5" width="16" height="2.6" fill="#0b1526" />
+      <rect x="9.6" y="14.2" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.35" />
+      <rect x="17.2" y="14.2" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.35" />
+      <rect x="9.6" y="18.8" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.25" />
+      <rect x="17.2" y="18.8" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.25" />
+      <rect x="15.6" y="23.2" width="0.8" height="4.8" fill="#08080a" opacity="0.8" />
+      <circle class="lamp" cx="16" cy="3.4" r="1.6" fill="#f2b95f" />
+    </svg>
+    <div class="sign">Dematerialised</div>
+    <h1>The ship is out of reach.</h1>
+    <p>TARDIS could not load from</p>
+    <div id="where" class="where"></div>
+    <div id="reason" class="reason"></div>
+    <div class="row">
+      <button id="retry" class="btn btn-primary" type="button">Try again</button>
+      <button id="change" class="btn btn-ghost" type="button">Change address</button>
+    </div>
+    <div id="count" class="status" role="status" aria-live="polite"></div>
+    <p class="foot">Is the server running, and is this phone on the same tailnet?</p>
+  </main>
+  <script>
+    (function () {
+      var shell = window.TardisShell;
+      var where = document.getElementById('where');
+      var reason = document.getElementById('reason');
+      var count = document.getElementById('count');
+      try { where.textContent = shell.serverUrl(); reason.textContent = shell.reason(); } catch (e) {}
+
+      var wait = 5, left = wait, timer = 0, busy = false;
+      function show() { count.textContent = busy ? 'Materialising…' : 'Retrying in ' + left + 's…'; }
+      function arm() {
+        clearInterval(timer);
+        show();
+        timer = setInterval(function () {
+          left -= 1;
+          if (left <= 0) { retry(); return; }
+          show();
+        }, 1000);
+      }
+      function retry() {
+        if (busy) return;
+        busy = true;
+        clearInterval(timer);
+        show();
+        try { shell.retry(); } catch (e) { busy = false; arm(); }
+      }
+      // The shell calls this when the probe fails; success replaces the page.
+      window.tardisOffline = function (why) {
+        busy = false;
+        if (why) reason.textContent = why;
+        wait = Math.min(20, wait + 4);
+        left = wait;
+        arm();
+      };
+      document.getElementById('retry').addEventListener('click', retry);
+      document.getElementById('change').addEventListener('click', function () { try { shell.changeServer(); } catch (e) {} });
+      arm();
+    })();
+  </script>
+</body>
+</html>

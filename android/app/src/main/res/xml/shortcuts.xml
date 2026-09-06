@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="change_server"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_server"
+        android:shortcutShortLabel="@string/shortcut_change_server"
+        android:shortcutLongLabel="@string/shortcut_change_server_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="app.tardis.mobile"
+            android:targetClass="app.tardis.mobile.ServerActivity" />
+    </shortcut>
+</shortcuts>
