@@ -151,6 +151,12 @@ export function registerDeviceBridge(server: HttpServer): void {
         }
 
         if (msg.type === 'hello') {
+          if (registered) {
+            // One machine per link. Anything else is a client bug or an
+            // attempt to hold several registry slots on one socket.
+            ws.send(JSON.stringify({ type: 'error', message: 'already registered' }));
+            return;
+          }
           const id = String(msg.deviceId ?? '').trim();
           if (!id) {
             ws.send(JSON.stringify({ type: 'error', message: 'deviceId is required' }));

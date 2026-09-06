@@ -412,6 +412,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
   });
+  app.on('will-quit', () => stopDeviceBridge());
   app.on('activate', () => {
     if (win && !win.isDestroyed()) return;
     win = createWindow(getSettings());

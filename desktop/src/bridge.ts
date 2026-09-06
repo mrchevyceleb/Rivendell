@@ -1,14 +1,22 @@
 // The link that lets agents use this computer. The app dials the ship (the
 // ship never dials in, so nothing here listens on a port), announces the
 // machine, and then answers requests one at a time. Everything a request
-// wants to do goes through approvals.ts first.
+// wants to do goes through approvals.ts first, always on a canonical path so
+// a symlink cannot walk out of the folder the user approved.
 import { app, shell } from 'electron';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { approveCommand, approvePath, bridgeEnabled, isSecretPath } from './approvals.js';
+import {
+  approveCommand,
+  approvePath,
+  bridgeEnabled,
+  cancelPendingApprovals,
+  isSecretPath,
+} from './approvals.js';
 import { getSettings, saveSettings } from './settings.js';
 import { workspaceRoot } from './workspace.js';
 
@@ -22,7 +30,13 @@ let socket: WebSocket | null = null;
 let retryTimer: NodeJS.Timeout | undefined;
 let backoff = RECONNECT_MIN_MS;
 let currentUrl: string | undefined;
-let stopped = false;
+// Bumped every time the link is pointed somewhere new or torn down, so a
+// socket that closes later cannot schedule a reconnect for a link that is
+// already gone (which would otherwise loop forever).
+let linkGeneration = 0;
+
+// Commands still running, so a shutdown does not leave them behind.
+const running = new Set<ChildProcess>();
 
 /** A stable id for this machine, so a reconnect replaces its own link. */
 function deviceId(): string {
@@ -33,16 +47,47 @@ function deviceId(): string {
   return fresh;
 }
 
+/** Resolve every symlink we can, so authorisation and the operation itself
+ *  see the same real path. For a file that does not exist yet, the nearest
+ *  existing parent is resolved and the rest appended. */
+function canonical(target: string): string {
+  let head = target;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(head), ...tail);
+    } catch {
+      const parent = path.dirname(head);
+      if (parent === head) return path.normalize(target);
+      tail.unshift(path.basename(head));
+      head = parent;
+    }
+  }
+}
+
 function resolveOnThisMachine(raw: string): string {
   const target = raw.trim();
   if (!target) throw new Error('path is required');
-  if (path.isAbsolute(target)) return path.normalize(target);
   const base = workspaceRoot() ?? os.homedir();
-  return path.normalize(path.resolve(base, target));
+  return canonical(path.isAbsolute(target) ? target : path.resolve(base, target));
 }
 
 function looksBinary(buffer: Buffer): boolean {
   return buffer.subarray(0, 8192).includes(0);
+}
+
+function killTree(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+    return;
+  }
+  // The child leads its own process group, so this reaches what it started.
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    child.kill('SIGKILL');
+  }
 }
 
 async function runCommand(command: string, cwd: string, timeoutMs: number): Promise<unknown> {
@@ -51,7 +96,14 @@ async function runCommand(command: string, cwd: string, timeoutMs: number): Prom
     : [process.env.SHELL || '/bin/bash', ['-lc', command]];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args as string[], { cwd, windowsHide: true, env: process.env });
+    const child = spawn(file, args as string[], {
+      cwd,
+      windowsHide: true,
+      env: process.env,
+      // Its own process group, so a timeout can take the whole tree with it.
+      detached: process.platform !== 'win32',
+    });
+    running.add(child);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -60,7 +112,7 @@ async function runCommand(command: string, cwd: string, timeoutMs: number): Prom
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killTree(child);
     }, timeoutMs);
     timer.unref?.();
 
@@ -68,10 +120,12 @@ async function runCommand(command: string, cwd: string, timeoutMs: number): Prom
     child.stderr?.on('data', (chunk: Buffer) => { stderr = cap(stderr, chunk); });
     child.on('error', (error) => {
       clearTimeout(timer);
+      running.delete(child);
       reject(error);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      running.delete(child);
       resolve({
         code: code ?? (timedOut ? 124 : 0),
         stdout,
@@ -149,7 +203,7 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
 
   if (op === 'open') {
     if (await approvePath(target, 'open', root, deadline) === 'deny') {
-      throw new Error('The person at that computer declined to open this.');
+      throw new Error('The person at that computer declined to open this, or it is a file type that would run.');
     }
     const problem = await shell.openPath(target);
     if (problem) throw new Error(problem);
@@ -165,27 +219,23 @@ function wsUrl(serverUrl: string): string {
   return url.href;
 }
 
-function scheduleReconnect(): void {
-  if (stopped || !currentUrl) return;
-  clearTimeout(retryTimer);
-  retryTimer = setTimeout(() => connect(), backoff);
-  retryTimer.unref?.();
-  backoff = Math.min(RECONNECT_MAX_MS, Math.round(backoff * 1.7));
-}
-
-function connect(): void {
-  if (stopped || !currentUrl) return;
+function connect(generation: number): void {
+  if (generation !== linkGeneration || !currentUrl) return;
   let ws: WebSocket;
   try {
     ws = new WebSocket(wsUrl(currentUrl));
   } catch (error) {
     console.error('[tardis] device link failed to open:', error);
-    scheduleReconnect();
+    scheduleReconnect(generation);
     return;
   }
   socket = ws;
 
   ws.addEventListener('open', () => {
+    if (generation !== linkGeneration) {
+      try { ws.close(); } catch { /* already closing */ }
+      return;
+    }
     backoff = RECONNECT_MIN_MS;
     console.log(`[tardis] offering this computer to ${currentUrl}`);
     ws.send(JSON.stringify({
@@ -200,6 +250,7 @@ function connect(): void {
   });
 
   ws.addEventListener('message', (event: MessageEvent) => {
+    if (generation !== linkGeneration) return;
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(String(event.data)) as Record<string, unknown>;
@@ -214,49 +265,65 @@ function connect(): void {
     const id = String(msg.id ?? '');
     const op = String(msg.op ?? '');
     const params = (msg.params ?? {}) as Record<string, unknown>;
+    const answer = (payload: Record<string, unknown>) => {
+      if (generation === linkGeneration && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'reply', id, ...payload }));
+      }
+    };
     void handle(op, params).then(
-      (result) => ws.readyState === ws.OPEN && ws.send(JSON.stringify({ type: 'reply', id, ok: true, result })),
-      (error: unknown) => ws.readyState === ws.OPEN && ws.send(JSON.stringify({
-        type: 'reply',
-        id,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      })),
+      (result) => answer({ ok: true, result }),
+      (error: unknown) => answer({ ok: false, error: error instanceof Error ? error.message : String(error) }),
     );
   });
 
   ws.addEventListener('close', () => {
     if (socket === ws) socket = null;
+    // Only the socket that still owns the link may ask for another one.
+    if (generation !== linkGeneration) return;
     console.log(`[tardis] device link closed; retrying in ${Math.round(backoff / 1000)}s`);
-    scheduleReconnect();
+    cancelPendingApprovals();
+    scheduleReconnect(generation);
   });
   ws.addEventListener('error', () => {
     try { ws.close(); } catch { /* already closing */ }
   });
 }
 
-/** Point the link at a ship (or move it to a different one). */
-export function startDeviceBridge(serverUrl: string | undefined): void {
-  stopped = false;
-  if (currentUrl === serverUrl && socket) return;
-  currentUrl = serverUrl;
-  stopDeviceBridge(true);
-  if (!serverUrl) return;
-  backoff = RECONNECT_MIN_MS;
-  connect();
+function scheduleReconnect(generation: number): void {
+  if (generation !== linkGeneration || !currentUrl) return;
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => connect(generation), backoff);
+  retryTimer.unref?.();
+  backoff = Math.min(RECONNECT_MAX_MS, Math.round(backoff * 1.7));
 }
 
-export function stopDeviceBridge(keepUrl = false): void {
-  if (!keepUrl) {
-    stopped = true;
-    currentUrl = undefined;
-  }
+/** Point the link at a ship (or move it to a different one). */
+export function startDeviceBridge(serverUrl: string | undefined): void {
+  if (currentUrl === serverUrl && socket) return;
+  teardown();
+  currentUrl = serverUrl;
+  if (!serverUrl) return;
+  backoff = RECONNECT_MIN_MS;
+  connect(linkGeneration);
+}
+
+function teardown(): void {
+  // A new generation orphans every callback belonging to the old link.
+  linkGeneration += 1;
   clearTimeout(retryTimer);
+  cancelPendingApprovals();
   const ws = socket;
   socket = null;
   if (ws) {
     try { ws.close(); } catch { /* already gone */ }
   }
+}
+
+export function stopDeviceBridge(): void {
+  teardown();
+  currentUrl = undefined;
+  for (const child of running) killTree(child);
+  running.clear();
 }
 
 export function deviceLinkState(): 'off' | 'linked' | 'connecting' {

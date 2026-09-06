@@ -9,6 +9,7 @@ import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import { isLaunchable } from './approvals.js';
 import { getSettings, saveSettings } from './settings.js';
 
 export const WORKSPACE_LABEL = 'ASSISTANT-HUB';
@@ -22,15 +23,6 @@ export interface OpenResult {
 // One download per workspace path at a time; a second click joins the first.
 const inflight = new Map<string, Promise<OpenResult>>();
 
-// A fetched copy is opened with the machine's default app, which for these
-// types means running it. The ship is trusted, but a compromised page there
-// must not be able to hand this machine a payload; the local synced copy is
-// the user's own and stays unrestricted.
-const NO_OPEN_FROM_SHIP = new Set([
-  '.exe', '.msi', '.msix', '.appx', '.bat', '.cmd', '.com', '.scr', '.pif', '.cpl', '.hta', '.ps1', '.psm1',
-  '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.jar', '.lnk', '.url', '.reg', '.inf', '.sct', '.msc',
-  '.sh', '.command', '.app', '.dmg', '.pkg', '.run', '.bin', '.apk', '.deb', '.rpm', '.appimage', '.desktop',
-]);
 
 const FETCH_TIMEOUT_MS = 120_000;
 // A fetched copy is buffered on disk, never in memory, and capped so one
@@ -185,7 +177,7 @@ export async function openWorkspacePath(rel: string, kind: LinkKind, serverUrl: 
     };
   }
   if (!serverUrl || parts.length === 0) return { ok: false, error: 'Not connected to a ship.' };
-  if (NO_OPEN_FROM_SHIP.has(path.extname(parts[parts.length - 1]).toLowerCase())) {
+  if (isLaunchable(parts[parts.length - 1])) {
     return { ok: false, error: 'Executable files are not opened from a fetched copy. Sync the workspace to this computer to use it.' };
   }
 
