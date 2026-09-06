@@ -6,7 +6,7 @@
 // is rendered as a configurable Windows path, and a clickable Windows path
 // doubles as something the user can paste into Win+R when needed.
 
-import { nativeShell } from '../../native/shell';
+import { nativeShell, showToast } from '../../native/shell';
 
 const LABEL = 'ASSISTANT-HUB';
 // Inside the desktop shell the local workspace is whatever that machine has
@@ -159,17 +159,27 @@ export function openExternalHttpLink(href: string): boolean {
 export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void {
   const shell = nativeShell();
   if (shell?.openWorkspacePath) {
+    // The shell already tried the machine's own apps; say why that failed and
+    // use the fallbacks that can still work from here (never the rivendell://
+    // scheme, which would land straight back in the shell).
     shell.openWorkspacePath(relPath, kind)
-      .then((result) => { if (!result.ok) openWorkspaceLinkInBrowser(relPath, kind); })
-      .catch(() => openWorkspaceLinkInBrowser(relPath, kind));
+      .then((result) => {
+        if (result.ok) return;
+        if (result.error) showToast(result.error);
+        openWorkspaceLinkInBrowser(relPath, kind, false);
+      })
+      .catch((error: unknown) => {
+        showToast(error instanceof Error ? error.message : 'Could not open that path.');
+        openWorkspaceLinkInBrowser(relPath, kind, false);
+      });
     return;
   }
-  openWorkspaceLinkInBrowser(relPath, kind);
+  openWorkspaceLinkInBrowser(relPath, kind, true);
 }
 
-function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder'): void {
+function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder', allowNativeScheme: boolean): void {
   const { browserUrl, nativeUrl } = buildLinkUrls(relPath, kind);
-  if (isWindowsPlatform()) {
+  if (allowNativeScheme && isWindowsPlatform()) {
     fireNativeScheme(nativeUrl);
     return;
   }

@@ -3,7 +3,7 @@
 // companions open the local file with the machine's own apps, and when the
 // file is not here yet the shell fetches a copy from the ship.
 import { app, dialog, net, shell, type BrowserWindow } from 'electron';
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getSettings, saveSettings } from './settings.js';
@@ -16,7 +16,10 @@ export interface OpenResult {
   error?: string;
 }
 
-const FETCH_TIMEOUT_MS = 60_000;
+const FETCH_TIMEOUT_MS = 120_000;
+// A fetched copy is buffered on disk, never in memory, and capped so one
+// stray multi-gigabyte file cannot fill the drive.
+const FETCH_MAX_BYTES = 512 * 1024 * 1024;
 
 function isDir(target: string): boolean {
   try {
@@ -121,21 +124,45 @@ export async function openWorkspacePath(rel: string, kind: LinkKind, serverUrl: 
 
   // Not on this machine: fetch a copy from the ship and open that.
   const relPath = parts.join('/');
+  const cached = path.join(app.getPath('userData'), 'ship-cache', ...parts);
+  const partial = `${cached}.part`;
   try {
     const response = await net.fetch(`${serverUrl}/api/files/raw?path=${encodeURIComponent(relPath)}`, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       cache: 'no-store',
     });
     if (!response.ok) return { ok: false, error: `The ship answered ${response.status} for that file.` };
-    const data = Buffer.from(await response.arrayBuffer());
-    const cached = path.join(app.getPath('userData'), 'ship-cache', ...parts);
+    const declared = Number(response.headers.get('content-length') || 0);
+    if (declared > FETCH_MAX_BYTES) return { ok: false, error: 'That file is too large to fetch a copy of.' };
+    if (!response.body) return { ok: false, error: 'The ship sent an empty reply.' };
     mkdirSync(path.dirname(cached), { recursive: true });
-    writeFileSync(cached, data);
+    await streamToFile(response.body, partial);
+    renameSync(partial, cached);
     const problem = await shell.openPath(cached);
     return problem ? { ok: false, error: problem } : { ok: true, where: 'fetched' };
   } catch (error) {
+    rmSync(partial, { force: true });
     const reason = error instanceof Error ? error.message : String(error);
     return { ok: false, error: `Could not fetch that file (${reason}).` };
+  }
+}
+
+async function streamToFile(body: ReadableStream<Uint8Array>, target: string): Promise<void> {
+  const out = createWriteStream(target);
+  let written = 0;
+  try {
+    for await (const chunk of body) {
+      written += chunk.byteLength;
+      if (written > FETCH_MAX_BYTES) throw new Error('file is larger than the fetch limit');
+      if (!out.write(chunk)) await new Promise<void>((resolve) => out.once('drain', resolve));
+    }
+    await new Promise<void>((resolve, reject) => {
+      out.once('error', reject);
+      out.end(resolve);
+    });
+  } catch (error) {
+    out.destroy();
+    throw error;
   }
 }
 

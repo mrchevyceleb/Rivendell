@@ -3,7 +3,8 @@ import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { extname, basename, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { storeWorkspaceFile, workspaceRoot } from '../lib/workspace.ts';
+import { safeFileName, storeWorkspaceFile, workspaceRoot } from '../lib/workspace.ts';
+import { trustedWebSocketOrigin } from '../lib/origin.ts';
 import { emitScribe } from '../worker/scribe.ts';
 import { mapWorkspaceError } from './docs.ts';
 import { asyncHandler } from './helpers.ts';
@@ -188,12 +189,26 @@ function mimeFor(path: string): string {
   return MIME_BY_EXT[extname(path).toLowerCase()] ?? 'application/octet-stream';
 }
 
-// Drop a file onto the console and it lands in the workspace (the desktop
-// shell and the web app both post here; inbox/ is the usual destination).
-// Raw body of any type, workspace-relative destination, never overwrites.
+// Drop a file onto the console and it lands in the workspace (inbox/ is the
+// usual destination). Body is the raw file, workspace-relative destination,
+// never overwrites. There is no app-layer auth, so two things keep a random
+// web page from posting files here from a browser on the tailnet: only
+// application/octet-stream is accepted (a non-simple type, so a cross-site
+// request needs a CORS preflight this server never answers), and any Origin
+// that is sent must be one the operator trusts.
 const UPLOAD_BODY_LIMIT = '200mb';
+const UPLOAD_TYPE = 'application/octet-stream';
 
-filesRouter.post('/upload', raw({ type: () => true, limit: UPLOAD_BODY_LIMIT }), asyncHandler(async (req, res) => {
+filesRouter.post('/upload', raw({ type: UPLOAD_TYPE, limit: UPLOAD_BODY_LIMIT }), asyncHandler(async (req, res) => {
+  if (!trustedWebSocketOrigin(req)) {
+    res.status(403).json({ error: 'origin not trusted' });
+    return;
+  }
+  const body: unknown = req.body;
+  if (!Buffer.isBuffer(body)) {
+    res.status(415).json({ error: `send the file as ${UPLOAD_TYPE}` });
+    return;
+  }
   const requested = String(req.query.path || '').trim();
   if (!requested) {
     res.status(400).json({ error: 'path is required' });
@@ -203,18 +218,25 @@ filesRouter.post('/upload', raw({ type: () => true, limit: UPLOAD_BODY_LIMIT }),
     res.status(400).json({ error: 'path must be workspace-relative' });
     return;
   }
-  const body: unknown = req.body;
-  if (!Buffer.isBuffer(body) || body.byteLength === 0) {
-    res.status(400).json({ error: 'empty upload' });
+  const segments = requested.replace(/\\/g, '/').split('/').filter(Boolean);
+  const fileName = safeFileName(segments.pop() ?? '');
+  if (!fileName) {
+    res.status(400).json({ error: 'path needs a file name' });
     return;
   }
+  const destination = [...segments, fileName].join('/');
   try {
-    const result = await storeWorkspaceFile(requested, body);
-    await emitScribe({
-      level: 'system',
-      text: `Workspace: received ${result.path}`,
-      payload: { kind: 'workspace-change', op: 'add', path: result.path, by: 'human' },
-    });
+    const result = await storeWorkspaceFile(destination, body);
+    // The file is on disk at this point; the activity log is best effort.
+    try {
+      await emitScribe({
+        level: 'system',
+        text: `Workspace: received ${result.path}`,
+        payload: { kind: 'workspace-change', op: 'add', path: result.path, by: 'human' },
+      });
+    } catch (error) {
+      console.error('[files] upload logged to scribe failed:', error);
+    }
     res.status(201).json(result);
   } catch (err) {
     const { status, message } = mapWorkspaceError(err);

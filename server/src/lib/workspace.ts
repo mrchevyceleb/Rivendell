@@ -306,6 +306,19 @@ export async function writeWorkspaceFile(
 }
 
 const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
+
+/** A file name that survives every platform the workspace syncs to: no path
+ *  separators, no Windows-illegal characters, no reserved device names. */
+export function safeFileName(name: string): string {
+  let out = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim();
+  if (WINDOWS_RESERVED.test(out)) out = `_${out}`;
+  if (out.length > 180) {
+    const ext = extname(out).slice(0, 20);
+    out = out.slice(0, 180 - ext.length) + ext;
+  }
+  return out;
+}
 
 /** Store an uploaded file (any type) under the workspace. Never overwrites:
  *  a taken name gets a numeric suffix, like a desktop copy would. */

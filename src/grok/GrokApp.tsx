@@ -22,7 +22,7 @@ import { useProxyViewer } from '../hooks/useProxyViewer';
 import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
 import type { CompanionId } from '../chat/data/types';
 import { uploadWorkspaceFile } from '../data/api';
-import { appendToDraft } from '../native/shell';
+import { appendToDraft, TOAST_EVENT } from '../native/shell';
 import { BotRail } from './GrokSidebar';
 import { GrokChat } from './GrokChat';
 import { BotPanel, type ChatMeta } from './BotPanel';
@@ -154,6 +154,16 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const badWolf = useRef(Boolean(initialRoom && !ROOMS[initialRoom]));
   useEffect(() => {
     if (badWolf.current) { badWolf.current = false; toastEgg('BAD WOLF'); }
+  }, [toastEgg]);
+
+  // Short notices from utilities that have no UI of their own.
+  useEffect(() => {
+    const onToast = (event: Event) => {
+      const text = (event as CustomEvent<{ text: string }>).detail?.text;
+      if (text) toastEgg(text);
+    };
+    window.addEventListener(TOAST_EVENT, onToast);
+    return () => window.removeEventListener(TOAST_EVENT, onToast);
   }, [toastEgg]);
 
   // Drop any file onto the console and it lands in the ship's inbox/, with

@@ -22,6 +22,13 @@ export function nativeShell(): TardisShellBridge | null {
   return bridge?.native ? bridge : null;
 }
 
+/** DOM event carrying a short notice for the shell to show as a toast. */
+export const TOAST_EVENT = 'rivendell:toast';
+
+export function showToast(text: string): void {
+  window.dispatchEvent(new CustomEvent<{ text: string }>(TOAST_EVENT, { detail: { text } }));
+}
+
 /** DOM event asking the open composer to append text to its draft. */
 export const DRAFT_APPEND_EVENT = 'rivendell:draft-append';
 
