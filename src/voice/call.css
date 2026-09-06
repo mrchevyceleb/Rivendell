@@ -69,17 +69,10 @@
 .riv-call-line { font-size: 13.5px; color: var(--r-ink-mute); line-height: 1.45; }
 .riv-call-line:last-child { color: var(--r-ink); }
 .riv-call-line-user { font-style: italic; }
-.riv-call-line-tool { color: var(--r-gold); font-size: 12.5px; }
 
 .riv-call-error {
   font-size: 12.5px; color: var(--r-rose); margin-bottom: 8px;
 }
-.riv-call-audio-unlock {
-  margin-bottom: 10px; padding: 9px 16px; border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--r-gold) 65%, transparent); background: color-mix(in srgb, var(--r-gold) 12%, transparent);
-  color: var(--r-elf-glow); font-size: 13px; cursor: pointer;
-}
-.riv-call-audio-unlock:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 3px; }
 
 .riv-call-voice { width: 100%; max-width: 520px; display: flex; flex-direction: column; align-items: center; }
 .riv-call-voicebtn {
@@ -89,7 +82,6 @@
   font-size: 13px; padding: 8px 16px; cursor: pointer;
 }
 .riv-call-voicebtn:hover { border-color: var(--r-gold); }
-.riv-call-voice > span.riv-call-voicebtn { cursor: default; color: var(--r-ink-mute); }
 .riv-call-voicegrid {
   margin-top: 10px;
   display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;

@@ -11,7 +11,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Mic, PanelRightClose, PanelRightOpen, RotateCcw, Settings, Share2, SquarePen } from 'lucide-react';
 import type { ShellViewProps } from '../chat/components/reimagine/useChatShell';
-import type { JarvisEngineSettings } from '../jarvis/protocol';
 import { ChatThread } from '../chat/components/reimagine/blocks';
 import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
 import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
@@ -25,7 +24,7 @@ export type BotConversationProps = ShellViewProps & {
   agentRecord?: Agent;
   paneOpen: boolean;
   onTogglePane: () => void;
-  onVoice: (settings: JarvisEngineSettings) => void;
+  onVoice: () => void;
   voiceActive: boolean;
   onToggleTheme: () => void;
   theme: 'dark' | 'light';
@@ -92,7 +91,7 @@ export function GrokConversation(props: BotConversationProps) {
       className={`bt-mic${props.voiceActive ? ' listening' : ''}`}
       aria-label={props.voiceActive ? 'Jarvis is listening' : `Talk to ${agentName}`}
       title={props.voiceActive ? 'Jarvis is listening' : `Talk to ${agentName}`}
-      onClick={() => props.onVoice({ cli: picker.cli, model: picker.model, effort: picker.effort })}
+      onClick={props.onVoice}
     >
       <Mic size={17} />
     </button>
