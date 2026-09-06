@@ -50,6 +50,10 @@ class ServerActivity : ComponentActivity() {
             status.text = getString(R.string.enter_full_address)
             return
         }
+        if (!Prefs.isCleartextAllowed(origin)) {
+            status.text = getString(R.string.cleartext_blocked)
+            return
+        }
         if (!verify) {
             save(origin)
             return

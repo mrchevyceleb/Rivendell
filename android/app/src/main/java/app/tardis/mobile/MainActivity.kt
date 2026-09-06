@@ -17,6 +17,7 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
@@ -167,13 +168,24 @@ class MainActivity : ComponentActivity() {
                     openOutside(uri)
                     true
                 }
-                else -> true
+                else -> {
+                    Toast.makeText(this@MainActivity, R.string.no_app_for_link, Toast.LENGTH_SHORT).show()
+                    true
+                }
             }
         }
 
         override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
             if (!request.isForMainFrame || !isShipUrl(request.url)) return
             showOffline(error.description?.toString().orEmpty())
+        }
+
+        // A front door (Tailscale Serve, a reverse proxy) answers for a server
+        // that is down or restarting with its own 5xx page. Unreachable, too.
+        override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+            if (!request.isForMainFrame || !isShipUrl(request.url)) return
+            if (errorResponse.statusCode < 500) return
+            showOffline("HTTP ${errorResponse.statusCode} ${errorResponse.reasonPhrase.orEmpty()}".trim())
         }
 
         override fun onPageFinished(view: WebView, url: String?) {

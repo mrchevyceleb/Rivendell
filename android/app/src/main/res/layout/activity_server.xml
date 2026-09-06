@@ -89,6 +89,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
+            android:accessibilityLiveRegion="polite"
             android:gravity="center"
             android:minHeight="22dp"
             android:textColor="@color/ink_mute"

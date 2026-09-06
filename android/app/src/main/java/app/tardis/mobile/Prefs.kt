@@ -55,6 +55,13 @@ object Prefs {
 
     fun origin(url: String): String = normalize(url) ?: url
 
+    /** Plain HTTP is only reachable for the hosts the network policy allows. */
+    fun isCleartextAllowed(origin: String): Boolean {
+        if (!origin.startsWith("http://")) return true
+        val host = origin.removePrefix("http://").substringBefore(':')
+        return host in LOOPBACK
+    }
+
     fun originOf(uri: Uri): String? {
         val scheme = uri.scheme?.lowercase() ?: return null
         val host = uri.host?.lowercase() ?: return null

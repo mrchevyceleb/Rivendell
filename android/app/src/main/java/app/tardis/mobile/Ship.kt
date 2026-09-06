@@ -1,6 +1,8 @@
 package app.tardis.mobile
 
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -22,7 +24,7 @@ object Ship {
                 val code = connection.responseCode
                 if (code in 300..399) return "$origin redirects elsewhere. Enter the address the server actually answers on."
                 if (code != HttpURLConnection.HTTP_OK) return "The server at $origin answered $code."
-                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                val body = connection.inputStream.use { readCapped(it, MAX_BODY_BYTES) }
                 val json = JSONObject(body)
                 if (json.optBoolean("ok") && json.optString("app") == "rivendell") null
                 else "That address answers, but it is not a TARDIS."
@@ -34,4 +36,18 @@ object Ship {
             "Couldn't reach $origin (${e.javaClass.simpleName}$detail)."
         }
     }
+
+    /** /api/health is a few hundred bytes; never let a misbehaving host stream forever. */
+    private fun readCapped(input: InputStream, limit: Int): String {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        while (out.size() < limit) {
+            val read = input.read(buffer, 0, minOf(buffer.size, limit - out.size()))
+            if (read < 0) break
+            out.write(buffer, 0, read)
+        }
+        return out.toString(Charsets.UTF_8.name())
+    }
+
+    private const val MAX_BODY_BYTES = 64 * 1024
 }

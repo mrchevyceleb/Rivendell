@@ -193,6 +193,12 @@ function createWindow(settings: Settings): BrowserWindow {
     if (!serverUrl || !sameOrigin(url, serverUrl)) return;
     void showOffline(description);
   });
+  // A front door (Tailscale Serve, a reverse proxy) answers for a server that
+  // is down or restarting with its own 5xx page. Treat that as unreachable too.
+  window.webContents.on('did-navigate', (_event, url, httpResponseCode, httpStatusText) => {
+    if (httpResponseCode < 500 || !serverUrl || !sameOrigin(url, serverUrl)) return;
+    void showOffline(`HTTP ${httpResponseCode} ${httpStatusText ?? ''}`.trim());
+  });
 
   return window;
 }

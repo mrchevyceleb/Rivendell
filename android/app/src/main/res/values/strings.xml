@@ -9,6 +9,7 @@
     <string name="materialise">Materialise</string>
     <string name="materialising">Materialising…</string>
     <string name="enter_full_address">Enter a full address, like https://your-server.your-tailnet.ts.net</string>
+    <string name="cleartext_blocked">Plain http:// only works for the phone itself. Use the HTTPS address of your server.</string>
     <string name="save_without_check">Save this address without checking it</string>
     <string name="version_line">Type 40 TT Capsule · v%1$s</string>
     <string name="shortcut_change_server">Change address</string>

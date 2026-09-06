@@ -10,10 +10,13 @@ plugins {
 // One version for the whole ship: the repository's root package.json.
 val rootPackage = JsonSlurper().parse(rootProject.file("../package.json")) as Map<*, *>
 val shipVersion = rootPackage["version"] as String
+// versionCode must rise with every release Android is asked to update to, so
+// each semver component gets three digits and anything wider fails the build.
 val versionParts = shipVersion.split(".").map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
-val shipVersionCode = versionParts.getOrElse(0) { 0 } * 10000 +
-    versionParts.getOrElse(1) { 0 } * 100 +
-    versionParts.getOrElse(2) { 0 }
+require(versionParts.size == 3 && versionParts.all { it in 0..999 }) {
+    "package.json version '$shipVersion' must be MAJOR.MINOR.PATCH with each part below 1000"
+}
+val shipVersionCode = versionParts[0] * 1_000_000 + versionParts[1] * 1_000 + versionParts[2]
 
 // Release signing comes from android/keystore.properties (never committed) or
 // the ANDROID_KEYSTORE_* environment variables in CI. Without either, release
