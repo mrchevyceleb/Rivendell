@@ -11,7 +11,6 @@ object Prefs {
     private const val KEY_SERVER = "server_url"
 
     private val LOOPBACK = setOf("localhost", "127.0.0.1", "::1", "[::1]")
-    private val IPV4 = Regex("""\d{1,3}(\.\d{1,3}){3}""")
     private val HAS_SCHEME = Regex("""^[a-zA-Z][a-zA-Z0-9+.-]*://""")
 
     fun serverUrl(context: Context): String? =
@@ -28,20 +27,17 @@ object Prefs {
 
     private fun defaultPort(scheme: String): Int = if (scheme == "https") 443 else 80
 
-    private fun looksLikeIp(host: String): Boolean = IPV4.matches(host) || host.startsWith("[")
-
     /**
-     * Turn what a person types into an origin. Bare hosts get a scheme: plain
-     * HTTP for loopback and IP literals (a LAN box), HTTPS for names (Tailscale
-     * Serve and any real front door). Paths and queries are dropped: the app is
-     * always mounted at the origin root.
+     * Turn what a person types into an origin. Bare hosts get HTTPS, the only
+     * boundary TARDIS trusts off the box; loopback alone defaults to plain HTTP.
+     * Paths and queries are dropped: the app is always mounted at the origin root.
      */
     fun normalize(raw: String): String? {
         var input = raw.trim()
         if (input.isEmpty()) return null
         if (!HAS_SCHEME.containsMatchIn(input)) {
             val host = input.substringBefore('/').substringBefore(':').lowercase()
-            input = (if (host in LOOPBACK || looksLikeIp(host)) "http://" else "https://") + input
+            input = (if (host in LOOPBACK) "http://" else "https://") + input
         }
         val uri = try {
             URI(input)

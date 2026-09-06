@@ -14,6 +14,7 @@ import {
 } from 'electron';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getSettings, initSettings, saveSettings, type Settings, type ThemeName, type WindowBounds } from './settings.js';
 import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
@@ -32,6 +33,9 @@ const NATIVE_SCHEME = 'rivendell:';
 const ERR_ABORTED = -3;
 const ERR_UNKNOWN_URL_SCHEME = -302;
 const PAGES = path.join(app.getAppPath(), 'pages');
+// The only local pages the window may show, and the only senders allowed to
+// drive the shell over IPC. Compared by path (case-folded on Windows).
+const SHELL_PAGES = new Set(['connect.html', 'offline.html'].map((name) => shellPageKey(pathToFileURL(path.join(PAGES, name)).href)));
 const PERMISSIONS = new Set<string>([
   'media',
   'notifications',
@@ -74,9 +78,25 @@ function visibleBounds(bounds: WindowBounds | undefined): WindowBounds | undefin
   return onScreen ? bounds : { width: bounds.width, height: bounds.height };
 }
 
+function shellPageKey(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'file:') return null;
+    const pathname = decodeURIComponent(parsed.pathname);
+    return process.platform === 'win32' ? pathname.toLowerCase() : pathname;
+  } catch {
+    return null;
+  }
+}
+
+function isShellPage(url: string): boolean {
+  const key = shellPageKey(url);
+  return key !== null && SHELL_PAGES.has(key);
+}
+
 function allowedInApp(url: string): boolean {
-  if (url === 'about:blank' || url.startsWith('blob:') || url.startsWith('file:') || url.startsWith('devtools:')) return true;
-  return sameOrigin(url, serverUrl);
+  if (url === 'about:blank' || url.startsWith('blob:') || url.startsWith('devtools:')) return true;
+  return isShellPage(url) || sameOrigin(url, serverUrl);
 }
 
 async function openOutside(url: string): Promise<void> {
@@ -221,7 +241,7 @@ function installPermissions(): void {
 }
 
 function fromLocalPage(event: IpcMainInvokeEvent | IpcMainEvent): boolean {
-  return event.senderFrame?.url.startsWith('file:') ?? false;
+  return isShellPage(event.senderFrame?.url ?? '');
 }
 
 function installIpc(): void {
@@ -263,7 +283,8 @@ function installIpc(): void {
     void showConnect();
   });
 
-  ipcMain.handle('tardis:open-external', (_event, url: unknown) => {
+  ipcMain.handle('tardis:open-external', (event, url: unknown) => {
+    if (!fromLocalPage(event)) return;
     const value = String(url ?? '');
     if (/^https?:\/\//i.test(value)) void shell.openExternal(value);
   });
@@ -275,10 +296,12 @@ function installIpc(): void {
 }
 
 /** Debugging aid: TARDIS_SHOT=/path/out.png captures the first loaded page
- *  and quits. Pair with --ozone-platform=headless on a display-less box. */
+ *  (TARDIS_SHOT_DELAY ms after it finishes, default 1500) and quits. Pair
+ *  with xvfb or --ozone-platform=headless on a display-less box. */
 function scheduleScreenshot(target: string): void {
   const contents = win?.webContents;
   if (!contents) return;
+  const delay = Number(process.env.TARDIS_SHOT_DELAY) || 1500;
   contents.once('did-finish-load', () => {
     setTimeout(async () => {
       try {
@@ -290,7 +313,7 @@ function scheduleScreenshot(target: string): void {
       } finally {
         app.quit();
       }
-    }, 1500);
+    }, delay);
   });
 }
 

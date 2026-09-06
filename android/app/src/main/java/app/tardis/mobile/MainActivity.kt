@@ -3,7 +3,6 @@ package app.tardis.mobile
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.DownloadManager
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -28,7 +27,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The whole app: one WebView pointed at the TARDIS server. Everything that
@@ -42,7 +44,9 @@ class MainActivity : ComponentActivity() {
     private var serverUrl = ""
     private var serverOrigin = ""
     private var offlineShown = false
+    private var bridgeAttached = false
     private var lastReason = ""
+    private val retrying = AtomicBoolean(false)
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var pendingAudio: PermissionRequest? = null
 
@@ -87,7 +91,7 @@ class MainActivity : ComponentActivity() {
             if (web.canGoBack()) web.goBack() else moveTaskToBack(true)
         }
 
-        web.loadUrl(serverUrl)
+        loadShip()
     }
 
     override fun onResume() {
@@ -123,7 +127,13 @@ class MainActivity : ComponentActivity() {
             userAgentString = "$userAgentString TARDIS-Android/${BuildConfig.VERSION_NAME}"
         }
         CookieManager.getInstance().setAcceptCookie(true)
-        addJavascriptInterface(ShellBridge(), "TardisShell")
+        // Theme reports arrive through an origin-scoped message channel, so
+        // only top-level pages from the server itself can reach the shell.
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+            WebViewCompat.addWebMessageListener(this, THEME_OBJECT, setOf(serverOrigin)) { _, message, _, isMainFrame, _ ->
+                if (isMainFrame) applyTheme(message.data == "light")
+            }
+        }
         webViewClient = ShipClient()
         webChromeClient = ShipChrome()
         setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
@@ -197,14 +207,18 @@ class MainActivity : ComponentActivity() {
             return try {
                 fileChooser.launch(params.createIntent())
                 true
-            } catch (e: ActivityNotFoundException) {
+            } catch (e: Exception) {
                 fileCallback = null
                 false
             }
         }
     }
 
-    /** Exposed to pages as `TardisShell`. Only the offline page and the console use it. */
+    /**
+     * Exposed to the bundled offline page as `TardisShell`, and to nothing
+     * else: it is attached right before that asset loads and removed again
+     * before the next server page loads.
+     */
     private inner class ShellBridge {
         @JavascriptInterface
         fun serverUrl(): String = serverUrl
@@ -222,27 +236,36 @@ class MainActivity : ComponentActivity() {
         fun changeServer() {
             runOnUiThread { startActivity(Intent(this@MainActivity, ServerActivity::class.java)) }
         }
+    }
 
-        @JavascriptInterface
-        fun onTheme(theme: String) {
-            runOnUiThread { applyTheme(theme == "light") }
+    private fun loadShip() {
+        if (bridgeAttached) {
+            web.removeJavascriptInterface(BRIDGE_OBJECT)
+            bridgeAttached = false
         }
+        web.loadUrl(serverUrl)
     }
 
     private fun showOffline(reason: String) {
         offlineShown = true
         lastReason = reason
+        if (!bridgeAttached) {
+            web.addJavascriptInterface(ShellBridge(), BRIDGE_OBJECT)
+            bridgeAttached = true
+        }
         web.loadUrl(OFFLINE_PAGE)
     }
 
     /** Knock before entering: only reload the console once the server answers. */
     private fun retryShip() {
+        if (!retrying.compareAndSet(false, true)) return
         Thread {
             val problem = Ship.probe(serverUrl, 4000)
             runOnUiThread {
+                retrying.set(false)
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (problem == null) {
-                    web.loadUrl(serverUrl)
+                    loadShip()
                 } else {
                     lastReason = problem
                     web.evaluateJavascript("window.tardisOffline && window.tardisOffline(${JSONObject.quote(problem)})", null)
@@ -266,11 +289,12 @@ class MainActivity : ComponentActivity() {
     private fun openOutside(uri: Uri) {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri))
-        } catch (e: ActivityNotFoundException) {
+        } catch (e: Exception) {
             Toast.makeText(this, R.string.no_app_for_link, Toast.LENGTH_SHORT).show()
         }
     }
 
+    /** Chrome-style intent:// links, sanitised the way a browser would. */
     private fun openIntentUri(url: String) {
         val intent = try {
             Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
@@ -278,11 +302,16 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, R.string.no_app_for_link, Toast.LENGTH_SHORT).show()
             return
         }
+        intent.addCategory(Intent.CATEGORY_BROWSABLE)
+        intent.component = null
+        intent.selector = null
+        val fallback = intent.getStringExtra("browser_fallback_url")
+            ?.let { Uri.parse(it) }
+            ?.takeIf { it.scheme == "http" || it.scheme == "https" }
         try {
             startActivity(intent)
-        } catch (e: ActivityNotFoundException) {
-            val fallback = intent.getStringExtra("browser_fallback_url")
-            if (fallback != null) openOutside(Uri.parse(fallback))
+        } catch (e: Exception) {
+            if (fallback != null) openOutside(fallback)
             else Toast.makeText(this, R.string.no_app_for_link, Toast.LENGTH_SHORT).show()
         }
     }
@@ -309,10 +338,12 @@ class MainActivity : ComponentActivity() {
         const val DARK_BG = 0xFF08080A.toInt()
         const val LIGHT_BG = 0xFFF4F1EA.toInt()
         const val OFFLINE_PAGE = "file:///android_asset/offline.html"
+        const val BRIDGE_OBJECT = "TardisShell"
+        const val THEME_OBJECT = "TardisTheme"
 
         // Mirrors the console theme onto the system bars. Idempotent per page.
-        const val THEME_HOOK = "(function(){if(window.__tardisThemeHook)return;window.__tardisThemeHook=true;" +
-            "var send=function(){try{TardisShell.onTheme(document.documentElement.getAttribute('data-theme')==='light'?'light':'dark')}catch(e){}};" +
+        const val THEME_HOOK = "(function(){if(window.__tardisThemeHook||!window.TardisTheme)return;window.__tardisThemeHook=true;" +
+            "var send=function(){try{TardisTheme.postMessage(document.documentElement.getAttribute('data-theme')==='light'?'light':'dark')}catch(e){}};" +
             "new MutationObserver(send).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});send();})();"
     }
 }

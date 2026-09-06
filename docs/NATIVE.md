@@ -20,6 +20,8 @@ The `.zip`, `.blockmap`, and `latest*.yml` files next to them feed the desktop a
 
 The shell asks **Where is the ship?** Enter the address of the machine that runs your TARDIS server. That is normally the HTTPS address printed by `tailscale serve status` on that machine, such as `https://your-server.your-tailnet.ts.net`. On the server itself, `http://127.0.0.1:8091` works too. The shell checks `/api/health`, then remembers the address.
 
+An address typed without a scheme gets `https://`; only `localhost` defaults to plain HTTP. TARDIS has no login of its own, so plain HTTP across a network hands the whole console to anyone on the path. The desktop app accepts an explicit `http://` address if you insist; the Android app allows plain HTTP to the phone itself only.
+
 Requirements for the address to work:
 
 - The device must reach the server. With Tailscale that means the Tailscale app is installed and signed in on the phone or PC, on the same tailnet.
@@ -104,6 +106,6 @@ npm version minor          # bumps package.json, syncs desktop/, commits, tags v
 git push --follow-tags
 ```
 
-The **Release** workflow builds the Windows, macOS, Linux, and Android artifacts and publishes them on the matching GitHub Release. The Android signing key comes from the repository secrets `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`; keep a copy of the keystore somewhere safe, because a lost key means every phone has to uninstall before the next update.
+The **Release** workflow builds the Windows, macOS, Linux, and Android artifacts and publishes them on the matching GitHub Release. The Android signing key comes from the repository secrets `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. A tagged release fails without them, on purpose: a runner-generated debug key changes every build, and phones refuse updates signed by a different key. Keep a copy of the keystore somewhere safe, because a lost key means every phone has to uninstall before the next update.
 
-Run the workflow manually from the Actions tab to build artifacts from any branch without publishing a release.
+Run the workflow manually from the Actions tab to build artifacts from any branch without publishing a release. Manual builds without the secrets are signed with a debug key.

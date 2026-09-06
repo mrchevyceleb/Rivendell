@@ -63,12 +63,17 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
             printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
             export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
             echo "Signing with the release key."
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # A runner-generated debug key changes every build, and phones refuse
+            # updates signed by a different key. Never publish one.
+            echo "::error::Tagged releases must be signed. Add the ANDROID_KEYSTORE_B64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD secrets."
+            exit 1
           else
-            echo "No ANDROID_KEYSTORE_B64 secret: signing with the debug key."
+            echo "No complete ANDROID_KEYSTORE_* secrets: signing this manual build with the debug key."
           fi
           ./gradlew --no-daemon :app:assembleRelease
           VERSION=$(node -p "require('../package.json').version")

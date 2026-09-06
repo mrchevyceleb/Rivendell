@@ -10,20 +10,16 @@ export interface ProbeResult {
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
-function looksLikeIp(host: string): boolean {
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host.startsWith('[');
-}
-
-/** Turn what a person types into an origin. Bare hosts get a scheme: plain
- *  HTTP for loopback and IP literals (a LAN box), HTTPS for names (Tailscale
- *  Serve and any real front door). Paths and query strings are dropped: the
- *  app is always mounted at the origin root. */
+/** Turn what a person types into an origin. Bare hosts get HTTPS, the only
+ *  boundary TARDIS trusts off the box; loopback alone defaults to plain HTTP.
+ *  Paths and query strings are dropped: the app is always mounted at the
+ *  origin root. */
 export function normalizeServerUrl(raw: string): string | null {
   let input = raw.trim();
   if (!input) return null;
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) {
     const host = input.split('/')[0].split(':')[0].toLowerCase();
-    input = `${LOOPBACK.has(host) || looksLikeIp(host) ? 'http' : 'https'}://${input}`;
+    input = `${LOOPBACK.has(host) ? 'http' : 'https'}://${input}`;
   }
   let url: URL;
   try {

@@ -18,6 +18,7 @@ class ServerActivity : ComponentActivity() {
     private lateinit var go: Button
     private lateinit var skip: TextView
     private lateinit var status: TextView
+    private var probing: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +44,7 @@ class ServerActivity : ComponentActivity() {
     }
 
     private fun attempt(verify: Boolean) {
+        if (probing != null) return
         val origin = Prefs.normalize(field.text.toString())
         if (origin == null) {
             status.text = getString(R.string.enter_full_address)
@@ -52,14 +54,17 @@ class ServerActivity : ComponentActivity() {
             save(origin)
             return
         }
-        go.isEnabled = false
-        skip.visibility = View.GONE
+        probing = origin
+        setBusy(true)
         status.text = getString(R.string.materialising)
         io.execute {
             val problem = Ship.probe(origin)
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                go.isEnabled = true
+                // Only the address that was actually probed may be saved.
+                if (probing != origin) return@runOnUiThread
+                probing = null
+                setBusy(false)
                 if (problem == null) {
                     save(origin)
                 } else {
@@ -68,6 +73,12 @@ class ServerActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    private fun setBusy(busy: Boolean) {
+        go.isEnabled = !busy
+        field.isEnabled = !busy
+        if (busy) skip.visibility = View.GONE
     }
 
     private fun save(origin: String) {
