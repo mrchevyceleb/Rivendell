@@ -38,8 +38,16 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
   // two starts would mean two microphones and two lines to Grok.
   const startedRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const voiceToggleRef = useRef<HTMLButtonElement>(null);
   const callRef = useRef(call);
   callRef.current = call;
+
+  // Closing the picker removes the focused chip; put focus back on the toggle
+  // so keyboard users stay inside the dialog.
+  const closeVoicePicker = useCallback(() => {
+    setVoiceOpen(false);
+    voiceToggleRef.current?.focus();
+  }, []);
 
   const hangUp = useCallback(() => {
     callRef.current.end();
@@ -80,7 +88,7 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
       event.preventDefault();
       // First Escape closes the voice picker; the next one hangs up.
       if (voiceOpen) {
-        setVoiceOpen(false);
+        closeVoicePicker();
         return;
       }
       hangUp();
@@ -99,7 +107,7 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
       event.preventDefault();
       first.focus();
     }
-  }, [hangUp, voiceOpen]);
+  }, [closeVoicePicker, hangUp, voiceOpen]);
 
   const bars = useMemo(() => Array.from({ length: 5 }, (_, i) => i), []);
   const voiceLabel = GROK_VOICES.find((v) => v.id === voice)?.label ?? voice;
@@ -109,9 +117,10 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
   return (
     <div ref={dialogRef} tabIndex={-1} className="riv-call" role="dialog" aria-modal="true" aria-label={`Voice call with ${agent.name}`} onKeyDown={onDialogKeyDown}>
       <div className="riv-call-top">
-        <span className="riv-call-chip" role="status" aria-live="polite">
+        <span className="riv-call-chip">
           <span className={`riv-call-dot riv-call-dot-${call.state}`} />
-          {STATE_LABEL[call.state] ?? call.state} · {fmt(call.durationSec)}
+          <span role="status" aria-live="polite">{STATE_LABEL[call.state] ?? call.state}</span>
+          <span aria-hidden="true"> · {fmt(call.durationSec)}</span>
         </span>
       </div>
 
@@ -152,7 +161,7 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
       {error ? <div className="riv-call-error" role="alert">{error}</div> : null}
 
       <div className="riv-call-voice">
-        <button type="button" className="riv-call-voicebtn" onClick={() => setVoiceOpen((o) => !o)} aria-expanded={voiceOpen} aria-controls={VOICE_GRID_ID}>
+        <button ref={voiceToggleRef} type="button" className="riv-call-voicebtn" onClick={() => (voiceOpen ? closeVoicePicker() : setVoiceOpen(true))} aria-expanded={voiceOpen} aria-controls={VOICE_GRID_ID}>
           Voice · {voiceLabel} {voiceOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </button>
         {voiceOpen ? (
@@ -163,7 +172,7 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
                 key={v.id}
                 className={`riv-call-voicechip${v.id === voice ? ' on' : ''}`}
                 aria-pressed={v.id === voice}
-                onClick={() => { setVoiceState(v.id); call.setVoice(v.id); setVoiceOpen(false); }}
+                onClick={() => { setVoiceState(v.id); call.setVoice(v.id); closeVoicePicker(); }}
               >
                 {v.label}
               </button>

@@ -40,6 +40,7 @@ export function useGrokCall() {
   const streamRef = useRef<MediaStream | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const mutedRef = useRef(false);
+  const voiceRef = useRef('ara');
   const levelRaf = useRef(0);
   const clockRef = useRef<number | null>(null);
   // Cancellation token: bumped on teardown so late async steps (WS open,
@@ -102,7 +103,8 @@ export function useGrokCall() {
     const ws = new WebSocket(`${proto}//${window.location.host}/ws/voice`);
     wsRef.current = ws;
 
-    ws.onopen = () => { if (alive()) ws.send(JSON.stringify({ type: 'start', agentId, voice })); };
+    voiceRef.current = voice;
+    ws.onopen = () => { if (alive()) ws.send(JSON.stringify({ type: 'start', agentId, voice: voiceRef.current })); };
     ws.onmessage = (ev) => {
       if (!alive()) return;
       let msg: Record<string, unknown>;
@@ -189,7 +191,10 @@ export function useGrokCall() {
   }, []);
 
   const end = useCallback(() => {
-    wsRef.current?.send(JSON.stringify({ type: 'stop' }));
+    // Invalidate the generation first so the socket's own close event cannot
+    // flip the state to "ended" after a local hang-up or a failed start.
+    genRef.current += 1;
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'stop' }));
     teardown();
     setState('idle');
   }, [teardown]);
@@ -203,7 +208,9 @@ export function useGrokCall() {
   }, []);
 
   const setVoice = useCallback((voice: string) => {
-    wsRef.current?.send(JSON.stringify({ type: 'setVoice', voice }));
+    voiceRef.current = voice;
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'setVoice', voice }));
   }, []);
 
   /** Retry audio after a user gesture: autoplay policy can leave the output
