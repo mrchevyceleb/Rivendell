@@ -19,6 +19,7 @@ import {
   RibbonTicker,
 } from '../reimagine/RoomViews';
 import { Book, StarSigil, Camera, Edit, Folder, SquarePen } from '../reimagine/icons';
+import { ROOM_NAMES } from '../../../data/roomNames';
 
 type Sheet = 'none' | 'chronicle' | 'counsel';
 
@@ -80,15 +81,15 @@ export function Mobile({ s, picker, repo }: ShellViewProps) {
           <button
             type="button"
             className="sigil"
-            aria-label="Rivendell sigil"
+            aria-label="TARDIS mark"
             onClick={(e) => s.sparks.burst(e.clientX, e.clientY)}
           >
             <StarSigil style={{ width: 17, height: 17 }} />
           </button>
           <div>
-            <h1>The Hall</h1>
+            <h1>{ROOM_NAMES.hall.name}</h1>
             <div className="presence">
-              <span className="pulse" style={{ width: 6, height: 6 }} /> Elrond attends · {repo?.branch ?? 'master'}
+              <span className="pulse" style={{ width: 6, height: 6 }} /> TARDIS online · {repo?.branch ?? 'master'}
             </div>
           </div>
           <button type="button" className="iconbtn" aria-label="Open the Chronicle" onClick={() => setSheet('chronicle')}>

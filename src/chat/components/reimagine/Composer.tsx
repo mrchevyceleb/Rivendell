@@ -2,12 +2,13 @@
 // row + chip-in-row; mobile attach button + chip dock-meta above). Implements
 // the slash-command popover (↑/↓ wrap, Enter/Tab pick, Esc close), the
 // ready → stop send-button state machine, auto-grow to the mobile/desktop cap,
-// Enter-sends / Shift+Enter-newlines, the `mellon` spark-burst trigger, and
+// Enter-sends / Shift+Enter-newlines, the egg-phrase spark bursts, and
 // image attachment (paste, drag/drop, file picker) threaded through send/steer.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CommandEntry } from '../../data/types';
 import { ArrowUp, Plus, SquarePen, StopSquare } from './icons';
+import { isEggPhrase } from '../../../theme/eggs';
 
 export type SendImage = { mediaType: string; base64: string; previewDataUrl?: string };
 type PendingImage = { id: string; mediaType: string; base64: string; previewUrl: string };
@@ -36,7 +37,7 @@ export type ComposerProps = {
       (the + attach button). Desktop only — mobile has its own attach. */
   leadingSlot?: React.ReactNode;
   /** Rotating placeholder strings (grok.com style). Falls back to the static
-      'Speak, friend…' when omitted. */
+      'Where to, Doctor?' when omitted. */
   placeholders?: string[];
   /** Fixed placeholder (Grok Bot: "Message {agent}"). Wins over placeholders. */
   placeholder?: string;
@@ -167,7 +168,8 @@ export function Composer(props: ComposerProps) {
       return;
     }
     if (!v && !imgs?.length) return;
-    if (v.toLowerCase() === 'mellon' && props.onMellon && sendRef.current) {
+    // A bare trigger phrase bursts sparks; the message still sends unchanged.
+    if (isEggPhrase(v) && props.onMellon && sendRef.current) {
       props.onMellon(sendRef.current.getBoundingClientRect());
     }
     props.onSend(v, imgs);
@@ -278,7 +280,7 @@ export function Composer(props: ComposerProps) {
       ) : null}
       {popOpen ? (
         <div className="pop show" role="listbox">
-          <div className="pop-h">Commands of the house</div>
+          <div className="pop-h">Console commands</div>
           {matches.map((c, i) => (
             <button key={c.name} type="button" className={`cmd${i === popSel ? ' sel' : ''}`} onClick={() => pick(i)}>
               <span className="cn">/{c.name}</span>
@@ -306,8 +308,8 @@ export function Composer(props: ComposerProps) {
           ref={taRef}
           rows={1}
           value={props.value}
-          placeholder={props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Speak, friend…'}
-          aria-label="Message Elrond"
+          placeholder={props.busy ? 'Reply — it will send next…' : props.placeholder ?? phrases?.[phIdx] ?? 'Where to, Doctor?'}
+          aria-label="Message"
           onChange={(e) => {
             setPopDismissed(false);
             props.onChange(e.target.value);

@@ -2,7 +2,7 @@ import { FolderOpen, FolderTree } from 'lucide-react';
 import { useStudioFiles } from '../../../shell/studio/studioFiles';
 import { buildLinkUrls, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
 
-// Click reveals the folder in Rivendell's own file tree. The side button does
+// Click reveals the folder in TARDIS's own file tree. The side button does
 // the same explicitly. Outside the Studio shell it falls back to opening the
 // folder in Windows Explorer via the rivendell:// handler.
 export function FolderLinkCard({ path, title }: { path: string; title?: string }) {

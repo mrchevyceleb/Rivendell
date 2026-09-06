@@ -1,14 +1,14 @@
 // Grok Bot conversation screen, anatomy from the desktop app:
 //
 //   header:  agent disc + name .............. settings gear, pane toggle >>
-//   feed:    agent = left #262626 bubbles · user = right #5A5A5A bubbles
+//   feed:    agent = left raised-panel bubbles · user = right brass-tinted bubbles
 //            working narrative collapses into a Thoughts pod
-//   dock:    pill composer  [+]  Message {agent} ............ [white disc]
+//   dock:    pill composer  [+]  Message {agent} ............ [brass disc]
 //            empty → mic (Jarvis voice) · typing → send · streaming → stop
 //
 // Same useChatShell brain as the Studio; presentation is pure Grok Bot.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Mic, PanelRightClose, PanelRightOpen, RotateCcw, Settings, Share2, SquarePen } from 'lucide-react';
 import type { ShellViewProps } from '../chat/components/reimagine/useChatShell';
 import type { JarvisEngineSettings } from '../jarvis/protocol';
@@ -19,8 +19,7 @@ import { Plus } from '../chat/components/reimagine/icons';
 import { BotMark } from './GrokLogo';
 import { agentMark, DISC_INK, agentColor, agentAvatarUrl, type Agent } from './agents';
 import { useAgentMessagePins } from './messagePins';
-
-const THINKING_PHRASES = ['Thinking', 'Working', 'On it'];
+import { BRAND, THINKING_PHRASES, composerPlaceholders } from '../theme/voice';
 
 export type BotConversationProps = ShellViewProps & {
   agentRecord?: Agent;
@@ -43,8 +42,10 @@ export function GrokConversation(props: BotConversationProps) {
   const settingsRef = useRef<HTMLDivElement | null>(null);
 
   const agent = props.agentRecord;
-  const agentName = agent?.name ?? props.agent ?? 'Elrond';
+  const agentName = agent?.name ?? props.agent ?? BRAND;
   const messagePins = useAgentMessagePins(agent?.id);
+  // Fresh array each name change only — the Composer's rotation keys on identity.
+  const placeholders = useMemo(() => composerPlaceholders(agentName), [agentName]);
 
   const empty = s.blocks.length === 0 && !s.busy;
 
@@ -106,7 +107,7 @@ export function GrokConversation(props: BotConversationProps) {
       onSteer={s.steer}
       busy={s.busy}
       commands={s.commands}
-      placeholder={`Message ${agentName}`}
+      placeholders={placeholders}
       leadingSlot={
         <button
           type="button"
@@ -127,14 +128,14 @@ export function GrokConversation(props: BotConversationProps) {
   );
 
   return (
-    <div className="rc rc-desktop bt-conv-wrap">
+    <div className="rc rc-desktop bt-conv-wrap bt-fade">
       <div className="bt-head">
         <div className="bt-head-agent" title={agent ? `${agent.name} — ${agent.role}` : agentName}>
           <span className="bt-disc" style={agent ? { color: DISC_INK, background: agentColor(agent.name) } : undefined}>{agent && agentAvatarUrl(agent) ? <img className="bt-disc-img" src={agentAvatarUrl(agent) ?? undefined} alt={agent.name} /> : agentMark(agent, agentName.slice(0, 1))}</span>
           <span className="bt-head-name">{agentName}</span>
         </div>
         <div className="bt-head-actions">
-          <button className="bt-iconbtn" onClick={props.onOpenAgentEditor} title={agent ? `Edit ${agent.name}` : 'Agent settings'} aria-label={agent ? `Edit ${agent.name}` : 'Agent settings'}>
+          <button className="bt-iconbtn" onClick={props.onOpenAgentEditor} title={agent ? `Edit ${agent.name}` : 'Companion settings'} aria-label={agent ? `Edit ${agent.name}` : 'Companion settings'}>
             <SquarePen size={15} />
           </button>
           <div style={{ position: 'relative' }} ref={settingsRef}>
@@ -182,9 +183,9 @@ export function GrokConversation(props: BotConversationProps) {
       </div>
 
       {empty ? (
-        <div className="bt-empty bt-fade">
+        <div className="bt-empty">
           <BotMark size={64} />
-          <div className="bt-empty-title">Give {agentName} real work.</div>
+          <div className="bt-empty-title">Give {agentName} a mission.</div>
           {s.error ? <div className="chip" style={{ color: 'var(--r-rose)' }}>{s.error}</div> : null}
         </div>
       ) : (
@@ -197,7 +198,6 @@ export function GrokConversation(props: BotConversationProps) {
               bottomRef={s.sticky.bottomRef}
               phrases={THINKING_PHRASES}
               collapseSteps
-              typingBubble
               suppressTyping={s.automationBusy}
               workingSince={s.workingSince}
               pin={agent ? {

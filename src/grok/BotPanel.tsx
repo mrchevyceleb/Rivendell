@@ -10,6 +10,7 @@ import { apiJson } from '../data/api';
 import { useCronJobs } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { scrollToPinnedMessage, useAgentMessagePins } from './messagePins';
+import { statusLabel } from '../theme/voice';
 
 type ArtifactMeta = { id: string; title?: string; kind?: string; createdAt?: number };
 
@@ -323,13 +324,13 @@ export function BotPanel({ meta, onOpenForge, onClose, className = '', agent }: 
           <div className="bt-session">
             <div className="bt-session-row"><span>Agent</span><b>{meta.agentLabel}</b></div>
             {meta.model ? <div className="bt-session-row"><span>Model</span><b>{meta.model}</b></div> : null}
-            <div className="bt-session-row"><span>State</span><b>{meta.compacting ? 'Compacting…' : meta.status}</b></div>
+            <div className="bt-session-row"><span>State</span><b>{meta.compacting ? 'Regenerating…' : statusLabel(meta.status)}</b></div>
             {typeof frac === 'number' ? (
               <>
                 <div className={`bt-meter${frac > 0.8 ? ' hot' : ''}`}>
                   <i style={{ width: `${Math.min(100, Math.round(frac * 100))}%` }} />
                 </div>
-                <div className="bt-session-cap">Context {Math.round(frac * 100)}%{meta.compacting ? ' — compacting to keep the thread alive' : ''}</div>
+                <div className="bt-session-cap">Context {Math.round(frac * 100)}%{meta.compacting ? ' — regenerating to keep the thread alive' : ''}</div>
               </>
             ) : null}
           </div>

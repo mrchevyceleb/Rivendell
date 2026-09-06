@@ -44,7 +44,7 @@ export type RepoAccount = string;
 export function companionAuthBlurb(cli: CompanionId, account: RepoAccount | null): string {
   const who = account ? 'the configured subscription login' : 'the login mapped to the selected repo';
   switch (cli) {
-    case 'assistant':      return `Elrond on Claude Code, signed in as ${who}.`;
+    case 'assistant':      return `TARDIS on Claude Code, signed in as ${who}.`;
     case 'claude':         return `Claude Code, signed in as ${who}.`;
     case 'codex':           return `Codex, signed in as ${who}.`;
     case 'zai':              return 'GLM 5.3 via your Z.ai coding plan (no Claude or Codex login).';
@@ -116,7 +116,7 @@ export function readStoredZaiEffort(): string {
 // xAI coding-plan models (Anthropic-compatible, run through the claude CLI
 // redirected to https://api.x.ai). Grok 4.6 is the current coding-plan model.
 export const DEFAULT_XAI_MODEL = 'grok-4.6';
-// Grok's top thinking budget. Rivendell defaults the whole picker to xAI Grok
+// Grok's top thinking budget. TARDIS defaults the whole picker to xAI Grok
 // 4.6 at max thinking, so this is the out-of-the-box reasoning level too.
 export const DEFAULT_XAI_EFFORT = 'max';
 export const XAI_MODELS: { id: string; label: string }[] = [

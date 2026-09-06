@@ -14,24 +14,25 @@ import type {
   ScribeEvent,
   Task,
 } from './types';
+import { ROOM_NAMES } from './roomNames';
 
 export const rooms: Room[] = [
-  { key: '/', name: 'The Hall', role: 'Live with Elrond', icon: 'hall' },
-  { key: '/dashboard', name: 'Dashboard', role: 'Today at a glance', icon: 'dashboard' },
-  { key: '/council', name: 'The Council', role: 'Task board', icon: 'council' },
-  { key: '/tidings', name: 'Tidings', role: 'Unified email inbox', icon: 'tidings' },
-  { key: '/calendar', name: 'Calendar', role: 'Connected schedules', icon: 'calendar' },
-  { key: '/library', name: 'Library', role: 'Docs and references', icon: 'library' },
-  { key: '/workspace', name: 'Workspace', role: "Edit Elrond's files", icon: 'workspace' },
-  { key: '/pins', name: 'Pins', role: 'Quick notes', icon: 'pins' },
-  { key: '/reckoning', name: 'Reckoning', role: 'P&L tracker', icon: 'reckoning' },
-  { key: '/forge', name: 'Forge', role: 'Cron and deploy log', icon: 'forge' },
-  { key: '/weavings', name: 'Weavings', role: 'Employee queue', icon: 'weavings' },
-  { key: '/annals', name: 'Annals', role: 'Past sessions', icon: 'annals' },
-  { key: '/scribe', name: 'Scribe', role: 'Live activity log', icon: 'scribe' },
+  { key: '/', name: ROOM_NAMES.hall.name, role: ROOM_NAMES.hall.tagline, icon: 'hall' },
+  { key: '/dashboard', name: ROOM_NAMES.dashboard.name, role: ROOM_NAMES.dashboard.tagline, icon: 'dashboard' },
+  { key: '/council', name: ROOM_NAMES.council.name, role: ROOM_NAMES.council.tagline, icon: 'council' },
+  { key: '/tidings', name: ROOM_NAMES.tidings.name, role: ROOM_NAMES.tidings.tagline, icon: 'tidings' },
+  { key: '/calendar', name: ROOM_NAMES.calendar.name, role: ROOM_NAMES.calendar.tagline, icon: 'calendar' },
+  { key: '/library', name: ROOM_NAMES.library.name, role: ROOM_NAMES.library.tagline, icon: 'library' },
+  { key: '/workspace', name: ROOM_NAMES.workspace.name, role: ROOM_NAMES.workspace.tagline, icon: 'workspace' },
+  { key: '/pins', name: ROOM_NAMES.pins.name, role: ROOM_NAMES.pins.tagline, icon: 'pins' },
+  { key: '/reckoning', name: ROOM_NAMES.reckoning.name, role: ROOM_NAMES.reckoning.tagline, icon: 'reckoning' },
+  { key: '/forge', name: ROOM_NAMES.forge.name, role: ROOM_NAMES.forge.tagline, icon: 'forge' },
+  { key: '/weavings', name: ROOM_NAMES.weavings.name, role: ROOM_NAMES.weavings.tagline, icon: 'weavings' },
+  { key: '/annals', name: ROOM_NAMES.annals.name, role: ROOM_NAMES.annals.tagline, icon: 'annals' },
+  { key: '/scribe', name: ROOM_NAMES.scribe.name, role: ROOM_NAMES.scribe.tagline, icon: 'scribe' },
 ];
 
-// All seeds are intentionally empty. Rivendell rooms must reflect real
+// All seeds are intentionally empty. TARDIS rooms must reflect real
 // upstream data — the moment we provide a fake fallback, the UI starts
 // claiming things that aren't true. `hallSummary` is a zero-state shell
 // only because callers spread it.

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Studio } from './shell/Studio';
 import { GrokApp } from './grok/GrokApp';
@@ -13,7 +14,23 @@ const queryClient = new QueryClient();
 const studioMatch = /^\/studio(\/|$)/.test(window.location.pathname);
 const legacyRoom = window.location.pathname.replace(/^\/+/, '').replace(/\/+$/, '');
 
+// The inline boot layer in index.html (the box materialising) fades out once
+// React has committed the shell. Effects run after the first commit, so this
+// is exactly "the shell exists". A short floor keeps one lamp pulse from being
+// cut mid-flicker when React mounts fast; the layer never blocks input and
+// the CSS cap clears it at 1.4 s even if this never runs.
+function dismissBoot() {
+  const el = document.getElementById('boot');
+  if (!el) return;
+  const wait = Math.max(0, 350 - performance.now());
+  window.setTimeout(() => {
+    el.classList.add('out');
+    window.setTimeout(() => el.remove(), 260);
+  }, wait);
+}
+
 export default function App() {
+  useEffect(dismissBoot, []);
   return (
     <QueryClientProvider client={queryClient}>
       <ProxyViewerProvider>

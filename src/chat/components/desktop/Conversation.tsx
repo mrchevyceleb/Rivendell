@@ -17,6 +17,7 @@ import {
 import {
   RibbonTicker,
 } from '../reimagine/RoomViews';
+import { ROOM_NAMES } from '../../../data/roomNames';
 
 export function Conversation({ s, picker, repo }: ShellViewProps) {
   const [counselOpen, setCounselOpen] = useState(false);
@@ -30,12 +31,12 @@ export function Conversation({ s, picker, repo }: ShellViewProps) {
         {/* ── main column ── */}
         <div className="main">
           <header className="top">
-            <h2 className="hall-title">The Hall</h2>
+            <h2 className="hall-title">{ROOM_NAMES.hall.name}</h2>
             <span className="crumb">
               {repo?.name ?? 'ASSISTANT-HUB'} · {repo?.branch ?? 'master'}
             </span>
             <div className="presence">
-              <span className="pulse" style={{ width: 7, height: 7 }} /> Elrond attends
+              <span className="pulse" style={{ width: 7, height: 7 }} /> TARDIS online
             </div>
           </header>
 

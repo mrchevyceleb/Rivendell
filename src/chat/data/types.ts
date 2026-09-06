@@ -1,6 +1,6 @@
 // Shared types between mock + real-backend data shapes.
 
-// Rivendell binds each companion to a CLI/provider via this id. Claude Code
+// TARDIS binds each companion to a CLI/provider via this id. Claude Code
 // and Codex account choice comes from the selected repo's account-map rule.
 // The banana engine picker switches the effective cli to claude, banana
 // (OpenRouter), banana-fireworks, banana-local, zai, or xai.

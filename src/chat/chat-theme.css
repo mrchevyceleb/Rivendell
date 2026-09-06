@@ -4,12 +4,12 @@
    The chat client (src/chat/**) was ported from the Samwise app,
    which themes itself with unprefixed tokens (--vellum, --ink,
    --ember, --serif-display, …) and a set of `.sw-*` utility
-   classes. None of those exist in Rivendell, so the embedded
+   classes. None of those exist in TARDIS, so the embedded
    `Conversation` rendered with transparent backgrounds, default
    sans fonts, and no thinking-dot / scrollbar / button styling.
 
-   This file maps every Samwise token onto Rivendell's themed
-   `--r-*` tokens (so the chat tracks Rivendell's dark/light
+   This file maps every Samwise token onto TARDIS's themed
+   `--r-*` tokens (so the chat tracks TARDIS's dark/light
    themes automatically) and ports the `.sw-*` utilities the chat
    markup references. Imported after index.css in main.tsx.
    ============================================================ */
@@ -31,7 +31,7 @@
   --rule:        var(--r-line-strong);
   --rule-soft:   var(--r-line);
 
-  /* Accents — Samwise's warm ember/moss/gold mapped to Rivendell's
+  /* Accents — Samwise's warm ember/moss/gold mapped to TARDIS's
      lantern-amber / emerald / gold so "tending" still reads warm. */
   --ember:       var(--r-amber);
   --moss:        var(--r-emerald);

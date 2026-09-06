@@ -4,6 +4,7 @@ import { RoomHeader } from '../components/RoomHeader';
 import { useScribeEvents } from '../hooks/useRoomData';
 import { useScribeSocket } from '../hooks/useScribeSocket';
 import { timeAgo } from '../utils/format';
+import { ROOM_NAMES } from '../data/roomNames';
 
 export function Scribe() {
   const { data: initial = [], refetch } = useScribeEvents();
@@ -13,7 +14,7 @@ export function Scribe() {
   return (
     <div className="room-scroll r-scroll">
       <RoomHeader
-        eyebrow="The Scribe"
+        eyebrow={ROOM_NAMES.scribe.eyebrow}
         title="Every act, recorded"
         subtitle="Live worker activity, tool calls, notes, and errors."
         actions={

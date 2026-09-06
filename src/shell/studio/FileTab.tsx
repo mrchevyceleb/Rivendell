@@ -195,7 +195,7 @@ export function FileTab({
     }
   }, [openDoc, dirty, saving, draft, baselineModifiedAt]);
 
-  // Live-sync: Elrond edited this file on disk.
+  // Live-sync: TARDIS edited this file on disk.
   const { events } = useScribeSocket();
   const lastEventRef = useRef<typeof events[number] | null>(null);
   useEffect(() => {
@@ -206,7 +206,7 @@ export function FileTab({
     if (p?.kind !== 'workspace-change' || p?.by === 'human') return;
     if (p?.op === 'change' && p?.path === path) {
       if (!dirty) void loadFile(path);
-      else setExternalChange(`Elrond changed ${path}`);
+      else setExternalChange(`TARDIS changed ${path}`);
     }
   }, [events, path, dirty, loadFile]);
 
@@ -235,7 +235,7 @@ export function FileTab({
             </Button>
           )}
           <Button tone="ghost" onClick={() => onAskElrond(path)}>
-            <MessageSquare size={13} /> Ask Elrond
+            <MessageSquare size={13} /> Ask TARDIS
           </Button>
         </div>
       </div>
@@ -250,7 +250,7 @@ export function FileTab({
       )}
       {externalChange && !conflictInfo && (
         <div className="studio-editor-banner elf">
-          <span>Elrond is tending this file</span>
+          <span>TARDIS is tending this file</span>
           {!dirty && <button onClick={() => { void loadFile(path); }}>Reload</button>}
         </div>
       )}

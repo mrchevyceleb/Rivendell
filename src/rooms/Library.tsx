@@ -7,6 +7,7 @@ import { RoomHeader } from '../components/RoomHeader';
 import { apiJson } from '../data/api';
 import type { FileTreeNode, WorkspaceChildrenResponse, WorkspaceFileResponse } from '../data/types';
 import { useWorkspaceTree } from '../hooks/useRoomData';
+import { ROOM_NAMES } from '../data/roomNames';
 
 export function Library() {
   const { data, refetch, isFetching } = useWorkspaceTree();
@@ -119,8 +120,8 @@ export function Library() {
   return (
     <div className="library-room">
       <RoomHeader
-        eyebrow="The Library"
-        title="Elrond's workspace"
+        eyebrow={ROOM_NAMES.library.eyebrow}
+        title="The ship's workspace"
         subtitle={data?.displayPath ?? '~/Documents/ASSISTANT-HUB'}
         actions={
           <>
@@ -174,7 +175,7 @@ export function Library() {
           ) : (
             <div className="file-preview-empty">
               <FolderOpen size={34} />
-              <h2>ASSISTANT-HUB is Elrond's working shelf.</h2>
+              <h2>ASSISTANT-HUB is the ship's working shelf.</h2>
               <p>Select a file on the left to preview it. Heavy folders like <code>node_modules</code> and <code>.git</code> load when opened.</p>
             </div>
           )}

@@ -7,6 +7,7 @@ import { useEmails, useHallSummary, useMessages, useScribeEvents, useTasks, useW
 import { useScribeSocket } from '../hooks/useScribeSocket';
 import { Corner, Evenstar, IlluminatedCapital } from '../theme/Ornaments';
 import { timeAgo } from '../utils/format';
+import { ROOM_NAMES } from '../data/roomNames';
 
 export function Dashboard() {
   const now = useNow();
@@ -36,7 +37,7 @@ export function Dashboard() {
   return (
     <div className="room-scroll r-scroll">
       <RoomHeader
-        eyebrow="Dashboard"
+        eyebrow={ROOM_NAMES.dashboard.eyebrow}
         title="Today at a glance"
         subtitle="Your always-on office, awake on your private network."
         actions={
@@ -68,7 +69,7 @@ export function Dashboard() {
             <div className="brief-live-strip">
               <span className={`live-orb ${scribeState === 'open' ? 'is-live' : ''}`} />
               <Sparkles size={13} />
-              <strong>{scribeState === 'open' ? 'Scribe stream live' : 'Scribe stream reconnecting'}</strong>
+              <strong>{scribeState === 'open' ? `${ROOM_NAMES.scribe.name} live` : `${ROOM_NAMES.scribe.name} re-materialising`}</strong>
               <span>last activity {brief.updatedAt ? timeAgo(brief.updatedAt) : 'unknown'} ago</span>
               <span>{activeJob ? `${activeJob.skill} ${activeJob.status}` : 'queue standing watch'}</span>
             </div>
@@ -124,20 +125,20 @@ export function Dashboard() {
               <Evenstar size={18} color="var(--r-gold)" />
             </span>
             <div>
-              <p className="r-eyebrow">Elrond</p>
-              <h3>Return to the Hall</h3>
+              <p className="r-eyebrow">TARDIS</p>
+              <h3>Return to the {ROOM_NAMES.hall.name}</h3>
             </div>
           </div>
-          <p>The Hall is the live chat cockpit for Claude Code and Codex inside ASSISTANT-HUB.</p>
+          <p>The {ROOM_NAMES.hall.name} is the live chat cockpit for Claude Code and Codex inside ASSISTANT-HUB.</p>
           <Button tone="elf" onClick={() => window.location.assign('/')}>
-            Open Hall
+            Open {ROOM_NAMES.hall.name}
           </Button>
         </Surface>
 
         <Surface className="hall-card">
           <div className="card-heading">
             <div>
-              <p className="r-eyebrow">Weavings</p>
+              <p className="r-eyebrow">{ROOM_NAMES.weavings.name}</p>
               <h3>Employee queue</h3>
             </div>
             <div className={`queue-radar ${activeJob ? 'is-active' : ''}`}>
@@ -175,7 +176,7 @@ export function Dashboard() {
         <Surface className="hall-card wide">
           <div className="card-heading">
             <div>
-              <p className="r-eyebrow">Scribe</p>
+              <p className="r-eyebrow">{ROOM_NAMES.scribe.name}</p>
               <h3>Latest activity</h3>
             </div>
             <div className="scribe-state">

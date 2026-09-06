@@ -12,7 +12,7 @@
 // auto-compaction. Rooms open in the center pane from Plugins; the classic
 // Studio IDE stays at /studio.
 
-import { useCallback, useEffect, useMemo, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { Menu } from 'lucide-react';
 import { apiJson } from '../data/api';
 import { useJarvis } from '../jarvis/JarvisProvider';
@@ -27,6 +27,9 @@ import { GrokChat } from './GrokChat';
 import { BotPanel, type ChatMeta } from './BotPanel';
 import { AgentEditor } from './AgentEditor';
 import { CallOverlay } from '../voice/CallOverlay';
+import { useKonami } from '../theme/eggs';
+import { applyTheme } from '../theme/applyTheme';
+import { TAGLINE } from '../theme/voice';
 import { useAgents, reorderAgentIds, sameChatId, type Agent } from './agents';
 import { useChatHistory, type HistoryItem } from './history';
 import { OPEN_PANE_EVENT } from './messagePins';
@@ -101,10 +104,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const [editTarget, setEditTarget] = useState<Agent | undefined>(undefined);
   const [callTarget, setCallTarget] = useState<{ agent: Agent; settings: JarvisEngineSettings; repoPath: string } | null>(null);
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem('rivendell:theme', theme);
-  }, [theme]);
+  useEffect(() => { applyTheme(theme); }, [theme]);
   useEffect(() => { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); }, [view]);
   useEffect(() => { localStorage.setItem(PANE_KEY, String(paneOpen)); }, [paneOpen]);
   useEffect(() => {
@@ -129,6 +129,24 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [editorOpen, callTarget, isMobile, drawerOpen]);
   useEffect(() => { if (!isMobile) setDrawerOpen(false); }, [isMobile]);
+
+  // Easter eggs — presentation only. Konami regenerates every disc for a
+  // beat; an unknown room path gets a BAD WOLF toast. Neither touches a turn.
+  const [regen, setRegen] = useState(false);
+  const [eggToast, setEggToast] = useState<string | null>(null);
+  const toastEgg = useCallback((msg: string) => {
+    setEggToast(msg);
+    window.setTimeout(() => setEggToast(null), 2400);
+  }, []);
+  useKonami(useCallback(() => {
+    setRegen(true);
+    window.setTimeout(() => setRegen(false), 1400);
+    toastEgg(`Type 40 TT Capsule · ${TAGLINE}`);
+  }, [toastEgg]));
+  const badWolf = useRef(Boolean(initialRoom && !ROOMS[initialRoom]));
+  useEffect(() => {
+    if (badWolf.current) { badWolf.current = false; toastEgg('BAD WOLF'); }
+  }, [toastEgg]);
 
   // Land on the first agent (Chief of Staff) once the list loads, if the
   // persisted view points at a thread that no longer exists.
@@ -219,7 +237,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
 
   return (
     <StudioFilesContext.Provider value={fileActions}>
-      <div className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}`} data-theme={theme}>
+      <div className={`bot-app${railCollapsed ? ' rail-collapsed' : ''}${regen ? ' regen' : ''}`} data-theme={theme}>
         <BotRail
           collapsed={railCollapsed}
           onToggleCollapse={() => setRailCollapsed((c) => !c)}
@@ -281,7 +299,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               onMeta={onMeta}
             />
           ) : RoomView ? (
-            <div className="bt-room r-scroll">
+            <div className="bt-room r-scroll" key={activeRoom}>
               <div className="bt-room-wrap bt-fade">
                 <RoomView />
               </div>
@@ -314,7 +332,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
           onClose={() => setEditorOpen(false)}
           onSaved={(saved) => {
             reloadAgents();
-            // New agent (or engine change) → open its home thread.
+            // New companion (or engine change) → open its home thread.
             if (!editTarget || editTarget.engine !== saved.engine) {
               setView({ kind: 'chat', chatId: saved.home, lane: saved.engine });
             }
@@ -336,6 +354,7 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
             }
           }}
         />
+        {eggToast ? <div className="bt-toast" role="status">{eggToast}</div> : null}
       </div>
     </StudioFilesContext.Provider>
   );

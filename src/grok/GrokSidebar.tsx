@@ -8,10 +8,10 @@
 //   ────────────────────────────────────────────────
 //   Plugins · You
 //
-// [+] creates an agent (name/role/engine/scope). Every row = a teammate and
+// [+] creates a companion (name/role/engine/scope). Every row = a companion and
 // its ONE persistent forever-thread. Scratch threads surface via search only.
 
-import { useMemo, useRef, useState, useEffect } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import {
   Activity,
   PanelLeftClose,
@@ -32,6 +32,8 @@ import {
   Scroll,
   Search,
   Sun,
+  Volume2,
+  VolumeX,
   Workflow,
   X,
 } from 'lucide-react';
@@ -40,22 +42,25 @@ import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, type Agent
 import { useLive } from '../chat/hooks/useLive';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
+import { ROOM_NAMES } from '../data/roomNames';
+import { TIMEY_WIMEY } from '../theme/voice';
+import { readSound, useIdle, useTripleTap, vworp, writeSound } from '../theme/eggs';
 
 export type RoomEntry = { key: string; label: string; icon: React.ReactNode };
 
 export const ROOM_ENTRIES: RoomEntry[] = [
-  { key: 'council', label: 'Council', icon: <LayoutGrid size={16} /> },
-  { key: 'dashboard', label: 'Dashboard', icon: <Gauge size={16} /> },
-  { key: 'tidings', label: 'Tidings', icon: <Mail size={16} /> },
-  { key: 'calendar', label: 'Calendar', icon: <CalendarDays size={16} /> },
-  { key: 'hearth', label: 'Hearth', icon: <Heart size={16} /> },
-  { key: 'library', label: 'Library', icon: <BookOpen size={16} /> },
-  { key: 'pins', label: 'Pins', icon: <Pin size={16} /> },
-  { key: 'reckoning', label: 'Reckoning', icon: <Coins size={16} /> },
-  { key: 'forge', label: 'Forge', icon: <Hammer size={16} /> },
-  { key: 'weavings', label: 'Weavings', icon: <Workflow size={16} /> },
-  { key: 'annals', label: 'Annals', icon: <Scroll size={16} /> },
-  { key: 'scribe', label: 'Scribe', icon: <Activity size={16} /> },
+  { key: 'council', label: ROOM_NAMES.council.name, icon: <LayoutGrid size={16} /> },
+  { key: 'dashboard', label: ROOM_NAMES.dashboard.name, icon: <Gauge size={16} /> },
+  { key: 'tidings', label: ROOM_NAMES.tidings.name, icon: <Mail size={16} /> },
+  { key: 'calendar', label: ROOM_NAMES.calendar.name, icon: <CalendarDays size={16} /> },
+  { key: 'hearth', label: ROOM_NAMES.hearth.name, icon: <Heart size={16} /> },
+  { key: 'library', label: ROOM_NAMES.library.name, icon: <BookOpen size={16} /> },
+  { key: 'pins', label: ROOM_NAMES.pins.name, icon: <Pin size={16} /> },
+  { key: 'reckoning', label: ROOM_NAMES.reckoning.name, icon: <Coins size={16} /> },
+  { key: 'forge', label: ROOM_NAMES.forge.name, icon: <Hammer size={16} /> },
+  { key: 'weavings', label: ROOM_NAMES.weavings.name, icon: <Workflow size={16} /> },
+  { key: 'annals', label: ROOM_NAMES.annals.name, icon: <Scroll size={16} /> },
+  { key: 'scribe', label: ROOM_NAMES.scribe.name, icon: <Activity size={16} /> },
 ];
 
 export type ActiveChat = { chatId: string; cli?: string; repo?: string };
@@ -103,6 +108,19 @@ export function BotRail(props: BotRailProps) {
   const [dropBefore, setDropBefore] = useState<string | null>(null);
   const pluginsRef = useRef<HTMLDivElement | null>(null);
   const live = useLive();
+
+  // Easter eggs — presentation only. "Don't blink." after ten idle minutes
+  // (never while any lane is busy), a lamp flash on a triple tap of the mark,
+  // and an opt-in synthesised vworp. None of these touch a turn.
+  const idle = useIdle(600_000);
+  const anyBusy = live.some((s) => s.busy);
+  const [sound, setSound] = useState(readSound);
+  const [lampFlash, setLampFlash] = useState(false);
+  const onLampTap = useTripleTap(useCallback(() => {
+    setLampFlash(true);
+    window.setTimeout(() => setLampFlash(false), 900);
+    if (readSound()) vworp();
+  }, []));
 
   useEffect(() => {
     if (!pluginsOpen) return;
@@ -211,7 +229,7 @@ export function BotRail(props: BotRailProps) {
   return (
     <aside className={`bt-rail${props.drawerOpen ? ' drawer-open' : ''}`}>
       <div className="bt-rail-head">
-        <button className="bt-mark-btn" onClick={props.onHome} title="Rivendell home" aria-label="Rivendell home">
+        <button className={`bt-mark-btn${lampFlash ? ' flash' : ''}`} onClick={() => { props.onHome(); onLampTap(); }} title="TARDIS home" aria-label="TARDIS home">
           <BotMark size={26} />
         </button>
         <div style={{ display: 'flex', gap: 4 }}>
@@ -225,7 +243,7 @@ export function BotRail(props: BotRailProps) {
               <X size={17} />
             </button>
           ) : null}
-          <button className="bt-iconbtn" onClick={props.onNewAgent} title="New agent" aria-label="New agent">
+          <button className="bt-iconbtn" onClick={props.onNewAgent} title="New companion" aria-label="New companion">
             <Plus size={18} />
           </button>
         </div>
@@ -237,7 +255,7 @@ export function BotRail(props: BotRailProps) {
           <input
             value={query}
             placeholder="Search"
-            aria-label="Search agents and chats"
+            aria-label="Search companions and chats"
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Escape') setQuery(''); }}
           />
@@ -246,7 +264,7 @@ export function BotRail(props: BotRailProps) {
 
       <div className="bt-rail-scroll">
         {pins.length && !query.trim() ? (
-          <div className="bt-pins" role="group" aria-label="Pinned agents">
+          <div className="bt-pins" role="group" aria-label="Pinned companions">
             {pins.map((a) => {
               const isActive = props.activeChat && sameChatId(props.activeChat.chatId, a.home);
               const url = agentAvatarUrl(a);
@@ -311,7 +329,7 @@ export function BotRail(props: BotRailProps) {
                       {a.name} <span className="bt-role-chip">{a.role}</span>
                     </span>
                     {a.unread ? <span className="bt-unread" title={`${a.unread} waiting`}>{a.unread > 9 ? '9+' : a.unread}</span> : null}
-                    {r.item ? <span className="bt-conv-day">{dayStamp(r.item.updatedAt)}</span> : null}
+                    {r.item ? <span className="bt-conv-day" title={`${new Date(r.item.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(r.item.updatedAt)}</span> : null}
                     <span
                       className="bt-row-edit"
                       role="button"
@@ -344,7 +362,7 @@ export function BotRail(props: BotRailProps) {
               <span className="bt-conv-main">
                 <span className="bt-conv-top">
                   <span className="bt-conv-title">{it.title}</span>
-                  <span className="bt-conv-day">{dayStamp(it.updatedAt)}</span>
+                  <span className="bt-conv-day" title={`${new Date(it.updatedAt).toLocaleString()} · ${TIMEY_WIMEY}`}>{dayStamp(it.updatedAt)}</span>
                 </span>
                 <span className="bt-conv-sub">{it.preview ?? it.cli}</span>
               </span>
@@ -353,7 +371,7 @@ export function BotRail(props: BotRailProps) {
         })}
         {!rows.length ? (
           <div className="bt-pane-empty">
-            {query ? 'No matches.' : pins.length ? 'Everyone is pinned up top — drag them back anytime.' : 'No agents yet — create one with +.'}
+            {query ? 'No matches.' : pins.length ? 'Everyone is pinned up top — drag them back anytime.' : 'No companions yet — add one with +.'}
           </div>
         ) : null}
         {dragId && props.agents.length ? (
@@ -379,7 +397,10 @@ export function BotRail(props: BotRailProps) {
               <AppWindow size={16} /> Studio IDE
             </button>
             <button className="bt-plug-row" onClick={() => { props.onToggleTheme(); setPluginsOpen(false); }}>
-              {props.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {props.theme === 'dark' ? 'Light mode' : 'Dark mode'}
+              {props.theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />} {props.theme === 'dark' ? 'Classic console (light)' : 'Console room (dark)'}
+            </button>
+            <button className="bt-plug-row" onClick={() => { const next = !sound; setSound(next); writeSound(next); if (next) vworp(); }} aria-pressed={sound}>
+              {sound ? <Volume2 size={16} /> : <VolumeX size={16} />} Sound {sound ? 'on' : 'off'}
             </button>
             <NativeOpenHelper />
           </div>
@@ -387,9 +408,10 @@ export function BotRail(props: BotRailProps) {
         <button className="bt-foot-row" onClick={() => setPluginsOpen((o) => !o)} aria-haspopup="menu" aria-expanded={pluginsOpen}>
           <Plug size={17} /> Plugins
         </button>
-        <button className="bt-foot-row" title="Rivendell operator">
+        <button className="bt-foot-row" title="The Doctor">
           <span className="bt-disc">Y</span> You
         </button>
+        {idle && !anyBusy && !props.drawerOpen ? <div className="tardis-blink" aria-hidden="true">Don't blink.</div> : null}
       </div>
     </aside>
   );

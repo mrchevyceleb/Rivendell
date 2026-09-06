@@ -1,7 +1,7 @@
 // Shared building blocks for the reimagined chat thread, used by BOTH the
 // desktop (Conversation) and mobile (Mobile) screens. These render the real
-// ChatBlock stream from useChat into the LOTR "Elrond speaks on the page"
-// anatomy defined in the approved prototypes (§3.3 – §3.8).
+// ChatBlock stream from useChat into the "ship speaks on the page" anatomy
+// defined in the approved prototypes (§3.3 – §3.8).
 
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -12,11 +12,7 @@ import { DocLinkCard } from '../blocks/DocLinkCard';
 import { FolderLinkCard } from '../blocks/FolderLinkCard';
 import { ChevronDown, StarSigil } from './icons';
 import { isAutomationPeer, isNoopToken, shouldHideAutomationTurn } from '../../utils/routineNoise';
-
-const PHRASES = ['Elrond ponders', 'consulting the scrolls', 'weighing the words of the Wise', 'reading the stars'];
-
-// Grok shell passes its own quiet phrases ('Thinking', …); the Studio keeps
-// the elvish defaults.
+import { BRAND, REGEN_QUOTES, THINKING_PHRASES, TIMEY_WIMEY } from '../../../theme/voice';
 
 export function timeLabel(ts: number): string {
   const d = new Date(ts);
@@ -37,56 +33,13 @@ function dayLabel(ts: number): string {
 // ── day mark (centered italic serif between gold hairlines) ───────────────
 export function DayMark({ label }: { label: string }) {
   return (
-    <div className="daymark">
+    <div className="daymark" title={label === 'Today' || label === 'Yesterday' ? TIMEY_WIMEY : undefined}>
       <span>{label}</span>
     </div>
   );
 }
 
-// ── thinking indicator — §3.4 (spinning star, rotating phrase, hopping dots)
-export function ThinkingIndicator({ phrases = PHRASES }: { phrases?: string[] }) {
-  const [i, setI] = useState(0);
-  const [fade, setFade] = useState(1);
-  useEffect(() => {
-    const iv = window.setInterval(() => {
-      setFade(0);
-      window.setTimeout(() => {
-        setI((n) => (n + 1) % phrases.length);
-        setFade(1);
-      }, 280);
-    }, 1700);
-    return () => window.clearInterval(iv);
-  }, [phrases.length]);
-  return (
-    <div className="think">
-      <StarSigil className="spin" />
-      <span className="ph" style={{ opacity: fade }}>
-        {phrases[i]}
-      </span>
-      <span className="dots">
-        <span />
-        <span />
-        <span />
-      </span>
-    </div>
-  );
-}
-
-/** SMS-style typing bubble: three bouncing dots in an agent-colored card,
- *  shown the moment a turn is busy — covers the cold-resume silence before
- *  any stream event lands (the old indicator never rendered in that gap
- *  whenever a stale open block suppressed it). */
-export function TypingBubble() {
-  return (
-    <div className="typing-bubble" role="status" aria-label="Agent is typing">
-      <span />
-      <span />
-      <span />
-    </div>
-  );
-}
-
-function ActiveTurnIndicator({ since }: { since?: number }) {
+function ActiveTurnIndicator({ since, phrases }: { since?: number; phrases: string[] }) {
   const hasKnownStart = Boolean(since && since > 0);
   const startedAtRef = useRef(hasKnownStart ? since as number : Date.now());
   const [now, setNow] = useState(Date.now());
@@ -98,14 +51,14 @@ function ActiveTurnIndicator({ since }: { since?: number }) {
   }, [since]);
   const elapsed = Math.max(0, now - startedAtRef.current);
   const seconds = Math.floor(elapsed / 1000);
-  const label = Math.floor(elapsed / 2800) % 2 === 0 ? 'Working' : 'Thinking';
+  const label = phrases[Math.floor(elapsed / 2800) % phrases.length] ?? 'Working';
   const clock = hasKnownStart
     ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
     : 'live';
   return (
     <div className="active-turn" role="status" aria-label="Agent is still working">
-      <StarSigil className="active-turn-star" aria-hidden="true" />
-      <span className="active-turn-label" aria-hidden="true">{label}</span>
+      <span className="vortex active-turn-star" aria-hidden="true" />
+      <span key={label} className="active-turn-label bt-fade" aria-hidden="true">{label}</span>
       <span className="active-turn-dots" aria-hidden="true"><i /><i /><i /></span>
       <span className="active-turn-time" aria-hidden="true">{clock}</span>
     </div>
@@ -124,8 +77,8 @@ function TurnCompleteIndicator() {
 function ConnectionStateIndicator({ reconnecting }: { reconnecting: boolean }) {
   return (
     <div className="connection-state" role="status">
-      <StarSigil className="connection-state-star" aria-hidden="true" />
-      <span>{reconnecting ? 'Reconnecting…' : 'Connection interrupted'}</span>
+      <span className="vortex connection-state-star" aria-hidden="true" />
+      <span>{reconnecting ? 'Re-materialising…' : 'Dematerialised'}</span>
     </div>
   );
 }
@@ -270,7 +223,7 @@ export function ToolCard({ block }: { block: Extract<ChatBlock, { kind: 'tool' }
   return (
     <div className={`tool ${block.running ? 'running' : 'done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)}>
-        <StarSigil className="tstar" />
+        {block.running ? <span className="vortex tstar" aria-hidden="true" /> : <StarSigil className="tstar" />}
         <span className="tool-title">{block.tool}</span>
         <span className="tool-meta">{meta}</span>
         <ChevronDown className="tool-chev" />
@@ -404,12 +357,20 @@ function PeerBubble({
   );
 }
 
+// Regeneration: same agent, new face. Rolling compaction and a mid-turn
+// service restart both rotate the model context while the thread survives.
+// The quote is seeded per block so replays never reshuffle it.
+const regenQuote = (seed: number) => REGEN_QUOTES[Math.abs(Math.floor(seed)) % REGEN_QUOTES.length];
+
 function CompactDivider({ block }: { block: Extract<ChatBlock, { kind: 'compact' }> }) {
   const words = block.words >= 1000 ? `${(block.words / 1000).toFixed(1)}k` : block.words;
   return (
-    <div className="compact-mark" title={`Auto-compaction #${block.count}: durable memory document (${block.words} words) generated from ${block.turns} turns${block.savedToRag ? ' and saved to the RAG vault' : ''}. The thread continues losslessly.`}>
+    <div className="compact-mark regen-mark" title={`Regeneration #${block.count}: durable memory document (${block.words} words) generated from ${block.turns} turns${block.savedToRag ? ' and saved to the RAG vault' : ''}. Same agent, same thread — only the model context rotated.`}>
       <span className="compact-line" />
-      <span className="compact-label">Memory compacted · {words} words{block.savedToRag === false ? '' : ' · saved to RAG'}</span>
+      <span className="compact-label">
+        Regeneration · {words} words banked{block.savedToRag === false ? '' : ' · saved to RAG'}
+        <em className="regen-quote">“{regenQuote(block.count)}”</em>
+      </span>
       <span className="compact-line" />
     </div>
   );
@@ -417,9 +378,12 @@ function CompactDivider({ block }: { block: Extract<ChatBlock, { kind: 'compact'
 
 function RestartDivider({ block }: { block: Extract<ChatBlock, { kind: 'restart' }> }) {
   return (
-    <div className="compact-mark restart-mark" title="Rivendell restarted while a turn was running — the in-flight tool call's output was lost with the process. Ask the agent to re-check the work.">
+    <div className="compact-mark regen-mark restart-mark" title={`${BRAND} restarted while a turn was running — the in-flight tool call's output was lost with the process. Ask the companion to re-check the work.`}>
       <span className="compact-line" />
-      <span className="compact-label">Service restarted mid-turn</span>
+      <span className="compact-label">
+        Regeneration · service restarted mid-turn
+        <em className="regen-quote">“{regenQuote(block.ts)}”</em>
+      </span>
       <span className="compact-line" />
     </div>
   );
@@ -555,7 +519,7 @@ function ToolsCard({ blocks }: { blocks: ToolBlock[] }) {
   return (
     <div className={`tool tools-run${running ? ' running' : ' done'}${open ? ' open' : ''}`}>
       <button type="button" className="tool-head" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <StarSigil className="tstar" />
+        {running ? <span className="vortex tstar" aria-hidden="true" /> : <StarSigil className="tstar" />}
         <span className="tool-title">{blocks.length} tool calls</span>
         <span className="tool-meta">{running && oldestRunning ? <RunningMeta since={oldestRunning.ts} /> : 'done'}</span>
         <ChevronDown className="tool-chev" />
@@ -599,7 +563,7 @@ function showTextCaret(b: Extract<ChatBlock, { kind: 'text' }>, streaming: boole
  *  hidden thinking. Provider reasoning uses a distinct `thinking` block, while
  *  tool calls already have their own collapsible cards. */
 // A run of consecutive assistant blocks that share a turnId render under a
-// single "✦ Elrond" header (the prototype's per-turn group).
+// single "✦ TARDIS" header (the prototype's per-turn group).
 function ElrondGroup({
   blocks,
   streaming,
@@ -649,7 +613,7 @@ function ElrondGroup({
       onClick={mobile ? () => setActed((a) => !a) : undefined}
     >
       <div className="who">
-        <span className="mini">✦</span> Elrond <span className="when">{timeLabel(first.ts)}</span>
+        <span className="mini">✦</span> {BRAND} <span className="when">{timeLabel(first.ts)}</span>
       </div>
       {blocks.map((b) => {
         switch (b.kind) {
@@ -698,14 +662,12 @@ export type ChatThreadProps = {
   bottomRef?: React.Ref<HTMLDivElement>;
   mobile?: boolean;
   noteUnread?: () => void;
-  /** Grok shell overrides the elvish thinking phrases. */
+  /** Rotating working phrases for the live-turn pill (defaults to the ship's). */
   phrases?: string[];
   /** Grok shell: combine consecutive tool calls into compact expandable cards. */
   collapseSteps?: boolean;
   /** Grok shell: persist pin into the focused agent's right-pane pocket. */
   pin?: ThreadPin;
-  /** Grok shell: SMS-style typing bubble instead of the star indicator. */
-  typingBubble?: boolean;
   /** Suppress the typing indicator entirely (silent automation turn running). */
   suppressTyping?: boolean;
   /** Wall-clock start of the active turn, used for visible proof-of-life time. */
@@ -713,9 +675,9 @@ export type ChatThreadProps = {
 };
 
 // Renders the full feed: day marks on day changes, user bubbles, per-turn
-// Elrond groups (tool cards + streaming prose), and the thinking indicator
+// assistant groups (tool cards + streaming prose), and the live-turn pill
 // while a turn is live but no content has landed yet.
-export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases, collapseSteps = false, pin, typingBubble = false, suppressTyping = false, workingSince }: ChatThreadProps) {
+export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = false, phrases = THINKING_PHRASES, collapseSteps = false, pin, suppressTyping = false, workingSince }: ChatThreadProps) {
   const streaming = status === 'streaming';
   // The indicator lives until something VISIBLE lands in the CURRENT turn.
   // Looking across the whole transcript made any historical terminal-error or
@@ -912,7 +874,7 @@ export function ChatThread({ blocks, status, contentRef, bottomRef, mobile = fal
     // Never make the user infer liveness from a Stop button. Keep one animated
     // proof-of-life row visible for the ENTIRE turn, even after user-facing
     // prose or completed tool cards have appeared.
-    nodes.push(<ActiveTurnIndicator key="active-turn" since={workingSince} />);
+    nodes.push(<ActiveTurnIndicator key="active-turn" since={workingSince} phrases={phrases} />);
   } else if (!latestQueued && status === 'ready' && hasAssistantAfterLastUser && !hasCurrentTerminalFailure) {
     // Absence of animation must mean something explicit. This permanent,
     // low-emphasis terminal marker distinguishes "finished" from "stalled".

@@ -356,10 +356,10 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
   };
 
   return (
-    <div className="bt-legal-scrim" onClick={onClose} role="dialog" aria-modal="true" aria-label={agent ? 'Edit agent' : 'New agent'}>
+    <div className="bt-legal-scrim" onClick={onClose} role="dialog" aria-modal="true" aria-label={agent ? 'Edit companion' : 'New companion'}>
       <div className="bt-agent-editor bt-fade" onClick={(e) => e.stopPropagation()}>
         <div className="bt-agent-editor-head">
-          <span className="bt-agent-editor-title">{agent ? `Edit ${agent.name}` : 'New agent'}</span>
+          <span className="bt-agent-editor-title">{agent ? `Edit ${agent.name}` : 'New companion'}</span>
           <button className="bt-iconbtn" onClick={onClose} aria-label="Close" title="Close (Esc)">
             <X size={16} />
           </button>
@@ -459,7 +459,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
         </div>
 
         {agent ? (
-          <label className="bt-agent-pinrow" title="Pinned agents show as bubbles at the top of the sidebar">
+          <label className="bt-agent-pinrow" title="Pinned companions show as bubbles at the top of the sidebar">
             <input type="checkbox" checked={pinned} onChange={(e) => setPinned(e.target.checked)} />
             <span>Pin to top — show as a bubble above the list</span>
           </label>

@@ -114,7 +114,7 @@ function ContextMenu({
     <div ref={ref} className="studio-ctx" style={{ left: menu.x, top: menu.y }}>
       {menu.node.type === 'file' && (
         <button className="ctx-item" onClick={() => { onAskElrond(menu.node.path); onClose(); }}>
-          <MessageSquare size={13} /> Ask Elrond
+          <MessageSquare size={13} /> Ask TARDIS
         </button>
       )}
       {menu.node.type === 'directory' && (
@@ -475,7 +475,7 @@ export function FileTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revealPath, revealNonce]);
 
-  // Live-refetch when Elrond changes the tree (not our own human writes).
+  // Live-refetch when TARDIS changes the tree (not our own human writes).
   const { events } = useScribeSocket();
   const lastEventRef = useRef<typeof events[number] | null>(null);
   useEffect(() => {

@@ -74,12 +74,12 @@ export function NativeOpenHelper() {
                 <pre className="native-open-cmd">{'powershell -ExecutionPolicy Bypass -File .\\install-rivendell-handler.ps1'}</pre>
               </li>
               <li>
-                Reopen Rivendell. Agent web links now use your default browser; workspace links
+                Reopen TARDIS. Agent web links now use your default browser; workspace links
                 use their default apps. The first click may show a one-time confirmation dialog.
               </li>
             </ol>
             <p className="native-open-hint">
-              <ExternalLink size={12} /> If the helper stops responding, Rivendell resets this setting
+              <ExternalLink size={12} /> If the helper stops responding, TARDIS resets this setting
               and opens that click normally so links never become dead ends.
             </p>
             <button

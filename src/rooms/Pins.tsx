@@ -8,6 +8,7 @@ import { apiJson } from '../data/api';
 import type { PinItem } from '../data/types';
 import { usePins } from '../hooks/useRoomData';
 import { timeAgo } from '../utils/format';
+import { ROOM_NAMES } from '../data/roomNames';
 
 type PinDraft = {
   title: string;
@@ -147,7 +148,7 @@ export function Pins() {
   return (
     <div className="room-scroll r-scroll pins-room">
       <RoomHeader
-        eyebrow="Pins"
+        eyebrow={ROOM_NAMES.pins.eyebrow}
         title="Quick note saves"
         subtitle={`${pins.length} pins at hand${pinnedCount ? ` · ${pinnedCount} pinned` : ''}.`}
         actions={

@@ -4,6 +4,7 @@ import { Button, Chip, EmptyState } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import type { CalendarEvent } from '../data/types';
 import { useCalendarEvents } from '../hooks/useRoomData';
+import { ROOM_NAMES } from '../data/roomNames';
 
 type CalendarAccount = 'primary' | 'workspace2';
 type CalendarFilter = CalendarAccount | 'all';
@@ -116,7 +117,7 @@ export function Calendar() {
       } as CSSProperties}
     >
       <aside className="room-rail calendar-rail r-scroll">
-        <p className="r-eyebrow-gold">Calendar</p>
+        <p className="r-eyebrow-gold">{ROOM_NAMES.calendar.name}</p>
         <h2>Schedule</h2>
 
         <CalendarAccountFilters
@@ -137,7 +138,7 @@ export function Calendar() {
 
       <section className="room-scroll r-scroll">
         <RoomHeader
-          eyebrow="Calendar"
+          eyebrow={ROOM_NAMES.calendar.eyebrow}
           title={`${visibleEvents.length} events from ${filterLabel}`}
           subtitle={subtitle}
           actions={

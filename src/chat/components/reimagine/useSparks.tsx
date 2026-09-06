@@ -1,12 +1,22 @@
-// Gold ✦ spark bursts for the reimagined chat easter eggs (§3.9): sigil click
-// fires a radial burst, and sending exactly "mellon" fires one from the send
-// button. Returns the rendered sparks (absolutely positioned, self-removing)
-// plus a `burst(x, y)` imperative trigger.
+// Spark bursts for the easter eggs: the sigil tap fires a radial burst, and a
+// bare trigger phrase (allons-y, geronimo, fantastic, mellon) fires one from
+// the send button. Particles are vortex-coloured motes with the odd tiny
+// police box mixed in. Returns the rendered sparks (fixed-position,
+// self-removing) plus a `burst(x, y)` imperative trigger.
 
 import { useCallback, useState } from 'react';
-import { StarSigil } from './icons';
+import { BotMark } from '../../../grok/GrokLogo';
 
-type Spark = { id: number; x: number; y: number; fx: number; fy: number; dur: number };
+type Spark = {
+  id: number;
+  x: number;
+  y: number;
+  fx: number;
+  fy: number;
+  dur: number;
+  kind: 'mote' | 'box';
+  hue: 0 | 1 | 2;
+};
 
 export function useSparks() {
   const [sparks, setSparks] = useState<Spark[]>([]);
@@ -14,15 +24,17 @@ export function useSparks() {
 
   const burst = useCallback((x: number, y: number) => {
     const next: Spark[] = [];
-    for (let i = 0; i < 10; i++) {
-      const a = (Math.PI * 2 * i) / 10 + Math.random() * 0.5;
+    for (let i = 0; i < 14; i++) {
+      const a = (Math.PI * 2 * i) / 14 + Math.random() * 0.5;
       next.push({
         id: seq.n++,
         x,
         y,
-        fx: Math.cos(a) * (34 + Math.random() * 40),
-        fy: Math.sin(a) * (34 + Math.random() * 40),
+        fx: Math.cos(a) * (34 + Math.random() * 44),
+        fy: Math.sin(a) * (34 + Math.random() * 44),
         dur: 0.6 + Math.random() * 0.5,
+        kind: i % 4 === 3 ? 'box' : 'mote',
+        hue: (i % 3) as 0 | 1 | 2,
       });
     }
     setSparks((prev) => [...prev, ...next]);
@@ -33,7 +45,7 @@ export function useSparks() {
       {sparks.map((s) => (
         <span
           key={s.id}
-          className="spark"
+          className={`spark spark-${s.kind} spark-h${s.hue}`}
           style={{
             left: s.x,
             top: s.y,
@@ -43,7 +55,7 @@ export function useSparks() {
           } as React.CSSProperties}
           onAnimationEnd={() => setSparks((prev) => prev.filter((p) => p.id !== s.id))}
         >
-          <StarSigil />
+          {s.kind === 'box' ? <BotMark size={12} lamp={false} /> : null}
         </span>
       ))}
     </>

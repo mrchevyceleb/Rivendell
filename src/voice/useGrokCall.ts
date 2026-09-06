@@ -1,4 +1,4 @@
-// useGrokCall — a live xAI realtime voice call with a Rivendell agent.
+// useGrokCall — a live xAI realtime voice call with a TARDIS agent.
 // Mic (16 kHz worklet) → /ws/voice → Grok; Grok's 24 kHz PCM deltas → the
 // playback queue. iPhone-call semantics: barge-in, server VAD, mid-call
 // voice swap, duration clock, transcript.

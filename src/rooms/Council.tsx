@@ -8,12 +8,13 @@ import { apiJson } from '../data/api';
 import type { Task } from '../data/types';
 import { useTasks } from '../hooks/useRoomData';
 import { statusLabel } from '../utils/format';
+import { ROOM_NAMES } from '../data/roomNames';
 
 const columns: Array<{ key: Task['status']; title: string; detail: string }> = [
   { key: 'horizon', title: 'On the Horizon', detail: 'Upcoming' },
   { key: 'in_hand', title: 'In Hand', detail: 'Owned by you' },
   { key: 'in_progress', title: 'In Progress', detail: 'Actively working' },
-  { key: 'delegated', title: "In Council's Care", detail: 'With Elrond' },
+  { key: 'delegated', title: 'With the TARDIS', detail: 'Delegated' },
   { key: 'done', title: 'Done', detail: 'Closed' },
 ];
 
@@ -164,7 +165,7 @@ export function Council() {
   return (
     <div className="room-scroll r-scroll">
       <RoomHeader
-        eyebrow="The Council"
+        eyebrow={ROOM_NAMES.council.eyebrow}
         title="Tasks and decisions"
         subtitle={`${openCount} open matters across the board${doneCount ? ` · ${doneCount} done` : ''}.`}
         actions={
@@ -369,11 +370,11 @@ export function Council() {
                           <button
                             type="button"
                             className="task-action-btn"
-                            title="Send to Elrond"
+                            title="Send to TARDIS"
                             onClick={() => void move(task.id, 'delegated', boardTasks.filter((item) => item.status === 'delegated').length)}
                           >
                             <Sparkles size={12} />
-                            <span>Elrond</span>
+                            <span>TARDIS</span>
                           </button>
                         ) : null}
                       </div>

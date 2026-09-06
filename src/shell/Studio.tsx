@@ -34,7 +34,7 @@ import './studio/studio.css';
 
 function readTabs(): { tabs: StudioTab[]; active: string } {
   const fallback = (): { tabs: StudioTab[]; active: string } => {
-    const tab: StudioTab = { id: 'chat:studio-main', kind: 'chat', chatId: 'studio-main', title: 'Elrond' };
+    const tab: StudioTab = { id: 'chat:studio-main', kind: 'chat', chatId: 'studio-main', title: 'TARDIS' };
     return { tabs: [tab], active: tab.id };
   };
   try {
@@ -121,7 +121,7 @@ export function Studio() {
   const assistantHubRepo = repos.find((r) => r.isAssistantHub) ?? repos[0];
   const { data: treeData } = useWorkspaceTree();
 
-  // Registry of live chat send() fns, keyed by chatId, plus pending "Ask Elrond" sends.
+  // Registry of live chat send() fns, keyed by chatId, plus pending "Ask TARDIS" sends.
   const chatApis = useRef<Map<string, ChatTabApi>>(new Map());
   const pendingAsk = useRef<Map<string, string>>(new Map());
 
@@ -197,7 +197,7 @@ export function Studio() {
     setReveal({ path: normalizedPath, n: ++revealSeq.current });
   }, []);
 
-  // Actions chat (and link cards) call to open workspace links inside Rivendell.
+  // Actions chat (and link cards) call to open workspace links inside TARDIS.
   const fileActions = useMemo<StudioFileActions>(() => ({
     openFile: (path: string, name?: string) => {
       const normalizedPath = normalizeWorkspacePath(path);
@@ -210,7 +210,7 @@ export function Studio() {
   const openChatTab = useCallback(() => {
     const chatId = `studio-${Date.now()}-${chatSeq++}`;
     const id = `chat:${chatId}`;
-    setTabs((prev) => [...prev, { id, kind: 'chat', chatId, title: 'Elrond' }]);
+    setTabs((prev) => [...prev, { id, kind: 'chat', chatId, title: 'TARDIS' }]);
     setActive(id);
     return chatId;
   }, []);
@@ -269,7 +269,7 @@ export function Studio() {
       if (idx < 0) return prev;
       const next = prev.filter((t) => t.id !== id);
       if (next.length === 0) {
-        const tab: StudioTab = { id: 'chat:studio-main', kind: 'chat', chatId: 'studio-main', title: 'Elrond' };
+        const tab: StudioTab = { id: 'chat:studio-main', kind: 'chat', chatId: 'studio-main', title: 'TARDIS' };
         setActive(tab.id);
         return [tab];
       }
@@ -305,7 +305,7 @@ export function Studio() {
     setDirtyById((prev) => (prev[id] === dirty ? prev : { ...prev, [id]: dirty }));
   }, []);
 
-  // ── Ask Elrond about a file: route to an existing chat tab, or open one ──
+  // ── Ask TARDIS about a file: route to an existing chat tab, or open one ──
   const askElrond = useCallback((path: string) => {
     const message = `Please open and review \`ASSISTANT-HUB/${path}\`.`;
     setTabs((prev) => {
@@ -323,7 +323,7 @@ export function Studio() {
       const id = `chat:${chatId}`;
       pendingAsk.current.set(chatId, message);
       setActive(id);
-      return [...prev, { id, kind: 'chat', chatId, title: 'Elrond' }];
+      return [...prev, { id, kind: 'chat', chatId, title: 'TARDIS' }];
     });
   }, [active]);
 
@@ -350,8 +350,8 @@ export function Studio() {
         {/* ── Top bar ── */}
         <header className="studio-topbar">
           <div className="studio-brand">
-            <Evenstar size={22} color="var(--r-gold)" glow />
-            <strong>Rivendell</strong>
+            <Evenstar size={22} color="var(--r-tardis-lit)" glow />
+            <strong>TARDIS</strong>
           </div>
 
           <button
@@ -420,8 +420,8 @@ export function Studio() {
               <button
                 className="studio-newchat-btn"
                 onClick={openChatTab}
-                title="New chat with Elrond"
-                aria-label="New chat with Elrond"
+                title="New chat with TARDIS"
+                aria-label="New chat with TARDIS"
               >
                 <MessageSquarePlus size={18} />
               </button>
@@ -475,7 +475,7 @@ export function Studio() {
                 <Aperture size={16} />
                 {jarvis.wakeActive && <span className="jarvis-summon-dot" />}
               </button>
-              <button onClick={openChatTab} title="New chat with Elrond"><MessageSquarePlus size={16} /></button>
+              <button onClick={openChatTab} title="New chat with TARDIS"><MessageSquarePlus size={16} /></button>
               <button onClick={openCouncilTab} title="Open Council (task kanban)"><LayoutGrid size={16} /></button>
               <button onClick={openForgeTab} title="Open Forge (cron & deploy)"><Hammer size={16} /></button>
               <span className="studio-zoom">
@@ -534,7 +534,7 @@ export function Studio() {
         <footer className="studio-statusbar">
           <span className="studio-status-left">
             <span className="r-pulse-dot green" />
-            Elrond awake
+            TARDIS online
             <span className="studio-status-sep">·</span>
             {treeData?.displayPath ?? '~/ASSISTANT-HUB'}
           </span>

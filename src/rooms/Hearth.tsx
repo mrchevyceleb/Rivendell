@@ -4,6 +4,7 @@ import { apiJson } from '../data/api';
 import { Button, Chip, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { useFamily } from '../hooks/useRoomData';
+import { ROOM_NAMES } from '../data/roomNames';
 
 const areaTone = {
   todo: 'gold',
@@ -28,7 +29,7 @@ export function Hearth() {
   return (
     <div className="room-scroll r-scroll">
       <RoomHeader
-        eyebrow="The Hearth"
+        eyebrow={ROOM_NAMES.hearth.eyebrow}
         title="Family and home"
         subtitle="Todos, bills, debts, budget notes, and meal plans."
         actions={

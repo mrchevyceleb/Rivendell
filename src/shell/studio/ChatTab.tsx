@@ -6,7 +6,7 @@ import type { Repo } from '../../chat/data/types';
 
 export function companionAgentLabel(cli: string): string {
   switch (cli) {
-    case 'assistant': return 'Elrond';
+    case 'assistant': return 'TARDIS';
     case 'claude': return 'Claude Code';
     case 'codex': return 'Codex';
     case 'banana': return 'OpenRouter';
@@ -43,7 +43,7 @@ export function ChatTab({
     selectionRevision: picker.selectionRevision,
   });
 
-  // Publish this tab's send() so the shell (file "Ask Elrond", tree) can reach it.
+  // Publish this tab's send() so the shell (file "Ask TARDIS", tree) can reach it.
   useEffect(() => {
     registerApi(chatId, { send: chat.send, companionLabel: companionAgentLabel(picker.cli) });
     return () => registerApi(chatId, null);

@@ -5,6 +5,7 @@ import './index.css';
 import './chat/chat-theme.css';
 import './chat/chat-reimagine.css';
 import './grok/grok.css';
+import './theme/eggs.css';
 import App from './App';
 
 createRoot(document.getElementById('root')!).render(
@@ -13,7 +14,7 @@ createRoot(document.getElementById('root')!).render(
   </StrictMode>,
 );
 
-// Rivendell ships no service worker. The old PWA-only one registered a no-op
+// TARDIS ships no service worker. The old PWA-only one registered a no-op
 // `fetch` handler, which browsers flag as dead weight on every navigation, and
 // it bought nothing: it cached neither the shell nor any API response. Retire
 // whatever is still installed on clients that picked it up.
@@ -26,7 +27,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// A long-lived Rivendell tab used to stay on its already-loaded JavaScript
+// A long-lived TARDIS tab used to stay on its already-loaded JavaScript
 // forever after a local deploy. That made fixes appear broken even though the
 // server was serving a new hashed bundle. Revalidate the shell on wake/focus
 // and periodically; reload only when its entry asset actually changed. Defer

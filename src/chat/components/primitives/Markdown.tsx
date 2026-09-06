@@ -97,7 +97,7 @@ function MarkdownCode(props: any) {
           onClick={onClick}
           className="sw-md-proxy-link sw-md-proxy-code-link"
           data-proxy-kind={inlineTarget.kind}
-          title={inlineTarget.kind === 'folder' ? 'Reveal in Rivendell' : 'Open in Rivendell'}
+          title={inlineTarget.kind === 'folder' ? 'Reveal in TARDIS' : 'Open in TARDIS'}
         >
           <code style={INLINE_CODE_STYLE}>{inlineTarget.display}</code>
         </a>

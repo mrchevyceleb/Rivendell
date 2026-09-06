@@ -1,0 +1,44 @@
+/* ============================================================
+   TARDIS easter eggs — presentation only. Loaded after grok.css so these
+   win the cascade inside the bot shell.
+   ============================================================ */
+
+/* spark bursts: vortex motes + tiny police boxes (allons-y / geronimo /
+   fantastic / mellon, and the sigil tap) */
+.rc .spark { width: 6px; height: 6px; }
+.rc .spark-mote { border-radius: 50%; background: currentColor; box-shadow: 0 0 6px currentColor; }
+.rc .spark-box { width: 12px; height: 12px; background: none; box-shadow: none; }
+.rc .spark-h0 { color: color-mix(in oklch, var(--r-vortex-1) 55%, white); }
+.rc .spark-h1 { color: color-mix(in oklch, var(--r-vortex-2) 70%, white); }
+.rc .spark-h2 { color: var(--r-elf-glow); }
+
+/* Konami: every companion regenerates once — a golden flare on the discs */
+@keyframes tardis-regen {
+  0%   { box-shadow: 0 0 0 0 transparent; filter: brightness(1); }
+  30%  { box-shadow: 0 0 18px 4px color-mix(in oklch, var(--r-elf-glow) 75%, transparent); filter: brightness(1.35) saturate(1.2); }
+  100% { box-shadow: 0 0 0 0 transparent; filter: brightness(1); }
+}
+.bot-app.regen .bt-disc, .bot-app.regen .bt-pin-disc { animation: tardis-regen 1.2s ease-out; }
+
+/* lamp ×3: the rail mark flashes */
+@keyframes tardis-lamp {
+  0%, 100% { filter: none; }
+  35% { filter: drop-shadow(0 0 8px var(--r-elf-glow)) brightness(1.4); }
+}
+.bt-mark-btn.flash svg { animation: tardis-lamp 0.9s ease-out; }
+
+/* idle status line — desktop only, never over a live turn (gated in code) */
+.tardis-blink {
+  padding: 6px 12px 2px;
+  font-family: var(--r-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--r-ink-faint);
+  animation: bt-fade 1.2s ease both;
+}
+@media (max-width: 760px) { .tardis-blink { display: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .bot-app.regen .bt-disc, .bot-app.regen .bt-pin-disc { animation: none; box-shadow: 0 0 12px 2px color-mix(in oklch, var(--r-elf-glow) 55%, transparent); }
+  .bt-mark-btn.flash svg { animation: none; filter: drop-shadow(0 0 6px var(--r-elf-glow)); }
+}

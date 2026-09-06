@@ -16,9 +16,9 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Resolve the workspace-relative path Rivendell stores in ChatBlocks into the
+// Resolve the workspace-relative path TARDIS stores in ChatBlocks into the
 // two URL forms a Windows client needs: a same-origin HTTP URL (the Tailscale
-// front-door serves whatever Rivendell exposes on :8091, so this works from any
+// front-door serves whatever TARDIS exposes on :8091, so this works from any
 // device on the tailnet without a custom handler) and a `rivendell://` URL that
 // the one-time PowerShell handler turns into `Start-Process` against the
 // OneDrive-synced ASSISTANT-HUB copy on the local Windows PC.
@@ -100,7 +100,7 @@ function openWindowsDefaultBrowser(url: URL): void {
  *  Returns true when the normal anchor navigation has been replaced.
  *
  *  Web platform APIs cannot choose the OS default browser directly. Windows
- *  uses Rivendell's one-time native scheme handler (Start-Process honors the
+ *  uses TARDIS's one-time native scheme handler (Start-Process honors the
  *  default browser); Android hands the URL to ACTION_VIEW. Ordinary browser
  *  tabs and same-origin links retain normal target=_blank behavior. */
 export function openExternalHttpLink(href: string): boolean {

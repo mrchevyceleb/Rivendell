@@ -3,7 +3,7 @@ import { useProxyViewer } from '../../../hooks/useProxyViewer';
 import { useStudioFiles, viewerPreferred } from '../../../shell/studio/studioFiles';
 import { buildLinkUrls, normalizeWorkspacePath, openWorkspaceLink } from '../../utils/proxyLinks';
 
-// Click = open the document inside Rivendell: text/code/markdown lands in the
+// Click = open the document inside TARDIS: text/code/markdown lands in the
 // editor, browser-renderable files render in the in-app overlay. The two side
 // buttons cover the alternates: Browser opens the file via Tailscale-served HTTP
 // (any device), Preview forces the in-app overlay. Outside the Studio shell it
@@ -32,7 +32,7 @@ export function DocLinkCard({ path, title }: { path: string; title?: string }) {
         type="button"
         className="chat-link-card"
         onClick={openPrimary}
-        title={studio ? `Open ${display} in Rivendell` : `Open ${display} natively (${windowsPath})`}
+        title={studio ? `Open ${display} in TARDIS` : `Open ${display} natively (${windowsPath})`}
       >
         <FileText size={16} />
         <span className="chat-link-card-text">
@@ -58,7 +58,7 @@ export function DocLinkCard({ path, title }: { path: string; title?: string }) {
             e.stopPropagation();
             if (normalizedPath !== null) viewer.open({ source: 'doc', path: normalizedPath, title });
           }}
-          title="Preview in Rivendell"
+          title="Preview in TARDIS"
         >
           <Eye size={13} />
         </button>

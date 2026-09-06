@@ -1,4 +1,4 @@
-// Counsel of the house — the reimagined companion + model + effort picker
+// Choose a companion — the reimagined companion + model + effort picker
 // (§3.10). Reskins CompanionControls.tsx into a single "model chip" that opens
 // either a desktop popover ("Counsel of the house") or a mobile bottom sheet
 // ("The Counsel"). All state + persistence already live in useCompanionPicker;
@@ -313,10 +313,10 @@ export function CounselPopover({
     <div
       className="pop modelpop show"
       role="listbox"
-      aria-label="Counsel of the house"
+      aria-label="Choose a companion"
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="pop-h">Counsel of the house</div>
+      <div className="pop-h">Choose a companion</div>
       <LaneList picker={picker} />
     </div>
   );
@@ -336,11 +336,11 @@ export function CounselSheet({
   return (
     <>
       <div className={`scrim${open ? ' show' : ''}`} onClick={onClose} />
-      <div className={`sheet${open ? ' show' : ''}`} role="dialog" aria-modal="true" aria-label="The Counsel">
+      <div className={`sheet${open ? ' show' : ''}`} role="dialog" aria-modal="true" aria-label="Choose a companion">
         <button type="button" className="sheet-grab" aria-label="Close" onClick={onClose}>
           <i />
         </button>
-        <h2>The Counsel</h2>
+        <h2>Choose a companion</h2>
         <div className="sheet-list">
           <LaneList picker={picker} />
         </div>

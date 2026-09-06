@@ -86,7 +86,7 @@ export const DEFAULT_BANANA_MODEL = OPENROUTER_PROVIDER.defaultModel;
 // short soft TTL so rapid open/close does not spam the endpoint.
 const CACHE_TTL_MS = 15 * 1000;
 
-// Cache briefly, PER endpoint, so long-lived Rivendell tabs notice catalogue
+// Cache briefly, PER endpoint, so long-lived TARDIS tabs notice catalogue
 // adds, removals, and metadata changes without a browser refresh.
 type CacheEntry = { models: BananaModelOption[] | null; at: number; inflight: Promise<BananaModelOption[]> | null };
 const caches = new Map<string, CacheEntry>();

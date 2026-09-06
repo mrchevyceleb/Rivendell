@@ -3,6 +3,7 @@ import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { useAnnals } from '../hooks/useRoomData';
 import { timeAgo } from '../utils/format';
+import { ROOM_NAMES } from '../data/roomNames';
 
 export function Annals() {
   const { data: entries = [], refetch } = useAnnals();
@@ -10,7 +11,7 @@ export function Annals() {
   return (
     <div className="room-scroll r-scroll">
       <RoomHeader
-        eyebrow="The Annals"
+        eyebrow={ROOM_NAMES.annals.eyebrow}
         title="Past sessions"
         subtitle="Claude and Codex chronicle entries from recent local work."
         actions={

@@ -5,6 +5,7 @@ import { RoomHeader } from '../components/RoomHeader';
 import { usePlEntries } from '../hooks/useRoomData';
 import type { PlEntry } from '../data/types';
 import { formatMoney } from '../utils/format';
+import { ROOM_NAMES } from '../data/roomNames';
 
 type PeriodStats = {
   label: string;
@@ -68,7 +69,7 @@ export function Reckoning() {
   return (
     <div className="room-scroll r-scroll">
       <RoomHeader
-        eyebrow="The Reckoning"
+        eyebrow={ROOM_NAMES.reckoning.eyebrow}
         title="P&L tracker"
         subtitle="A thin view over the existing plTracker tools."
         actions={

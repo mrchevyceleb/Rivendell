@@ -7,6 +7,7 @@ import { useProxyViewer } from '../hooks/useProxyViewer';
 import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { timeAgo } from '../utils/format';
+import { ROOM_NAMES } from '../data/roomNames';
 
 const statuses: RivendellJobStatus[] = ['queued', 'running', 'needs_review', 'done', 'failed', 'cancelled'];
 
@@ -61,8 +62,8 @@ export function Weavings() {
   return (
     <div className="room-scroll r-scroll">
       <RoomHeader
-        eyebrow="The Weavings"
-        title="Employee Kanban"
+        eyebrow={ROOM_NAMES.weavings.eyebrow}
+        title="UNIT queue"
         subtitle="Queued, running, review, and completed work for the headless worker."
         actions={
           <Button tone="ghost" onClick={() => refetch()}>

@@ -1,4 +1,4 @@
-// Named teammate voice calls over the normal Rivendell Hall transport.
+// Named teammate voice calls over the normal TARDIS Hall transport.
 // Speech is only I/O: every utterance is a regular bot-* user turn, so the
 // selected engine, tools, memory, teammate access, durable history, and UI
 // transcript are identical to typed chat.

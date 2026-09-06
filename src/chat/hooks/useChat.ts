@@ -176,7 +176,7 @@ function reduce(blocks: ChatBlock[], ev: any, turnIdRef: ReducerCursor): ChatBlo
 
   // Agent-to-agent delivery: a teammate's message landing in this thread.
   if (ev.type === 'peer_message' && typeof ev.text === 'string') {
-    const from = typeof ev.from === 'string' ? ev.from : 'Teammate';
+    const from = typeof ev.from === 'string' ? ev.from : 'Companion';
     const fromRole = typeof ev.fromRole === 'string' ? ev.fromRole : undefined;
     const deliveryId = typeof ev.deliveryId === 'string' ? ev.deliveryId : undefined;
     const existing = deliveryId
@@ -1662,7 +1662,7 @@ export function useChat(opts: {
       if (!isCurrentConnection()) return;
       const live = wsRef.current;
       // A CONNECTING handshake must not be killed on window focus (clicking
-      // from another app back into Rivendell). That loop is how messages
+      // from another app back into TARDIS). That loop is how messages
       // never reached hello, so every agent looked dead.
       // CLOSING counts too: its onclose is about to run the reconnect, and
       // opening one here would leave the closing socket orphaned.

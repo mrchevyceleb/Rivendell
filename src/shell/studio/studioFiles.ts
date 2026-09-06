@@ -1,7 +1,7 @@
 import { createContext, useContext } from 'react';
 
 // Bridges deep components (chat markdown, link cards) up to the Studio shell so
-// a clicked workspace link opens *inside* Rivendell: a text / code / markdown
+// a clicked workspace link opens *inside* TARDIS: a text / code / markdown
 // file lands in the editor as a tab, a folder is revealed in the file tree.
 // Null when rendered outside the Studio shell — callers then fall back to
 // opening the file out-of-app (native handler / browser tab).

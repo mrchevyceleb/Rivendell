@@ -33,6 +33,7 @@ import type { CronAiModel, CronJob, CronRun } from '../data/types';
 import { Button, Chip, EmptyState, Surface } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { useCronHistory, useCronJobs } from '../hooks/useRoomData';
+import { ROOM_NAMES } from '../data/roomNames';
 
 function runOutcome(status: string): 'ok' | 'failed' | 'running' | 'unknown' {
   if (status === 'completed' || status === 'success') return 'ok';
@@ -454,7 +455,7 @@ export function Forge() {
   return (
     <div className="room-scroll r-scroll forge-room">
       <RoomHeader
-        eyebrow="The Forge"
+        eyebrow={ROOM_NAMES.forge.eyebrow}
         title="Scheduled tasks"
         subtitle={`${jobs.length} tasks. ${activeCount} active, ${pausedCount} paused${failedCount ? `, ${failedCount} failed` : ''}.`}
         actions={

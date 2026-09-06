@@ -37,7 +37,7 @@ export type Hub = { name: string; count: number; cozy?: boolean };
 export const HUBS: Hub[] = [
   { name: 'Work', count: 4 },
   { name: 'Side projects', count: 2 },
-  { name: 'The Shire', count: 1, cozy: true },
+  { name: 'Gallifrey', count: 1, cozy: true },
 ];
 
 export type ChronicleEventKind = 'ember' | 'gold' | 'moss' | 'ink';

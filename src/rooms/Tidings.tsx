@@ -3,6 +3,7 @@ import { Button, Chip } from '../components/Primitives';
 import { RoomHeader } from '../components/RoomHeader';
 import { useEmails } from '../hooks/useRoomData';
 import { useProxyViewer } from '../hooks/useProxyViewer';
+import { ROOM_NAMES } from '../data/roomNames';
 
 export function Tidings() {
   const { data: emails = [], refetch, isFetching } = useEmails();
@@ -12,7 +13,7 @@ export function Tidings() {
   return (
     <div className="split-room">
       <aside className="room-rail r-scroll">
-        <p className="r-eyebrow-gold">Tidings</p>
+        <p className="r-eyebrow-gold">{ROOM_NAMES.tidings.name}</p>
         <h2>Unified inbox</h2>
         <div className="search-box">
           <Search size={15} />
@@ -32,7 +33,7 @@ export function Tidings() {
       </aside>
       <section className="room-scroll r-scroll">
         <RoomHeader
-          eyebrow="The Tidings"
+          eyebrow={ROOM_NAMES.tidings.eyebrow}
           title={`${emails.length} messages, ${accounts.length} realms`}
           subtitle="Three need you. The rest can be shaped, shelved, or watched."
           actions={
