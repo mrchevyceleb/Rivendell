@@ -185,8 +185,14 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
         for (const file of files) {
           try {
             const saved = await uploadWorkspaceFile(`inbox/${file.name}`, file);
-            toastEgg(`Sent to the ship · ${saved.path}`);
-            appendToDraft(`ASSISTANT-HUB/${saved.path}`);
+            const mention = `ASSISTANT-HUB/${saved.path}`;
+            if (appendToDraft(mention)) {
+              toastEgg(`Sent to the ship · ${saved.path}`);
+            } else {
+              // No composer on screen (a room is open): keep the path handy.
+              await navigator.clipboard?.writeText(mention).catch(() => {});
+              toastEgg(`Sent to the ship · ${saved.path} · path copied`);
+            }
           } catch (error) {
             toastEgg(`Could not send ${file.name}: ${(error as Error).message}`);
           }

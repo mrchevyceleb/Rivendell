@@ -3,18 +3,24 @@
 // companions open the local file with the machine's own apps, and when the
 // file is not here yet the shell fetches a copy from the ship.
 import { app, dialog, net, shell, type BrowserWindow } from 'electron';
-import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { getSettings, saveSettings } from './settings.js';
 
 export const WORKSPACE_LABEL = 'ASSISTANT-HUB';
 export type LinkKind = 'doc' | 'folder';
 export interface OpenResult {
   ok: boolean;
-  where?: 'local' | 'fetched';
+  where?: 'local' | 'fetched' | 'browser';
   error?: string;
 }
+
+// One download per workspace path at a time; a second click joins the first.
+const inflight = new Map<string, Promise<OpenResult>>();
 
 const FETCH_TIMEOUT_MS = 120_000;
 // A fetched copy is buffered on disk, never in memory, and capped so one
@@ -92,9 +98,26 @@ function segmentsOf(rel: string): string[] | null {
   return parts;
 }
 
+/** Real-path containment: a symlink or junction inside the workspace must not
+ *  lead the shell to open something outside it. Both paths must exist. */
 function insideRoot(root: string, target: string): boolean {
-  const inside = path.relative(root, target);
-  return inside === '' || (!inside.startsWith('..') && !path.isAbsolute(inside));
+  try {
+    const realRoot = realpathSync(root);
+    const realTarget = realpathSync(target);
+    const inside = path.relative(realRoot, realTarget);
+    return inside === '' || (!inside.startsWith('..') && !path.isAbsolute(inside));
+  } catch {
+    return false;
+  }
+}
+
+function cacheDir(): string {
+  return path.join(app.getPath('userData'), 'ship-cache');
+}
+
+/** Forget every fetched copy (Ship → Clear Fetched Copies). */
+export function clearFetchedCopies(): void {
+  rmSync(cacheDir(), { recursive: true, force: true });
 }
 
 async function openLocal(target: string): Promise<OpenResult> {
@@ -122,48 +145,68 @@ export async function openWorkspacePath(rel: string, kind: LinkKind, serverUrl: 
   }
   if (!serverUrl || parts.length === 0) return { ok: false, error: 'Not connected to a ship.' };
 
-  // Not on this machine: fetch a copy from the ship and open that.
+  // Not on this machine: open the copy fetched earlier, or fetch one now.
+  // A fetched copy is never replaced automatically, so edits to it survive;
+  // Ship → Clear Fetched Copies forgets them all.
   const relPath = parts.join('/');
-  const cached = path.join(app.getPath('userData'), 'ship-cache', ...parts);
-  const partial = `${cached}.part`;
+  const cached = path.join(cacheDir(), ...parts);
+  if (existsSync(cached)) {
+    const problem = await shell.openPath(cached);
+    return problem ? { ok: false, error: problem } : { ok: true, where: 'fetched' };
+  }
+  const running = inflight.get(relPath);
+  if (running) return running;
+  const job = fetchAndOpen(serverUrl, relPath, cached).finally(() => inflight.delete(relPath));
+  inflight.set(relPath, job);
+  return job;
+}
+
+async function fetchAndOpen(serverUrl: string, relPath: string, cached: string): Promise<OpenResult> {
+  const rawUrl = `${serverUrl}/api/files/raw?path=${encodeURIComponent(relPath)}`;
+  const partial = `${cached}.${process.pid}.${Date.now().toString(36)}.part`;
   try {
-    const response = await net.fetch(`${serverUrl}/api/files/raw?path=${encodeURIComponent(relPath)}`, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      cache: 'no-store',
-    });
+    const response = await net.fetch(rawUrl, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), cache: 'no-store' });
     if (!response.ok) return { ok: false, error: `The ship answered ${response.status} for that file.` };
     const declared = Number(response.headers.get('content-length') || 0);
-    if (declared > FETCH_MAX_BYTES) return { ok: false, error: 'That file is too large to fetch a copy of.' };
+    if (declared > FETCH_MAX_BYTES) return openInBrowser(rawUrl);
     if (!response.body) return { ok: false, error: 'The ship sent an empty reply.' };
     mkdirSync(path.dirname(cached), { recursive: true });
-    await streamToFile(response.body, partial);
+    await streamToFile(response.body as unknown as NodeReadableStream<Uint8Array>, partial);
     renameSync(partial, cached);
     const problem = await shell.openPath(cached);
     return problem ? { ok: false, error: problem } : { ok: true, where: 'fetched' };
   } catch (error) {
     rmSync(partial, { force: true });
+    if (error instanceof Error && error.message === TOO_LARGE) return openInBrowser(rawUrl);
     const reason = error instanceof Error ? error.message : String(error);
     return { ok: false, error: `Could not fetch that file (${reason}).` };
   }
 }
 
-async function streamToFile(body: ReadableStream<Uint8Array>, target: string): Promise<void> {
-  const out = createWriteStream(target);
-  let written = 0;
+/** Too big to cache: let the browser stream it from the ship instead. */
+async function openInBrowser(rawUrl: string): Promise<OpenResult> {
   try {
-    for await (const chunk of body) {
-      written += chunk.byteLength;
-      if (written > FETCH_MAX_BYTES) throw new Error('file is larger than the fetch limit');
-      if (!out.write(chunk)) await new Promise<void>((resolve) => out.once('drain', resolve));
-    }
-    await new Promise<void>((resolve, reject) => {
-      out.once('error', reject);
-      out.end(resolve);
-    });
+    await shell.openExternal(rawUrl);
+    return { ok: true, where: 'browser' };
   } catch (error) {
-    out.destroy();
-    throw error;
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+const TOO_LARGE = 'file is larger than the fetch limit';
+
+/** Web body → file through stream.pipeline, so every error (disk full,
+ *  permissions, the size cap) rejects here instead of crashing the app. */
+async function streamToFile(body: NodeReadableStream<Uint8Array>, target: string): Promise<void> {
+  let written = 0;
+  const limiter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      written += chunk.byteLength;
+      if (written > FETCH_MAX_BYTES) callback(new Error(TOO_LARGE));
+      else callback(null, chunk);
+    },
+  });
+  await pipeline(Readable.fromWeb(body), limiter, createWriteStream(target));
 }
 
 /** `rivendell://open?kind=doc|folder&winpath=…` or `?url=…`, as older console
@@ -193,5 +236,13 @@ export async function handleNativeScheme(url: string, serverUrl: string | undefi
   if (marker >= 0) rel = normalized.slice(marker + WORKSPACE_LABEL.length + 1);
   else if (normalized.toUpperCase().endsWith(WORKSPACE_LABEL)) rel = '';
   if (rel === null) return;
-  await openWorkspacePath(rel, kind, serverUrl);
+  const result = await openWorkspacePath(rel, kind, serverUrl);
+  if (!result.ok) {
+    await dialog.showMessageBox({
+      type: 'warning',
+      title: 'TARDIS',
+      message: 'Could not open that workspace path.',
+      detail: result.error ?? 'Unknown error.',
+    });
+  }
 }

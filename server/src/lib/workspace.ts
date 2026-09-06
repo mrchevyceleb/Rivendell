@@ -313,9 +313,25 @@ const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
 export function safeFileName(name: string): string {
   let out = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '').trim();
   if (WINDOWS_RESERVED.test(out)) out = `_${out}`;
-  if (out.length > 180) {
-    const ext = extname(out).slice(0, 20);
-    out = out.slice(0, 180 - ext.length) + ext;
+  if (Buffer.byteLength(out, 'utf8') > FILE_NAME_MAX_BYTES) {
+    const ext = truncateUtf8(extname(out), 24);
+    out = truncateUtf8(out.slice(0, out.length - extname(out).length), FILE_NAME_MAX_BYTES - Buffer.byteLength(ext, 'utf8')) + ext;
+  }
+  return out;
+}
+
+// Filesystems cap a name at 255 bytes, not characters; keep a margin for the
+// numeric suffix and cut on code points so a surrogate pair never splits.
+const FILE_NAME_MAX_BYTES = 200;
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let out = '';
+  let bytes = 0;
+  for (const cp of value) {
+    const size = Buffer.byteLength(cp, 'utf8');
+    if (bytes + size > maxBytes) break;
+    out += cp;
+    bytes += size;
   }
   return out;
 }

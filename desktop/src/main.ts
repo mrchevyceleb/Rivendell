@@ -19,7 +19,7 @@ import { getSettings, initSettings, saveSettings, type Settings, type ThemeName,
 import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, startUpdater } from './updater.js';
-import { chooseWorkspaceRoot, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
+import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
 
 const pkg = require('../package.json') as { repository?: { url?: string } };
 
@@ -373,6 +373,7 @@ async function main(): Promise<void> {
     reloadServer: () => loadServer(),
     chooseWorkspace: () => void chooseWorkspace(),
     openWorkspace: () => void openWorkspace(),
+    clearFetchedCopies: () => clearFetchedCopies(),
     checkForUpdates: () => void checkForUpdatesInteractive(win, RELEASES_URL),
     openReleases: () => void shell.openExternal(RELEASES_URL),
     openRepository: () => void shell.openExternal(REPO_URL),

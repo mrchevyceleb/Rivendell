@@ -5,6 +5,7 @@ export interface MenuActions {
   reloadServer(): void;
   chooseWorkspace(): void;
   openWorkspace(): void;
+  clearFetchedCopies(): void;
   checkForUpdates(): void;
   openReleases(): void;
   openRepository(): void;
@@ -44,6 +45,7 @@ export function installMenu(actions: MenuActions): void {
         { type: 'separator' },
         { label: 'Open Local Workspace', accelerator: 'CmdOrCtrl+Shift+O', click: actions.openWorkspace },
         { label: 'Local Workspace Folder…', click: actions.chooseWorkspace },
+        { label: 'Clear Fetched Copies', click: actions.clearFetchedCopies },
         { type: 'separator' },
         ...(isMac ? [{ role: 'close' } as MenuItemConstructorOptions] : [
           { label: 'Check for Updates…', click: actions.checkForUpdates },

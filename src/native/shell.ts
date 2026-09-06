@@ -32,6 +32,11 @@ export function showToast(text: string): void {
 /** DOM event asking the open composer to append text to its draft. */
 export const DRAFT_APPEND_EVENT = 'rivendell:draft-append';
 
-export function appendToDraft(text: string): void {
-  window.dispatchEvent(new CustomEvent<{ text: string }>(DRAFT_APPEND_EVENT, { detail: { text } }));
+/** Returns false when no composer was mounted to take the text. */
+export function appendToDraft(text: string): boolean {
+  const detail: DraftAppendDetail = { text, handled: false };
+  window.dispatchEvent(new CustomEvent<DraftAppendDetail>(DRAFT_APPEND_EVENT, { detail }));
+  return detail.handled;
 }
+
+export type DraftAppendDetail = { text: string; handled: boolean };

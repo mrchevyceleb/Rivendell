@@ -12,7 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Mic, PanelRightClose, PanelRightOpen, RotateCcw, Settings, Share2, SquarePen } from 'lucide-react';
 import type { ShellViewProps } from '../chat/components/reimagine/useChatShell';
 import { ChatThread } from '../chat/components/reimagine/blocks';
-import { DRAFT_APPEND_EVENT } from '../native/shell';
+import { DRAFT_APPEND_EVENT, type DraftAppendDetail } from '../native/shell';
 import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
 import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
 import { Plus } from '../chat/components/reimagine/icons';
@@ -52,10 +52,11 @@ export function GrokConversation(props: BotConversationProps) {
   // Files sent to the ship (drag and drop) announce their workspace path here.
   useEffect(() => {
     const onAppend = (event: Event) => {
-      const text = (event as CustomEvent<{ text: string }>).detail?.text;
-      if (!text) return;
+      const detail = (event as CustomEvent<DraftAppendDetail>).detail;
+      if (!detail?.text) return;
+      detail.handled = true;
       const current = s.value.replace(/\s+$/, '');
-      s.setValue(current ? `${current} ${text} ` : `${text} `);
+      s.setValue(current ? `${current} ${detail.text} ` : `${detail.text} `);
     };
     window.addEventListener(DRAFT_APPEND_EVENT, onAppend);
     return () => window.removeEventListener(DRAFT_APPEND_EVENT, onAppend);

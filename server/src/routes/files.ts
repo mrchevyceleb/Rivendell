@@ -218,13 +218,13 @@ filesRouter.post('/upload', raw({ type: UPLOAD_TYPE, limit: UPLOAD_BODY_LIMIT })
     res.status(400).json({ error: 'path must be workspace-relative' });
     return;
   }
-  const segments = requested.replace(/\\/g, '/').split('/').filter(Boolean);
-  const fileName = safeFileName(segments.pop() ?? '');
-  if (!fileName) {
-    res.status(400).json({ error: 'path needs a file name' });
+  // Every segment has to be legal on every platform the workspace syncs to.
+  const segments = requested.replace(/\\/g, '/').split('/').filter(Boolean).map(safeFileName);
+  if (segments.length === 0 || segments.some((segment) => !segment)) {
+    res.status(400).json({ error: 'path needs a usable file name' });
     return;
   }
-  const destination = [...segments, fileName].join('/');
+  const destination = segments.join('/');
   try {
     const result = await storeWorkspaceFile(destination, body);
     // The file is on disk at this point; the activity log is best effort.
