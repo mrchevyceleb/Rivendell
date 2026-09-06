@@ -3,6 +3,8 @@ import { app, Menu, type MenuItemConstructorOptions } from 'electron';
 export interface MenuActions {
   changeServer(): void;
   reloadServer(): void;
+  chooseWorkspace(): void;
+  openWorkspace(): void;
   checkForUpdates(): void;
   openReleases(): void;
   openRepository(): void;
@@ -39,6 +41,9 @@ export function installMenu(actions: MenuActions): void {
       submenu: [
         { label: 'Change Server Address…', accelerator: 'CmdOrCtrl+Shift+,', click: actions.changeServer },
         { label: 'Reconnect', accelerator: 'CmdOrCtrl+R', click: actions.reloadServer },
+        { type: 'separator' },
+        { label: 'Open Local Workspace', accelerator: 'CmdOrCtrl+Shift+O', click: actions.openWorkspace },
+        { label: 'Local Workspace Folder…', click: actions.chooseWorkspace },
         { type: 'separator' },
         ...(isMac ? [{ role: 'close' } as MenuItemConstructorOptions] : [
           { label: 'Check for Updates…', click: actions.checkForUpdates },

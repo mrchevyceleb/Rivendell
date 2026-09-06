@@ -305,6 +305,36 @@ export async function writeWorkspaceFile(
   return { path: inside, size: s.size, modifiedAt: s.mtime.toISOString() };
 }
 
+const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
+
+/** Store an uploaded file (any type) under the workspace. Never overwrites:
+ *  a taken name gets a numeric suffix, like a desktop copy would. */
+export async function storeWorkspaceFile(
+  relPath: string,
+  data: Buffer,
+): Promise<{ path: string; size: number; modifiedAt: string }> {
+  if (data.byteLength > UPLOAD_MAX_BYTES) throw Object.assign(new Error('file too large to upload'), { code: 'E2BIG' });
+  const { absPath, inside } = resolveWorkspacePath(relPath, false);
+  assertHubStructureWrite(inside, 'create', { kind: 'file' });
+  await assertInsideWorkspace(absPath);
+  await mkdir(dirname(absPath), { recursive: true });
+  const ext = extname(absPath);
+  const stem = basename(absPath, ext);
+  const dir = dirname(absPath);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const candidate = attempt === 0 ? absPath : resolve(dir, `${stem} (${attempt + 1})${ext}`);
+    try {
+      await writeFile(candidate, data, { flag: 'wx' });
+    } catch (err: any) {
+      if (err?.code === 'EEXIST') continue;
+      throw err;
+    }
+    const s = await stat(candidate);
+    return { path: relative(workspaceRoot(), candidate).split(sep).join('/'), size: s.size, modifiedAt: s.mtime.toISOString() };
+  }
+  throw Object.assign(new Error('too many files with that name'), { code: 'EEXIST' });
+}
+
 export async function createWorkspaceEntry(
   relPath: string,
   kind: 'file' | 'directory',

@@ -6,9 +6,19 @@
 // is rendered as a configurable Windows path, and a clickable Windows path
 // doubles as something the user can paste into Win+R when needed.
 
+import { nativeShell } from '../../native/shell';
+
 const LABEL = 'ASSISTANT-HUB';
+// Inside the desktop shell the local workspace is whatever that machine has
+// (auto-detected or chosen in the Ship menu); browsers get the build-time
+// Windows default.
+const shellWorkspaceRoot = nativeShell()?.workspaceRoot?.replace(/[\\/]+$/, '');
 export const WIN_WORKSPACE_PREFIX =
-  (import.meta.env.VITE_RIVENDELL_WINDOWS_WORKSPACE_PATH || String.raw`C:\ASSISTANT-HUB`).replace(/[\\/]+$/, '');
+  shellWorkspaceRoot
+  || (import.meta.env.VITE_RIVENDELL_WINDOWS_WORKSPACE_PATH || String.raw`C:\ASSISTANT-HUB`).replace(/[\\/]+$/, '');
+// Separator of the local workspace path: backslashes for a Windows root,
+// slashes for a macOS or Linux one.
+const LOCAL_SEP = WIN_WORKSPACE_PREFIX.includes('\\') || /^[A-Za-z]:/.test(WIN_WORKSPACE_PREFIX) ? '\\' : '/';
 export const NATIVE_OPEN_STORAGE_KEY = 'rivendell.native-open.installed.v2';
 const UNIX_WORKSPACE_SOURCE = String.raw`\/(?:home|Users)\/[^/\s]+\/ASSISTANT-HUB`;
 
@@ -29,7 +39,7 @@ export function buildLinkUrls(
   const safeRel = (relPath || '').replace(/^\/+/, '');
   const windowsPath = safeRel === ''
     ? WIN_WORKSPACE_PREFIX
-    : `${WIN_WORKSPACE_PREFIX}\\${safeRel.split('/').join('\\')}`;
+    : `${WIN_WORKSPACE_PREFIX}${LOCAL_SEP}${safeRel.split('/').join(LOCAL_SEP)}`;
   const browserUrl = `/api/files/raw?path=${encodeURIComponent(safeRel)}`;
   const nativeUrl = `rivendell://open?kind=${kind}&winpath=${encodeURIComponent(windowsPath)}`;
   return { browserUrl, nativeUrl, windowsPath };
@@ -141,11 +151,23 @@ export function openExternalHttpLink(href: string): boolean {
 }
 
 // Single entry point for "open this workspace path the right way for this
-// device". On Windows we fire the `rivendell://` handler so the file launches
-// in its native app; on phones, Macs, or Windows machines that haven't run the
-// installer yet, we fall back to a path that always works — Tailscale-served
-// HTTP for files, the in-app Library room for folders.
+// device". The desktop shell opens it with the machine's own apps (fetching a
+// copy from the ship when it is not synced locally). In a browser on Windows
+// we fire the `rivendell://` handler; on phones, Macs, or Windows machines that
+// haven't run the installer yet, we fall back to a path that always works —
+// Tailscale-served HTTP for files, the in-app Library room for folders.
 export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void {
+  const shell = nativeShell();
+  if (shell?.openWorkspacePath) {
+    shell.openWorkspacePath(relPath, kind)
+      .then((result) => { if (!result.ok) openWorkspaceLinkInBrowser(relPath, kind); })
+      .catch(() => openWorkspaceLinkInBrowser(relPath, kind));
+    return;
+  }
+  openWorkspaceLinkInBrowser(relPath, kind);
+}
+
+function openWorkspaceLinkInBrowser(relPath: string, kind: 'doc' | 'folder'): void {
   const { browserUrl, nativeUrl } = buildLinkUrls(relPath, kind);
   if (isWindowsPlatform()) {
     fireNativeScheme(nativeUrl);
@@ -170,7 +192,7 @@ export function openWorkspaceLink(relPath: string, kind: 'doc' | 'folder'): void
 const STOP_WORDS = '(?:and|or|but|the|a|an|is|are|was|were|to|of|in|on|at|by|for|that|which|because|since|so|then|with|from|as|when|where|while|after|before|will|would|should|can|could|may|might|like|this|these|those|it|its|i|we|you|he|she|they)';
 const STOP_LOOKAHEAD = String.raw`(?=$|[,;:!?]|[\n\r]|\.(?:\s|$)|\s+${STOP_WORDS}\b|[)\]"'\`<>])`;
 const WORKSPACE_MENTION = String.raw`\b${LABEL}(?:\/[^\n\r]+?)?`;
-const WIN_MENTION = `${escapeRegex(WIN_WORKSPACE_PREFIX)}(?:\\\\[^\\n\\r]+?)?`;
+const WIN_MENTION = `${escapeRegex(WIN_WORKSPACE_PREFIX)}(?:${escapeRegex(LOCAL_SEP)}[^\\n\\r]+?)?`;
 const UNIX_MENTION = `${UNIX_WORKSPACE_SOURCE}(?:/[^\\n\\r]+?)?`;
 const MENTION_PATTERN = new RegExp(
   `(?:${WIN_MENTION}|${UNIX_MENTION}|${WORKSPACE_MENTION})${STOP_LOOKAHEAD}`,
@@ -296,7 +318,7 @@ function extractRelativePath(value: string): string | null {
   if (value.startsWith(WIN_WORKSPACE_PREFIX)) {
     const tail = value.slice(WIN_WORKSPACE_PREFIX.length);
     if (tail === '') return '';
-    if (!tail.startsWith('\\')) return null;
+    if (!tail.startsWith(LOCAL_SEP)) return null;
     return tail.slice(1).replace(/\\/g, '/');
   }
   const unix = value.match(new RegExp(`^${UNIX_WORKSPACE_SOURCE}(?:/(.*))?$`));
@@ -308,7 +330,7 @@ function extractRelativePath(value: string): string | null {
 
 function toWindowsDisplay(rel: string): string {
   if (!rel) return WIN_WORKSPACE_PREFIX;
-  return `${WIN_WORKSPACE_PREFIX}\\${rel.split('/').join('\\')}`;
+  return `${WIN_WORKSPACE_PREFIX}${LOCAL_SEP}${rel.split('/').join(LOCAL_SEP)}`;
 }
 
 export function parseProxyHref(href: string | undefined): { kind: 'doc' | 'folder'; path: string } | null {

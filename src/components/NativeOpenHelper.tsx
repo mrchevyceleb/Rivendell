@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Download, ExternalLink, X } from 'lucide-react';
 import { NATIVE_OPEN_STORAGE_KEY } from '../chat/utils/proxyLinks';
+import { nativeShell } from '../native/shell';
 
 // Tiny on-demand panel that explains the one-time install needed for the
 // `rivendell://` URL scheme to launch files and web URLs through Windows'
@@ -28,7 +29,8 @@ export function NativeOpenHelper() {
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
 
-  if (!isWindows()) return null;
+  // The desktop shell opens files itself; the helper is for browser tabs.
+  if (!isWindows() || nativeShell()) return null;
 
   return (
     <>

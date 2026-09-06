@@ -17,7 +17,14 @@ if (local) {
     openExternal: (url: string) => ipcRenderer.invoke('tardis:open-external', url),
   });
 } else {
-  contextBridge.exposeInMainWorld('tardisShell', base);
+  // Where this machine keeps its copy of the workspace, so the console can
+  // show local paths and open files with the machine's own apps.
+  const workspaceRoot = String(ipcRenderer.sendSync('tardis:workspace-root') ?? '');
+  contextBridge.exposeInMainWorld('tardisShell', {
+    ...base,
+    workspaceRoot: workspaceRoot || undefined,
+    openWorkspacePath: (relPath: string, kind: 'doc' | 'folder') => ipcRenderer.invoke('tardis:open-workspace', relPath, kind),
+  });
   const report = () => {
     const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
     ipcRenderer.send('tardis:theme', theme);

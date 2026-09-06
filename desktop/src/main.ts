@@ -19,6 +19,7 @@ import { getSettings, initSettings, saveSettings, type Settings, type ThemeName,
 import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, startUpdater } from './updater.js';
+import { chooseWorkspaceRoot, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
 
 const pkg = require('../package.json') as { repository?: { url?: string } };
 
@@ -26,9 +27,9 @@ const APP_ID = 'app.tardis.desktop';
 const REPO_URL = (pkg.repository?.url ?? 'https://github.com/mrchevyceleb/TARDIS').replace(/\.git$/, '');
 const RELEASES_URL = `${REPO_URL}/releases`;
 const THEME_BG: Record<ThemeName, string> = { dark: '#08080a', light: '#f4f1ea' };
-// The web app fires `rivendell://` links (workspace files, default-browser
-// hand-off) from a hidden iframe. Those go to the OS handler, exactly as they
-// do from a browser tab.
+// Older console bundles fire `rivendell://` links (workspace files,
+// default-browser hand-off) from a hidden iframe. The shell handles those
+// itself; no Windows helper is involved.
 const NATIVE_SCHEME = 'rivendell:';
 const ERR_ABORTED = -3;
 const ERR_UNKNOWN_URL_SCHEME = -302;
@@ -108,13 +109,28 @@ async function openOutside(url: string): Promise<void> {
     return;
   }
   const protocol = parsed.protocol;
-  if (protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:' || protocol === NATIVE_SCHEME) {
+  if (protocol === NATIVE_SCHEME) {
+    await handleNativeScheme(url, serverUrl);
+    return;
+  }
+  if (protocol === 'http:' || protocol === 'https:' || protocol === 'mailto:') {
     try {
       await shell.openExternal(url);
     } catch (error) {
       console.error('[tardis] could not open', url, error);
     }
   }
+}
+
+async function chooseWorkspace(): Promise<void> {
+  const picked = await chooseWorkspaceRoot(win);
+  // The console reads the root once at load; show it the new one.
+  if (picked) loadServer();
+}
+
+async function openWorkspace(): Promise<void> {
+  const root = workspaceRoot() ?? (await chooseWorkspaceRoot(win));
+  if (root) await shell.openPath(root);
 }
 
 function applyTheme(theme: ThemeName): void {
@@ -307,6 +323,15 @@ function installIpc(): void {
     if (/^https?:\/\//i.test(value)) void shell.openExternal(value);
   });
 
+  ipcMain.on('tardis:workspace-root', (event) => {
+    event.returnValue = workspaceRoot() ?? '';
+  });
+
+  ipcMain.handle('tardis:open-workspace', (event, rel: unknown, kind: unknown) => {
+    if (!sameOrigin(event.senderFrame?.url ?? '', serverUrl)) return { ok: false, error: 'Not allowed from this page.' };
+    return openWorkspacePath(String(rel ?? ''), kind === 'folder' ? 'folder' : 'doc', serverUrl);
+  });
+
   ipcMain.on('tardis:theme', (event, theme: unknown) => {
     if (!sameOrigin(event.senderFrame?.url ?? '', serverUrl)) return;
     if (theme === 'light' || theme === 'dark') applyTheme(theme);
@@ -346,6 +371,8 @@ async function main(): Promise<void> {
   installMenu({
     changeServer: () => void showConnect(),
     reloadServer: () => loadServer(),
+    chooseWorkspace: () => void chooseWorkspace(),
+    openWorkspace: () => void openWorkspace(),
     checkForUpdates: () => void checkForUpdatesInteractive(win, RELEASES_URL),
     openReleases: () => void shell.openExternal(RELEASES_URL),
     openRepository: () => void shell.openExternal(REPO_URL),

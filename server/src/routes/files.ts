@@ -1,9 +1,11 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { extname, basename, resolve as resolvePath, sep as pathSep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { workspaceRoot } from '../lib/workspace.ts';
+import { storeWorkspaceFile, workspaceRoot } from '../lib/workspace.ts';
+import { emitScribe } from '../worker/scribe.ts';
+import { mapWorkspaceError } from './docs.ts';
 import { asyncHandler } from './helpers.ts';
 
 export const filesRouter = Router();
@@ -185,3 +187,37 @@ const MIME_BY_EXT: Record<string, string> = {
 function mimeFor(path: string): string {
   return MIME_BY_EXT[extname(path).toLowerCase()] ?? 'application/octet-stream';
 }
+
+// Drop a file onto the console and it lands in the workspace (the desktop
+// shell and the web app both post here; inbox/ is the usual destination).
+// Raw body of any type, workspace-relative destination, never overwrites.
+const UPLOAD_BODY_LIMIT = '200mb';
+
+filesRouter.post('/upload', raw({ type: () => true, limit: UPLOAD_BODY_LIMIT }), asyncHandler(async (req, res) => {
+  const requested = String(req.query.path || '').trim();
+  if (!requested) {
+    res.status(400).json({ error: 'path is required' });
+    return;
+  }
+  if (requested.startsWith('/') || /^[A-Za-z]:[\\/]/.test(requested)) {
+    res.status(400).json({ error: 'path must be workspace-relative' });
+    return;
+  }
+  const body: unknown = req.body;
+  if (!Buffer.isBuffer(body) || body.byteLength === 0) {
+    res.status(400).json({ error: 'empty upload' });
+    return;
+  }
+  try {
+    const result = await storeWorkspaceFile(requested, body);
+    await emitScribe({
+      level: 'system',
+      text: `Workspace: received ${result.path}`,
+      payload: { kind: 'workspace-change', op: 'add', path: result.path, by: 'human' },
+    });
+    res.status(201).json(result);
+  } catch (err) {
+    const { status, message } = mapWorkspaceError(err);
+    res.status(status).json({ error: message });
+  }
+}));

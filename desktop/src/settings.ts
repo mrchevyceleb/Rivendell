@@ -17,6 +17,8 @@ export interface Settings {
   theme?: ThemeName;
   bounds?: WindowBounds;
   maximized?: boolean;
+  /** This machine's copy of the workspace (ASSISTANT-HUB). */
+  workspaceRoot?: string;
 }
 
 let settingsPath = '';
@@ -54,6 +56,7 @@ function sanitize(raw: unknown): Settings {
   const out: Settings = {};
   if (typeof input.serverUrl === 'string' && input.serverUrl) out.serverUrl = input.serverUrl;
   if (input.theme === 'light' || input.theme === 'dark') out.theme = input.theme;
+  if (typeof input.workspaceRoot === 'string' && input.workspaceRoot) out.workspaceRoot = input.workspaceRoot;
   if (input.bounds && typeof input.bounds === 'object') {
     const b = input.bounds as Record<string, unknown>;
     if (isFinite(b.width) && isFinite(b.height) && b.width >= 320 && b.height >= 240) {

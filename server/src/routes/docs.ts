@@ -17,7 +17,7 @@ import {
 import { emitScribe } from '../worker/scribe.ts';
 import { asyncHandler } from './helpers.ts';
 
-function mapWorkspaceError(err: any): { status: number; message: string } {
+export function mapWorkspaceError(err: any): { status: number; message: string } {
   const code: string = err?.code ?? '';
   const msg: string = err?.message ?? 'unknown error';
   if (code === 'ENOENT') return { status: 404, message: msg };

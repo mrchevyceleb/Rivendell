@@ -69,6 +69,15 @@ To update, install the newer APK over the old one. The release workflow signs ev
 
 The app asks for the microphone the first time a voice feature needs it. Files you attach come from the Android picker, downloads land in **Downloads**, and web notifications are not available inside the Android shell.
 
+## Files and links on the desktop
+
+The desktop app owns the local side of the workspace, so agent links open real files on that computer and files move to the ship without path gymnastics:
+
+- **Workspace links open locally.** A `ASSISTANT-HUB/…` link opens the file or folder from the local copy of the workspace with that machine's own apps. The app finds the copy on its own (`C:\ASSISTANT-HUB`, a OneDrive folder, or `~/ASSISTANT-HUB`) and you can point it elsewhere with *Ship → Local Workspace Folder…*. No PowerShell helper is needed.
+- **Unsynced files still open.** When a file is not on this machine, the app fetches a copy from the ship and opens that. Edits to a fetched copy stay local.
+- **Displayed paths match this machine.** Links show the path as it exists here, whatever the folder is called.
+- **Drop a file, it is on the ship.** Drop any file onto the console and it is uploaded to the workspace `inbox/` folder; its workspace path is added to your draft so you can tell a companion about it. Images dropped on the composer stay attachments, as before. This part also works in a browser.
+
 ## What the shells handle
 
 - Links to other sites open in the default browser; the console stays in the app.

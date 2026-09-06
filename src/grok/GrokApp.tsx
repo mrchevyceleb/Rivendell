@@ -21,6 +21,8 @@ import { useRepos } from '../chat/hooks/useRepos';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
 import type { CompanionId } from '../chat/data/types';
+import { uploadWorkspaceFile } from '../data/api';
+import { appendToDraft } from '../native/shell';
 import { BotRail } from './GrokSidebar';
 import { GrokChat } from './GrokChat';
 import { BotPanel, type ChatMeta } from './BotPanel';
@@ -152,6 +154,41 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   const badWolf = useRef(Boolean(initialRoom && !ROOMS[initialRoom]));
   useEffect(() => {
     if (badWolf.current) { badWolf.current = false; toastEgg('BAD WOLF'); }
+  }, [toastEgg]);
+
+  // Drop any file onto the console and it lands in the ship's inbox/, with
+  // its workspace path appended to the draft so the companion can be told.
+  // The composer keeps first claim on image drops (they become attachments).
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
+    const onDragOver = (e: DragEvent) => {
+      if (e.defaultPrevented || !hasFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    };
+    const onDrop = (e: DragEvent) => {
+      if (e.defaultPrevented || !hasFiles(e)) return;
+      e.preventDefault();
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (!files.length) return;
+      void (async () => {
+        for (const file of files) {
+          try {
+            const saved = await uploadWorkspaceFile(`inbox/${file.name}`, file);
+            toastEgg(`Sent to the ship · ${saved.path}`);
+            appendToDraft(`ASSISTANT-HUB/${saved.path}`);
+          } catch (error) {
+            toastEgg(`Could not send ${file.name}: ${(error as Error).message}`);
+          }
+        }
+      })();
+    };
+    document.addEventListener('dragover', onDragOver);
+    document.addEventListener('drop', onDrop);
+    return () => {
+      document.removeEventListener('dragover', onDragOver);
+      document.removeEventListener('drop', onDrop);
+    };
   }, [toastEgg]);
 
   // Land on the first agent (Chief of Staff) once the list loads, if the

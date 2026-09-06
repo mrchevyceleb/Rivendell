@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Mic, PanelRightClose, PanelRightOpen, RotateCcw, Settings, Share2, SquarePen } from 'lucide-react';
 import type { ShellViewProps } from '../chat/components/reimagine/useChatShell';
 import { ChatThread } from '../chat/components/reimagine/blocks';
+import { DRAFT_APPEND_EVENT } from '../native/shell';
 import { Composer, AttachButton } from '../chat/components/reimagine/Composer';
 import { CounselPopover, ModelChip } from '../chat/components/reimagine/CounselPicker';
 import { Plus } from '../chat/components/reimagine/icons';
@@ -47,6 +48,18 @@ export function GrokConversation(props: BotConversationProps) {
   const placeholders = useMemo(() => composerPlaceholders(agentName), [agentName]);
 
   const empty = s.blocks.length === 0 && !s.busy;
+
+  // Files sent to the ship (drag and drop) announce their workspace path here.
+  useEffect(() => {
+    const onAppend = (event: Event) => {
+      const text = (event as CustomEvent<{ text: string }>).detail?.text;
+      if (!text) return;
+      const current = s.value.replace(/\s+$/, '');
+      s.setValue(current ? `${current} ${text} ` : `${text} `);
+    };
+    window.addEventListener(DRAFT_APPEND_EVENT, onAppend);
+    return () => window.removeEventListener(DRAFT_APPEND_EVENT, onAppend);
+  }, [s.value, s.setValue]);
 
   useEffect(() => {
     if (!settingsOpen) return;

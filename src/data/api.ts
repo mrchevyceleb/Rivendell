@@ -47,3 +47,26 @@ export function renameWorkspaceEntry(from: string, to: string): Promise<{ path: 
 export function deleteWorkspaceEntry(path: string): Promise<{ path: string }> {
   return apiJson<{ path: string }>(`/api/docs/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
 }
+
+export type WorkspaceUploadResponse = { path: string; size: number; modifiedAt: string };
+
+/** Send a file to the ship's workspace. The server keeps it under `path`,
+ *  adding a numeric suffix rather than overwriting. */
+export async function uploadWorkspaceFile(path: string, file: Blob): Promise<WorkspaceUploadResponse> {
+  const response = await fetch(`/api/files/upload?path=${encodeURIComponent(path)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    let message = text;
+    try {
+      message = (JSON.parse(text) as { error?: string }).error ?? text;
+    } catch {
+      /* plain text */
+    }
+    throw new Error(message || `${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as WorkspaceUploadResponse;
+}
