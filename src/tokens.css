@@ -40,6 +40,7 @@
   --r-star:        #f5efe2;     /* lamp-white heading ink */
   --r-elf-blue:    #f2b95f;     /* ACCENT: amber glow (lit instrument) */
   --r-elf-glow:    #ffd08a;     /* accent text/icon on dark */
+  --r-on-accent:   #1a120a;     /* ink ON an accent-filled surface */
   --r-deep-blue:   #8a6a32;     /* dim brass */
   --r-gold:        #d9a85a;     /* primary brass */
   --r-gold-soft:   #8a6a32;
@@ -101,7 +102,7 @@
   --r-ink:         #1c1915;
   --r-ink-soft:    #3f3a32;
   --r-ink-mute:    #6c665b;
-  --r-ink-faint:   #8f887b;
+  --r-ink-faint:   #756e62;    /* ≥4.5:1 on the wall for 9–12px metadata */
   --r-ink-ghost:   #c2bbae;
 
   --r-silver:      #5c574d;
@@ -109,6 +110,7 @@
   --r-star:        #141210;
   --r-elf-blue:    #9a6118;    /* accent darkened for the wall */
   --r-elf-glow:    #7d4e12;
+  --r-on-accent:   #ffffff;    /* light text on the darkened accent */
   --r-deep-blue:   #5e4620;
   --r-gold:        #7a5c28;    /* brass darkened */
   --r-gold-soft:   #5e4620;

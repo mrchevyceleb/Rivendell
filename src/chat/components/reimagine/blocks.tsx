@@ -78,7 +78,7 @@ function ConnectionStateIndicator({ reconnecting }: { reconnecting: boolean }) {
   return (
     <div className="connection-state" role="status">
       <span className="vortex connection-state-star" aria-hidden="true" />
-      <span>{reconnecting ? 'Re-materialising…' : 'Dematerialised'}</span>
+      <span>{reconnecting ? 'Re-materialising…' : 'Connection lost — dematerialised'}</span>
     </div>
   );
 }

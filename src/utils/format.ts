@@ -23,7 +23,7 @@ export function statusLabel(status: string): string {
     horizon: 'on the horizon',
     in_hand: 'in hand',
     in_progress: 'in progress',
-    delegated: "in council's care",
+    delegated: "in the ship's care",
     done: 'done',
   };
   return labels[status] ?? status.replaceAll('_', ' ');

@@ -134,15 +134,22 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
   // beat; an unknown room path gets a BAD WOLF toast. Neither touches a turn.
   const [regen, setRegen] = useState(false);
   const [eggToast, setEggToast] = useState<string | null>(null);
+  const eggTimers = useRef({ toast: 0, regen: 0 });
   const toastEgg = useCallback((msg: string) => {
+    window.clearTimeout(eggTimers.current.toast);
     setEggToast(msg);
-    window.setTimeout(() => setEggToast(null), 2400);
+    eggTimers.current.toast = window.setTimeout(() => setEggToast(null), 2400);
   }, []);
   useKonami(useCallback(() => {
+    window.clearTimeout(eggTimers.current.regen);
     setRegen(true);
-    window.setTimeout(() => setRegen(false), 1400);
+    eggTimers.current.regen = window.setTimeout(() => setRegen(false), 1400);
     toastEgg(`Type 40 TT Capsule · ${TAGLINE}`);
   }, [toastEgg]));
+  useEffect(() => {
+    const timers = eggTimers.current;
+    return () => { window.clearTimeout(timers.toast); window.clearTimeout(timers.regen); };
+  }, []);
   const badWolf = useRef(Boolean(initialRoom && !ROOMS[initialRoom]));
   useEffect(() => {
     if (badWolf.current) { badWolf.current = false; toastEgg('BAD WOLF'); }

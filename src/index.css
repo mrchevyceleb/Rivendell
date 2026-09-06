@@ -1166,8 +1166,8 @@ button {
 }
 
 .kanban-column[data-status='delegated'] {
-  --column-accent: var(--r-rose);
-  --column-wash: rgba(217, 83, 79, 0.12);
+  --column-accent: var(--r-violet);
+  --column-wash: rgba(155, 132, 201, 0.12);
 }
 
 .kanban-column[data-status='done'] {
@@ -4835,10 +4835,6 @@ button {
 
   .room-title {
     font-size: 26px;
-  }
-
-  .room-title {
-    font-size: 31px;
   }
 
   .room-actions {

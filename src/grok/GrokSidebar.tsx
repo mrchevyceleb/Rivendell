@@ -115,12 +115,17 @@ export function BotRail(props: BotRailProps) {
   const idle = useIdle(600_000);
   const anyBusy = live.some((s) => s.busy);
   const [sound, setSound] = useState(readSound);
+  const soundRef = useRef(sound);
+  soundRef.current = sound;
   const [lampFlash, setLampFlash] = useState(false);
+  const lampTimer = useRef(0);
   const onLampTap = useTripleTap(useCallback(() => {
+    window.clearTimeout(lampTimer.current);
     setLampFlash(true);
-    window.setTimeout(() => setLampFlash(false), 900);
-    if (readSound()) vworp();
+    lampTimer.current = window.setTimeout(() => setLampFlash(false), 900);
+    if (soundRef.current) vworp();
   }, []));
+  useEffect(() => () => window.clearTimeout(lampTimer.current), []);
 
   useEffect(() => {
     if (!pluginsOpen) return;

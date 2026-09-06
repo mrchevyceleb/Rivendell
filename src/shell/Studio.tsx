@@ -23,6 +23,7 @@ import { useRepos } from '../chat/hooks/useRepos';
 import { normalizeWorkspacePath } from '../chat/utils/proxyLinks';
 import { useWorkspaceTree } from '../hooks/useRoomData';
 import { Evenstar, StarField } from '../theme/Ornaments';
+import { ROOM_NAMES } from '../data/roomNames';
 import { FileTree } from './studio/FileTree';
 import { FileTab } from './studio/FileTab';
 import { ChatTab, type ChatTabApi } from './studio/ChatTab';
@@ -31,6 +32,17 @@ import { STUDIO_ACTIVE_KEY, STUDIO_TABS_KEY, STUDIO_TREE_KEY, type StudioTab } f
 import './studio/studio.css';
 
 // ─── Boot / persistence ──────────────────────────────────────────────────────
+
+// Room tabs are labelled from the single source of truth even when the tab was
+// persisted under an older title.
+const LEGACY_CHAT_TITLE = 'Elrond';
+function tabTitle(tab: StudioTab): string {
+  if (tab.kind === 'council') return ROOM_NAMES.council.name;
+  if (tab.kind === 'forge') return ROOM_NAMES.forge.name;
+  // Only the exact legacy default is migrated; a user-renamed title survives.
+  if (tab.kind === 'chat' && tab.title === LEGACY_CHAT_TITLE) return 'TARDIS';
+  return tab.title;
+}
 
 function readTabs(): { tabs: StudioTab[]; active: string } {
   const fallback = (): { tabs: StudioTab[]; active: string } => {
@@ -64,7 +76,7 @@ export function Studio() {
   const boot = useMemo(readTabs, []);
   const [tabs, setTabs] = useState<StudioTab[]>(boot.tabs);
   const [active, setActive] = useState<string>(boot.active);
-  // Mobile-only "⋯ More" menu (Jarvis / Council / Forge / theme live here so the
+  // Mobile-only "⋯ More" menu (Jarvis / Missions / Engine Room / theme live here so the
   // narrow top bar stays uncluttered and every control keeps a real tap target).
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
@@ -217,13 +229,13 @@ export function Studio() {
 
   const openForgeTab = useCallback(() => {
     const id = 'forge';
-    setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, { id, kind: 'forge', title: 'Forge' }]));
+    setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, { id, kind: 'forge', title: ROOM_NAMES.forge.name }]));
     setActive(id);
   }, []);
 
   const openCouncilTab = useCallback(() => {
     const id = 'council';
-    setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, { id, kind: 'council', title: 'Council' }]));
+    setTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, { id, kind: 'council', title: ROOM_NAMES.council.name }]));
     setActive(id);
   }, []);
 
@@ -399,14 +411,14 @@ export function Studio() {
                       className="studio-tab-main"
                       onClick={() => activate(tab.id)}
                       onDoubleClick={isChat ? () => startRename(tab) : undefined}
-                      title={isChat ? `${tab.title} · right-click to rename` : (tab.path ?? tab.title)}
+                      title={isChat ? `${tabTitle(tab)} · right-click to rename` : (tab.path ?? tab.title)}
                     >
                       {tabIcon(tab.kind)}
-                      <span className="tab-title">{tab.title}</span>
+                      <span className="tab-title">{tabTitle(tab)}</span>
                       {dirty ? <span className="tab-dirty">●</span> : null}
                     </button>
                   )}
-                  <button className="studio-tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }} title="Close" aria-label={`Close ${tab.title}`}>
+                  <button className="studio-tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }} title="Close" aria-label={`Close ${tabTitle(tab)}`}>
                     <X size={12} />
                   </button>
                 </div>
@@ -453,10 +465,10 @@ export function Studio() {
                       {jarvis.wakeActive ? <span className="studio-more-dot" aria-hidden="true" /> : null}
                     </button>
                     <button type="button" onClick={() => { openCouncilTab(); setMoreOpen(false); }}>
-                      <LayoutGrid size={17} /> Council
+                      <LayoutGrid size={17} /> {ROOM_NAMES.council.name}
                     </button>
                     <button type="button" onClick={() => { openForgeTab(); setMoreOpen(false); }}>
-                      <Hammer size={17} /> Forge
+                      <Hammer size={17} /> {ROOM_NAMES.forge.name}
                     </button>
                     <button type="button" onClick={() => { setTheme((t) => (t === 'dark' ? 'light' : 'dark')); setMoreOpen(false); }}>
                       {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />} {theme === 'dark' ? 'Light theme' : 'Dark theme'}
@@ -476,8 +488,8 @@ export function Studio() {
                 {jarvis.wakeActive && <span className="jarvis-summon-dot" />}
               </button>
               <button onClick={openChatTab} title="New chat with TARDIS"><MessageSquarePlus size={16} /></button>
-              <button onClick={openCouncilTab} title="Open Council (task kanban)"><LayoutGrid size={16} /></button>
-              <button onClick={openForgeTab} title="Open Forge (cron & deploy)"><Hammer size={16} /></button>
+              <button onClick={openCouncilTab} title={`Open ${ROOM_NAMES.council.name} (task kanban)`}><LayoutGrid size={16} /></button>
+              <button onClick={openForgeTab} title={`Open ${ROOM_NAMES.forge.name} (cron & deploy)`}><Hammer size={16} /></button>
               <span className="studio-zoom">
                 <button onClick={() => stepZoom(-0.1)} title="Smaller"><ZoomOut size={16} /></button>
                 <button className="studio-zoom-pct" onClick={() => setZoom(1)} title="Reset size">{Math.round(zoom * 100)}%</button>

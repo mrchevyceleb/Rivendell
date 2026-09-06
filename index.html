@@ -21,18 +21,19 @@
       try { var t = localStorage.getItem('rivendell:theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
     </script>
     <style>
-      /* Boot: the box materialises. Pure CSS, never blocks input
-         (pointer-events: none), and self-expires at 1.4s even if JS never
+      /* Boot: the box materialises. Pure CSS; it swallows input only while it
+         is opaque (so a tap cannot land on an invisible control), releases as
+         soon as it starts fading, and self-expires at 1.4s even if JS never
          runs. App.tsx fades it out once React has mounted. */
       html { background: #08080a; }
       html[data-theme="light"] { background: #f4f1ea; }
-      #boot { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; background: #08080a; pointer-events: none; animation: boot-out .2s ease 1.4s both; }
+      #boot { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; background: #08080a; pointer-events: auto; animation: boot-out .2s ease 1.4s both; }
       html[data-theme="light"] #boot { background: #f4f1ea; }
-      #boot.out { animation: boot-out-now .2s ease both; }
+      #boot.out { animation: boot-out-now .2s ease both; pointer-events: none; }
       #boot svg { width: 46px; height: 46px; opacity: 0; animation: boot-lamp .7s ease-out both; filter: drop-shadow(0 0 12px rgba(242, 185, 95, .35)); }
       /* two soft pulses (~2.9 Hz on a 46px glyph, under the 3 Hz flash line) */
       @keyframes boot-lamp { 0% { opacity: 0; } 30% { opacity: .95; } 55% { opacity: .4; } 80% { opacity: 1; } 100% { opacity: .85; } }
-      @keyframes boot-out { to { opacity: 0; visibility: hidden; } }
+      @keyframes boot-out { from { pointer-events: none; } to { opacity: 0; visibility: hidden; pointer-events: none; } }
       @keyframes boot-out-now { to { opacity: 0; visibility: hidden; } }
       @media (prefers-reduced-motion: reduce) {
         #boot svg { animation: none; opacity: .85; }

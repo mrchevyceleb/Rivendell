@@ -41,7 +41,7 @@ const STATUS_LABELS: Record<string, string> = {
   ready: 'Ready',
   streaming: 'In flight',
   closed: 'Dematerialised',
-  error: 'Dematerialised',
+  error: 'Error — dematerialised',
 };
 
 /** Transport status → console wording. Unknown statuses pass through. */

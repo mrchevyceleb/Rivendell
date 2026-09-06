@@ -9,7 +9,7 @@ const EGG_PHRASES = ['mellon', 'allons-y', 'allons y', 'allonsy', 'geronimo', 'f
 /** A bare trigger phrase in the composer (trailing punctuation ignored). The
     message still sends or steers exactly as typed — the burst is a side effect. */
 export function isEggPhrase(text: string): boolean {
-  const t = text.trim().toLowerCase().replace(/[!.…\s]+$/u, '');
+  const t = text.trim().toLowerCase().replace(/[!.…?,;:\s]+$/u, '');
   return EGG_PHRASES.includes(t);
 }
 
