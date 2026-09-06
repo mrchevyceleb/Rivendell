@@ -23,9 +23,7 @@ export interface Settings {
   deviceId?: string;
   /** Whether agents may use this computer at all. */
   bridgeEnabled?: boolean;
-  /** Commands the user chose to always allow, verbatim. */
-  allowedCommands?: string[];
-  /** Folders outside the workspace the user chose to always allow. */
+  /** Folders the user chose to always allow, keyed by mode. */
   allowedPaths?: string[];
 }
 
@@ -67,7 +65,6 @@ function sanitize(raw: unknown): Settings {
   if (typeof input.workspaceRoot === 'string' && input.workspaceRoot) out.workspaceRoot = input.workspaceRoot;
   if (typeof input.deviceId === 'string' && input.deviceId) out.deviceId = input.deviceId;
   if (typeof input.bridgeEnabled === 'boolean') out.bridgeEnabled = input.bridgeEnabled;
-  out.allowedCommands = strings(input.allowedCommands);
   out.allowedPaths = strings(input.allowedPaths);
   if (input.bounds && typeof input.bounds === 'object') {
     const b = input.bounds as Record<string, unknown>;

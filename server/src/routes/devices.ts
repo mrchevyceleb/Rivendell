@@ -59,7 +59,7 @@ devicesRouter.post('/write', relay('write', (body) => {
   const path = String(body.path ?? '').trim();
   if (!path) return 'path is required';
   if (typeof body.content !== 'string') return 'content (string) is required';
-  return { path, content: body.content, encoding: body.encoding === 'base64' ? 'base64' : 'utf8' };
+  return { path, content: body.content };
 }));
 
 devicesRouter.post('/ls', relay('ls', (body) => {

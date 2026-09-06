@@ -45,6 +45,7 @@ type Device = {
   info: DeviceInfo;
   socket: WebSocket;
   pending: Map<string, Pending>;
+  lastSeen: number;
 };
 
 const devices = new Map<string, Device>();
@@ -137,12 +138,23 @@ export function registerDeviceBridge(server: HttpServer): void {
     wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
       let registered: Device | null = null;
 
+      let lastSeen = Date.now();
       const beat = setInterval(() => {
-        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+        if (ws.readyState !== ws.OPEN) return;
+        // Two silent intervals means the far end is gone even though the
+        // socket never closed: drop it rather than list a machine that will
+        // never answer.
+        if (Date.now() - lastSeen > HEARTBEAT_MS * 2.5) {
+          ws.terminate();
+          return;
+        }
+        ws.send(JSON.stringify({ type: 'ping' }));
       }, HEARTBEAT_MS);
       beat.unref?.();
 
       ws.on('message', (raw) => {
+        lastSeen = Date.now();
+        if (registered) registered.lastSeen = lastSeen;
         let msg: Record<string, unknown>;
         try {
           msg = JSON.parse(String(raw)) as Record<string, unknown>;
@@ -178,7 +190,7 @@ export function registerDeviceBridge(server: HttpServer): void {
             version: String(msg.version ?? ''),
             connectedAt: new Date().toISOString(),
           };
-          registered = { info, socket: ws, pending: new Map() };
+          registered = { info, socket: ws, pending: new Map(), lastSeen: Date.now() };
           devices.set(id, registered);
           ws.send(JSON.stringify({ type: 'ready' }));
           console.log(`[tardis] linked computer ${info.name} (${info.platform})`);

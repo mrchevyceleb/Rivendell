@@ -20,7 +20,7 @@ import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, startUpdater } from './updater.js';
 import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
-import { startDeviceBridge, stopDeviceBridge } from './bridge.js';
+import { refreshDeviceBridge, startDeviceBridge, stopDeviceBridge } from './bridge.js';
 import { bridgeEnabled, forgetApprovals, setBridgeEnabled } from './approvals.js';
 
 const pkg = require('../package.json') as { repository?: { url?: string } };
@@ -126,8 +126,11 @@ async function openOutside(url: string): Promise<void> {
 
 async function chooseWorkspace(): Promise<void> {
   const picked = await chooseWorkspaceRoot(win);
-  // The console reads the root once at load; show it the new one.
-  if (picked) loadServer();
+  if (!picked) return;
+  // The console reads the root once at load, and the ship was told the old
+  // one when this machine announced itself.
+  loadServer();
+  refreshDeviceBridge();
 }
 
 async function openWorkspace(): Promise<void> {

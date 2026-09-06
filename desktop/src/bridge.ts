@@ -1,13 +1,14 @@
 // The link that lets agents use this computer. The app dials the ship (the
 // ship never dials in, so nothing here listens on a port), announces the
-// machine, and then answers requests one at a time. Everything a request
-// wants to do goes through approvals.ts first, always on a canonical path so
-// a symlink cannot walk out of the folder the user approved.
+// machine, and then answers requests. Everything a request wants to do goes
+// through approvals.ts first, always on a canonical path, and files are
+// opened without following a symlink so the path that was approved is the
+// path that gets touched.
 import { app, shell } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { constants as fsConstants, realpathSync } from 'node:fs';
+import { mkdir, open, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -25,11 +26,18 @@ const RECONNECT_MAX_MS = 60_000;
 const OUTPUT_CAP = 256 * 1024;
 const FILE_CAP = 2 * 1024 * 1024;
 const LS_CAP = 500;
+// A compromised ship must not be able to drown this machine in work.
+const MAX_INFLIGHT = 8;
+const MAX_RUNNING_COMMANDS = 4;
+// Symlinks are resolved before approval; refusing to follow one at the final
+// step closes the gap between the check and the open.
+const NOFOLLOW = process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
 
 let socket: WebSocket | null = null;
 let retryTimer: NodeJS.Timeout | undefined;
 let backoff = RECONNECT_MIN_MS;
 let currentUrl: string | undefined;
+let inflight = 0;
 // Bumped every time the link is pointed somewhere new or torn down, so a
 // socket that closes later cannot schedule a reconnect for a link that is
 // already gone (which would otherwise loop forever).
@@ -91,6 +99,9 @@ function killTree(child: ChildProcess): void {
 }
 
 async function runCommand(command: string, cwd: string, timeoutMs: number): Promise<unknown> {
+  if (running.size >= MAX_RUNNING_COMMANDS) {
+    throw new Error('That computer is already running as many commands as it will take at once.');
+  }
   const [file, args] = process.platform === 'win32'
     ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command]]
     : [process.env.SHELL || '/bin/bash', ['-lc', command]];
@@ -151,7 +162,11 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
     if (await approveCommand(command, cwd, deadline) === 'deny') {
       throw new Error('The person at that computer declined to run this.');
     }
-    return runCommand(command, cwd, budget);
+    // Time spent waiting for that answer comes out of the command's budget,
+    // so nothing keeps running after the ship has stopped listening.
+    const remaining = deadline - Date.now();
+    if (remaining < 1_000) throw new Error('Approval came too late to start this command.');
+    return runCommand(command, cwd, remaining);
   }
 
   const target = resolveOnThisMachine(String(params.path ?? ''));
@@ -161,12 +176,17 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
     if (await approvePath(target, 'read', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to share this file.');
     }
-    const info = await stat(target);
-    if (!info.isFile()) throw new Error('That path is not a file.');
-    if (info.size > FILE_CAP) throw new Error(`That file is ${Math.round(info.size / 1024)} KB; too large to read over the link.`);
-    const buffer = await readFile(target);
-    if (looksBinary(buffer)) throw new Error('That file is not text.');
-    return { path: target, size: info.size, content: buffer.toString('utf8') };
+    const handle = await open(target, fsConstants.O_RDONLY | NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new Error('That path is not a file.');
+      if (info.size > FILE_CAP) throw new Error(`That file is ${Math.round(info.size / 1024)} KB; too large to read over the link.`);
+      const buffer = await handle.readFile();
+      if (looksBinary(buffer)) throw new Error('That file is not text.');
+      return { path: target, size: info.size, content: buffer.toString('utf8') };
+    } finally {
+      await handle.close();
+    }
   }
 
   if (op === 'write') {
@@ -176,9 +196,14 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
       throw new Error('The person at that computer declined to write this file.');
     }
     await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, content, 'utf8');
-    const info = await stat(target);
-    return { path: target, size: info.size };
+    const handle = await open(target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | NOFOLLOW, 0o644);
+    try {
+      await handle.writeFile(content, 'utf8');
+      const info = await handle.stat();
+      return { path: target, size: info.size };
+    } finally {
+      await handle.close();
+    }
   }
 
   if (op === 'ls') {
@@ -203,7 +228,7 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
 
   if (op === 'open') {
     if (await approvePath(target, 'open', root, deadline) === 'deny') {
-      throw new Error('The person at that computer declined to open this, or it is a file type that would run.');
+      throw new Error('The person at that computer declined to open this, or it is a file the computer would run.');
     }
     const problem = await shell.openPath(target);
     if (problem) throw new Error(problem);
@@ -270,10 +295,17 @@ function connect(generation: number): void {
         ws.send(JSON.stringify({ type: 'reply', id, ...payload }));
       }
     };
-    void handle(op, params).then(
-      (result) => answer({ ok: true, result }),
-      (error: unknown) => answer({ ok: false, error: error instanceof Error ? error.message : String(error) }),
-    );
+    if (inflight >= MAX_INFLIGHT) {
+      answer({ ok: false, error: 'That computer is already handling as many requests as it will take at once.' });
+      return;
+    }
+    inflight += 1;
+    void handle(op, params)
+      .then(
+        (result) => answer({ ok: true, result }),
+        (error: unknown) => answer({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+      )
+      .finally(() => { inflight -= 1; });
   });
 
   ws.addEventListener('close', () => {
@@ -297,12 +329,28 @@ function scheduleReconnect(generation: number): void {
   backoff = Math.min(RECONNECT_MAX_MS, Math.round(backoff * 1.7));
 }
 
-/** Point the link at a ship (or move it to a different one). */
+/** Point the link at a ship (or move it to a different one). Refuses while
+ *  the master switch is off, so a computer that is not offering itself never
+ *  announces its name and paths. */
 export function startDeviceBridge(serverUrl: string | undefined): void {
+  if (!bridgeEnabled()) {
+    stopDeviceBridge();
+    return;
+  }
   if (currentUrl === serverUrl && socket) return;
   teardown();
   currentUrl = serverUrl;
   if (!serverUrl) return;
+  backoff = RECONNECT_MIN_MS;
+  connect(linkGeneration);
+}
+
+/** Re-announce this machine (its workspace folder just changed). */
+export function refreshDeviceBridge(): void {
+  const url = currentUrl;
+  if (!url || !bridgeEnabled()) return;
+  teardown();
+  currentUrl = url;
   backoff = RECONNECT_MIN_MS;
   connect(linkGeneration);
 }
