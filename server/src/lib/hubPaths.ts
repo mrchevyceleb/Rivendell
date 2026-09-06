@@ -197,7 +197,7 @@ export function assertHubStructureWrite(
   }
 }
 
-/** Short contract injected into Elrond / Codex prompts. */
+/** Short contract injected into TARDIS / Codex prompts. */
 export const HUB_WRITE_LOCK_PROMPT = [
   'ASSISTANT-HUB filesystem lock (non-negotiable):',
   '1. Hub root is READ-ONLY except existing control files (AGENTS.md, CLAUDE.md, README.md, home.md). Never create new top-level files or folders.',

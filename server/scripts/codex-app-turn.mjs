@@ -3,7 +3,7 @@
 /**
  * One Codex turn over the app-server protocol.
  *
- * Rivendell used `codex exec`, whose stdin cannot accept a second prompt. That
+ * TARDIS used `codex exec`, whose stdin cannot accept a second prompt. That
  * made every teammate correction wait for the whole turn to finish. App-server
  * exposes `turn/steer`, so this adapter keeps the existing exec-style JSONL
  * event contract while accepting correlated steer requests on stdin.
@@ -299,7 +299,7 @@ async function start(config) {
       sandbox: 'danger-full-access',
       historyMode: 'legacy',
       ephemeral: false,
-      developerInstructions: 'Do not use Codex native collaboration agents for Rivendell teammate handoffs. Rivendell supplies its own team_message MCP.',
+      developerInstructions: 'Do not use Codex native collaboration agents for TARDIS companion handoffs. TARDIS supplies its own team_message MCP.',
     });
     thread = started.thread;
   }
@@ -346,7 +346,7 @@ input.on('close', () => {
   exitRequested = true;
   targetExitCode = 1;
   activeTurnId = null;
-  rejectPending(new Error('Rivendell closed the Codex adapter input'));
+  rejectPending(new Error('TARDIS closed the Codex adapter input'));
   signalApp('SIGTERM');
   shutdownTimer = setTimeout(() => signalApp('SIGKILL'), 3_000);
   shutdownTimer.unref?.();

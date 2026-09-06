@@ -60,7 +60,7 @@ export function sanitizeKey(key: string): string {
 /** CLI plumbing that is not conversation. Filter on write AND on load so
  * old logs shrink in memory. In particular, Claude Code emits one
  * `thinking_tokens` system record AND one `thinking_delta` stream record for
- * nearly every reasoning token; neither renders in Rivendell, but together
+ * nearly every reasoning token; neither renders in TARDIS, but together
  * they turned two GLM turns into ~40,000 durable events. */
 export function isPlumbingEvent(ev: unknown): boolean {
   const e = ev as { type?: unknown; event?: any; subtype?: unknown };

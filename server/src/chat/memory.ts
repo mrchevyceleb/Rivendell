@@ -83,7 +83,7 @@ function readProcMemAvailable(): number | null {
   }
 }
 
-// If Rivendell runs under a cgroup memory limit (container or systemd
+// If TARDIS runs under a cgroup memory limit (container or systemd
 // MemoryMax), the host MemAvailable can look healthy while this process's own
 // cgroup is near OOM. Return the cgroup's available bytes (limit - current)
 // when a finite limit is set, else null. cgroup v2 first, then v1.

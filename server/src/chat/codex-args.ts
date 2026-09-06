@@ -1,7 +1,7 @@
-/** Rivendell owns teammate identity, routing, durability, and cycle guards.
+/** TARDIS owns teammate identity, routing, durability, and cycle guards.
  * Codex's unrelated native multi-agent runtime creates a second `/root/...`
  * roster and exposes `send_message`, which looks deceptively correct but cannot
- * reach Rivendell teammates. Keep that competing bus out of every agent turn. */
+ * reach TARDIS teammates. Keep that competing bus out of every agent turn. */
 export function codexRivendellIsolationArgs(): string[] {
   return ['--disable', 'multi_agent'];
 }

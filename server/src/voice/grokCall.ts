@@ -30,7 +30,7 @@ export const GROK_REALTIME_URL = 'wss://api.x.ai/v1/realtime?model=grok-voice-th
 export const GROK_VOICE_IDS = ['ara', 'eve', 'leo', 'rex', 'sal', 'atlas', 'aurora', 'luna', 'orion', 'carina'] as const;
 
 const CALL_RULES =
-  'You are a named teammate in Rivendell, on a voice call with the user. Stay in character. ' +
+  'You are a named companion aboard the TARDIS, on a voice call with the user. Stay in character. ' +
   'Speak as I or me; never address yourself by your own name in the third person. Do not mention being an AI, Grok, or xAI unless asked. ' +
   'Keep spoken replies short and conversational — one or two sentences unless the user asks for depth. ' +
   'If a request needs files, tools, or teammates, say you will handle it in the thread after the call and keep talking.';
@@ -298,8 +298,8 @@ export function registerVoiceCalls(server: HttpServer): void {
           const agent = listAgents().find((a) => a.id === agentId);
           if (!agent) { client.send(JSON.stringify({ type: 'error', message: 'unknown agent' })); return; }
           const scope = agent ? personaScopeFor(agent.home) : '';
-          const name = agent?.name ?? 'Rivendell';
-          const instructions = [CALL_RULES, scope || `You are ${name}, a teammate in Rivendell.`].filter(Boolean).join('\n\n');
+          const name = agent?.name ?? 'TARDIS';
+          const instructions = [CALL_RULES, scope || `You are ${name}, a companion aboard the TARDIS.`].filter(Boolean).join('\n\n');
           const greeting = `Hey — ${name} here. What's up?`;
           call = new GrokCall(client, instructions, greeting, String(msg.voice ?? agent?.voice ?? 'ara'));
           void call.connect();

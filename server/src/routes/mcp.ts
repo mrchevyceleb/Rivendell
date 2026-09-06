@@ -14,7 +14,7 @@ const HEALTH_TIMEOUT_MS = 8000;
 const ACTION_HEADER = 'x-rivendell-action';
 const REDEPLOY_ACTION = 'redeploy';
 
-/** True only when the request comes from the same origin as the Rivendell
+/** True only when the request comes from the same origin as the TARDIS
  *  server. Browsers always set Origin on cross-site fetches, so a missing
  *  Origin (curl, server-side calls) or a matching Origin both pass. */
 function sameOrigin(req: Request): boolean {

@@ -18,7 +18,7 @@ export async function runJob(job: RivendellJob): Promise<DispatcherResult> {
   }
 
   const prompt = [
-    `You are the Rivendell headless worker handling skill "${job.skill}".`,
+    `You are the TARDIS headless worker handling skill "${job.skill}".`,
     'Do not send messages, push commits, or open PRs unless explicitly told. Draft or summarize when approval is needed.',
     job.repo ? `Repository: ${job.repo}` : '',
     job.prompt ?? '',

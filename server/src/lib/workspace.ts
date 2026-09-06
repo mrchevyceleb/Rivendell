@@ -76,13 +76,15 @@ export function workspaceRoot(): string {
 // what the UI should show regardless of which machine the user is on.
 export const WORKSPACE_DISPLAY_LABEL = 'ASSISTANT-HUB';
 export const WORKSPACE_DISPLAY_PATH = '~/ASSISTANT-HUB';
+/** Sentinel message shared with routes/docs.ts so the two never drift. */
+export const OUTSIDE_WORKSPACE = 'File path is outside the TARDIS workspace';
 
 export async function readWorkspaceTree(opts?: {
   hideLegacy?: boolean;
 }): Promise<{ root: string; displayPath: string; tree: FileTreeNode; fileCount: number; dirCount: number; hideLegacy: boolean }> {
   const absRoot = workspaceRoot();
   if (!existsSync(absRoot)) {
-    throw new Error(`Elrond workspace does not exist: ${absRoot}`);
+    throw new Error(`TARDIS workspace does not exist: ${absRoot}`);
   }
   const hideLegacy = opts?.hideLegacy !== false;
   let fileCount = 0;
@@ -219,7 +221,7 @@ function resolveWorkspacePath(relPath: string, allowRoot: boolean): { absPath: s
   const absPath = resolve(root, relPath || '.');
   const inside = relative(root, absPath);
   if ((!allowRoot && inside === '') || inside.startsWith('..') || inside.startsWith('/')) {
-    throw new Error('File path is outside the Elrond workspace');
+    throw new Error(OUTSIDE_WORKSPACE);
   }
   return { absPath, inside };
 }
@@ -237,12 +239,12 @@ async function assertInsideWorkspace(absPath: string): Promise<void> {
     try {
       const realTarget = await realpath(toCheck);
       if (realTarget !== realRoot && !realTarget.startsWith(rootWithSep)) {
-        throw new Error('File path is outside the Elrond workspace');
+        throw new Error(OUTSIDE_WORKSPACE);
       }
       return;
     } catch (err: any) {
       // Re-throw our own sentinel; ENOENT means walk up one level.
-      if (err?.message === 'File path is outside the Elrond workspace') throw err;
+      if (err?.message === OUTSIDE_WORKSPACE) throw err;
       const parent = dirname(toCheck);
       if (parent === toCheck) return; // reached filesystem root; lexical check sufficient
       toCheck = parent;

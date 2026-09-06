@@ -102,7 +102,7 @@ export function startWorkspaceWatcher(): void {
     .on('unlinkDir', handle('unlinkDir'))
     .on('error', (err) => console.error('[workspace-watcher] error:', err));
 
-  // One-shot root scan so pollution that appeared while Rivendell was down is noted.
+  // One-shot root scan so pollution that appeared while TARDIS was down is noted.
   void readdir(root, { withFileTypes: true })
     .then((entries) => {
       for (const entry of entries) {

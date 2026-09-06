@@ -59,7 +59,7 @@ export function crashTombstoneText(opts: TombstoneOpts): string {
   const lines: string[] = [];
   const ranPhrase = ranMs === undefined ? '' : ` after running ${humanizeMs(ranMs)}`;
   lines.push(
-    `[Rivendell] This turn was KILLED before it could reply. The ${cli} process died${ranPhrase} (${how}).`,
+    `[TARDIS] This turn was KILLED before it could reply. The ${cli} process died${ranPhrase} (${how}).`,
   );
   if (likelyOom(code, signal)) {
     lines.push(
@@ -100,7 +100,7 @@ export function crashTombstoneEvent(text: string) {
  *  the UI renders it as a divider, not a bubble. */
 export function restartMarkerEvent(signal: string) {
   const text = [
-    `[Rivendell] The service restarted mid-turn (${signal} — a deploy or bounce). This turn was KILLED with the process.`,
+    `[TARDIS] The service restarted mid-turn (${signal} — a deploy or bounce). This turn was KILLED with the process.`,
     `Your in-flight tool call's output — including any error it printed — is LOST. Do NOT stall silently and do NOT guess:` ,
     `  1. re-check the work directly (re-run the interrupted command, or inspect its logs/artifacts), then`,
     `  2. tell the user the turn was restarted and what you recovered.`,

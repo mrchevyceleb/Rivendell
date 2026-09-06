@@ -8,7 +8,7 @@ export const internalRouter = Router();
 // Localhost-only callers (the assistant-cron runtime) hit these. Not part of
 // the SPA and intentionally NOT under /api so the Forge/admin surfaces never
 // proxy to them. Every route is gated by MCP_AUTH_TOKEN (same secret the admin
-// API uses; both Rivendell and the cron runtime source it from Doppler).
+// API uses; both TARDIS and the cron runtime source it from Doppler).
 
 const WORKSPACE = ELROND_WORKSPACE_PATH;
 const RUN_TIMEOUT_MS = Number(process.env.RIVENDELL_CRON_LLM_TIMEOUT_MS) || 280_000;

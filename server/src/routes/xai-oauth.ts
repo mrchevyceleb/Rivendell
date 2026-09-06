@@ -221,7 +221,7 @@ xaiOauthRouter.get('/', async (_req, res) => {
   }
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.send(`<!doctype html><html><head><meta charset="utf-8">
-<title>Connect SuperGrok · Rivendell</title>
+<title>Connect SuperGrok · TARDIS</title>
 <style>
   :root { color-scheme: dark; }
   body { font-family: ui-sans-serif, system-ui; background:#0f1419; color:#e6e1cf; margin:0; padding:40px 20px; }

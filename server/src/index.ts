@@ -65,6 +65,7 @@ app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     app: 'rivendell',
+    brand: 'tardis',
     port: PORT,
     workerRunner: WORKER_RUNNER,
     /** In-flight turns right now. A restart kills them mid-flight — deploys
@@ -110,7 +111,7 @@ const server = createServer(app);
 try {
   await ensureXaiProxy();
 } catch (err) {
-  console.warn(`[rivendell] xAI proxy failed to start: ${(err as Error).message}`);
+  console.warn(`[tardis] xAI proxy failed to start: ${(err as Error).message}`);
 }
 // Prime the SuperGrok OAuth token (refresh now if near expiry, then background
 // refresh every 30m) so xAI chat turns use the subscription, not API credits.
@@ -154,7 +155,7 @@ let tearingDown = false;
 let agentPrewarm: Promise<void> | null = null;
 
 server.listen(PORT, HOST, () => {
-  console.log(`rivendell listening on http://${HOST}:${PORT}`);
+  console.log(`tardis listening on http://${HOST}:${PORT}`);
   void resumeQueuedTeamDeliveries().then((count) => {
     if (count > 0) console.log(`[team] resumed ${count} durable queued ${count === 1 ? 'delivery' : 'deliveries'}`);
   }).catch((error) => {
@@ -212,7 +213,7 @@ server.listen(PORT, HOST, () => {
 const tearDown = (signal: NodeJS.Signals) => {
   if (tearingDown) return; // a second SIGTERM/SIGINT must not re-mark or re-launch shutdown
   tearingDown = true;
-  console.warn(`[rivendell] received ${signal}, shutting down (pid=${process.pid}, uptime=${Math.round(process.uptime())}s)`);
+  console.warn(`[tardis] received ${signal}, shutting down (pid=${process.pid}, uptime=${Math.round(process.uptime())}s)`);
   // Deadline now, not after the flush: a stuck write chain must not hang exit.
   setTimeout(() => process.exit(0), 2500).unref();
   // Quiesce first: no new turns after this point, so nothing starts after the
@@ -223,20 +224,20 @@ const tearDown = (signal: NodeJS.Signals) => {
       markBusyLanesRestarting(signal) +
       markBusyCodexLanesRestarting(signal) +
       markBusyBananaLanesRestarting(signal);
-    if (marked > 0) console.warn(`[rivendell] marked ${marked} busy lane(s) with the restart tombstone`);
+    if (marked > 0) console.warn(`[tardis] marked ${marked} busy lane(s) with the restart tombstone`);
   } catch (err) {
-    console.warn('[rivendell] restart tombstone failed:', (err as Error).message);
+    console.warn('[tardis] restart tombstone failed:', (err as Error).message);
   }
   // Stop all sessions NOW so no new events enqueue after the flush below.
   stopWorkerQueue();
   stopWorkspaceWatcher();
-  console.warn('[rivendell] shutdown: sessions stopping…');
+  console.warn('[tardis] shutdown: sessions stopping…');
   stopChat();
-  console.warn('[rivendell] shutdown: sessions stopped, flushing logs');
+  console.warn('[tardis] shutdown: sessions stopped, flushing logs');
   void (async () => {
     // Everything is quiesced and sessions are dead — the chains are final.
     try { await flushAllEventChains(); } catch { /* best effort */ }
-    console.warn('[rivendell] shutdown: logs flushed, closing http');
+    console.warn('[tardis] shutdown: logs flushed, closing http');
     shutdownXaiProxy();
     server.close(() => process.exit(0));
   })();
@@ -245,8 +246,8 @@ const tearDown = (signal: NodeJS.Signals) => {
 process.on('SIGINT', () => tearDown('SIGINT'));
 process.on('SIGTERM', () => tearDown('SIGTERM'));
 process.on('uncaughtException', (err) => {
-  console.error('[rivendell] uncaughtException:', err);
+  console.error('[tardis] uncaughtException:', err);
 });
 process.on('unhandledRejection', (reason) => {
-  console.error('[rivendell] unhandledRejection:', reason);
+  console.error('[tardis] unhandledRejection:', reason);
 });

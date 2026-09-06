@@ -55,7 +55,7 @@ export type CronJob = {
   updatedAt?: string;
 };
 
-// All seeds intentionally empty. Rivendell rooms must reflect real upstream
+// All seeds intentionally empty. TARDIS rooms must reflect real upstream
 // data (assistant-mcp admin API on Railway, MCP /tools/call, or local
 // Supabase). When upstream is unreachable the client gets [] / 502 and shows
 // an empty-or-error state — never fabricated content.

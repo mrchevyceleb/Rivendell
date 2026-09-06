@@ -34,7 +34,7 @@ export const CODEX_APP_TURN_SCRIPT = resolveServerScript(
 );
 
 export const PORT = Number(process.env.PORT || process.env.RIVENDELL_PORT) || 8091;
-// Safe-by-default: Rivendell exposes filesystem and agent-control APIs and has
+// Safe-by-default: TARDIS exposes filesystem and agent-control APIs and has
 // no app-layer login. Bind loopback unless the operator explicitly opts into a
 // trusted network interface (Tailscale Serve can still proxy to 127.0.0.1).
 export const HOST = process.env.HOST || '127.0.0.1';
@@ -121,7 +121,7 @@ export const MCP_BEARER_TOKEN =
   '';
 
 // Optional Railway redeploy integration. Explicit configuration is required;
-// Rivendell never borrows a developer's global Railway CLI credential.
+// TARDIS never borrows a developer's global Railway CLI credential.
 export const RAILWAY_API_TOKEN =
   process.env.RAILWAY_API_TOKEN ||
   process.env.RAILWAY_TOKEN ||

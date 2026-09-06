@@ -16,9 +16,9 @@ export function isVoiceChatId(chatId: string): boolean {
 // Appended to --append-system-prompt for voice sessions. Everything the model
 // says is spoken aloud by TTS, so the register is spoken prose, not chat
 // markdown. Keep this addendum additive: for cli=assistant it rides AFTER the
-// Elrond persona prompt.
+// TARDIS persona prompt.
 export const THREAD_VOICE_STYLE_ADDENDUM = [
-  'VOICE CALL MODE FOR THIS TURN ONLY. You are speaking aloud as the named teammate whose regular Rivendell thread is handling this turn. Do not carry voice-only formatting into later typed turns.',
+  'VOICE CALL MODE FOR THIS TURN ONLY. You are speaking aloud as the named companion whose regular TARDIS thread is handling this turn. Do not carry voice-only formatting into later typed turns.',
   'This is the same durable conversation, with the same tools, memory, teammate access, and responsibilities as typed chat.',
   '',
   'Everything you output is spoken and also saved into the chat thread. Use plain conversational prose: no markdown,',

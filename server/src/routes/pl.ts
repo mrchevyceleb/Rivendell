@@ -50,7 +50,7 @@ plRouter.get('/export.csv', asyncHandler(async (_req, res) => {
       ...rows.map((row: any) => [row.date, row.type, row.name, row.amount, row.notes]),
     ].map((row) => row.map(csvCell).join(',')).join('\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="rivendell-pl.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="tardis-pl.csv"');
     res.send(`${csv}\n`);
   } catch (err: any) {
     res.status(502).json({ error: `pl export failed: ${err?.message || 'unknown error'}` });

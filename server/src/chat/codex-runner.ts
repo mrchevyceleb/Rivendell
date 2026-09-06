@@ -27,7 +27,7 @@ import { THREAD_VOICE_STYLE_ADDENDUM } from './voicePrompt.ts';
 /**
  * Which codex binary to run.
  *
- * Do NOT rely on bare 'codex' resolving through PATH here. Rivendell is started
+ * Do NOT rely on bare 'codex' resolving through PATH here. TARDIS is started
  * by npm, which prepends every ancestor node_modules/.bin, so a stale
  * @openai/codex in ~/node_modules shadows the real install and every turn fails
  * with a 400 the transcript never shows. Prefer the standalone install, allow an
@@ -201,7 +201,7 @@ const CODEX_TURN_PREAMBLE = [
   'If you see "stdin is closed for this session", rerun the command with tty=true.',
   'When searching files, use `rg` or `rg --files` with scoped paths and exclusions for `node_modules`, `.git`, build output, and cloud-sync trees. Do not run broad recursive `grep` or `find` over the home directory, workspace hubs, or ASSISTANT-HUB.',
   'Give spawned subagents the same search constraint before asking them to inspect code.',
-  'Rivendell teammates are reached ONLY through the rivendell-team team_message MCP tool (mcp__rivendell_team__team_message in Codex). They are not Codex collaboration agents. Never use native send_message, list_agents, spawn_agent, followup_task, or a /root/... route for a teammate handoff. A busy teammate is durably queued, not unavailable. Never claim a handoff attempt unless the rivendell-team MCP call actually occurred.',
+  'TARDIS companions are reached ONLY through the rivendell-team team_message MCP tool (mcp__rivendell_team__team_message in Codex). They are not Codex collaboration agents. Never use native send_message, list_agents, spawn_agent, followup_task, or a /root/... route for a companion handoff. A busy companion is durably queued, not unavailable. Never claim a handoff attempt unless the rivendell-team MCP call actually occurred.',
   HUB_WRITE_LOCK_PROMPT,
   '</samwise-codex-runtime>',
 ].join('\n');
@@ -701,7 +701,7 @@ export class CodexSession {
     const prompt = `${personaScope ? `${personaScope}\n\n---\n\n` : ''}${CODEX_TURN_PREAMBLE}\n\n${seed ? `${seed}\n\n---\n\n` : ''}${conversationGuidance ? `${conversationGuidance}\n\n` : ''}${opts.voiceMode ? `${THREAD_VOICE_STYLE_ADDENDUM}\n\n` : ''}${text}`;
     // The operator's browser bridge, the same MCP server Claude lanes get. Passed as
     // -c overrides rather than written into ~/.codex/config.toml so this stays
-    // scoped to Rivendell.
+    // scoped to TARDIS.
     const browserMcpEntry = process.env.RIVENDELL_BROWSER_MCP?.trim() || '';
     const browserMcpArgs: string[] = [];
     if (browserMcpEntry && existsSync(browserMcpEntry)) {
@@ -767,7 +767,7 @@ export class CodexSession {
     // Tracks whether this turn produced any model-visible progress so we can
     // surface a real error when Codex exits empty (the "thinking then nothing"
     // UX failure mode). Codex can return exit 1 with zero agent_message and
-    // almost no stderr, which used to leave Rivendell with only a silent
+    // almost no stderr, which used to leave TARDIS with only a silent
     // error_during_execution result and no chat-visible reason.
     let producedAgentMessage = false;
     let sawActionableItem = false;
@@ -1294,7 +1294,7 @@ export function markBusyCodexLanesRestarting(signal: string): number {
         eng: session.cli,
       })) marked++;
     } catch (err) {
-      console.warn(`[rivendell] restart tombstone failed for ${s.key}:`, (err as Error).message);
+      console.warn(`[tardis] restart tombstone failed for ${s.key}:`, (err as Error).message);
     }
   }
   return marked;

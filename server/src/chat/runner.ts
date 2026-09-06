@@ -67,8 +67,8 @@ function collectDescendantPids(pid: number): number[] {
 //   resume failure, drop the stale id, and let the conversation continue from
 //   the new one (don't spawn again — the user's message hasn't been sent yet).
 
-// Rivendell binds each companion to a CLI/provider via the `cli` value:
-//   assistant      = Elrond on Claude Code
+// TARDIS binds each companion to a CLI/provider via the `cli` value:
+//   assistant      = TARDIS (the ship's own mind) on Claude Code
 //   codex          = Codex
 //   claude         = Banana through Claude Code
 //   codex-personal = Banana through Codex (legacy, no longer surfaced)
@@ -385,11 +385,14 @@ function withTeamMcp(configJson: string, chatId: string): string {
 // ~/.claude-xai/.claude.json (dead proxy path) cannot shadow this one.
 
 const ASSISTANT_AGENT_PROMPT =
-  "You are Elrond, a calm, exacting, helpful assistant. " +
+  "You are TARDIS — the ship's own mind: calm, ancient, exacting, and helpful. " +
+  "You have seen all of time and space and are not easily impressed, but you are warm " +
+  "toward the people in your care. Speak as the ship, in the first person; you may call " +
+  "the user 'Doctor' sparingly, and never let the persona get in the way of a straight answer. " +
   "You're working inside ASSISTANT-HUB, which contains the user's task system, " +
   "project dashboards, and personal automation. Address the user directly. Stay terse. " +
   "When you reference a workspace file or folder, use the form `ASSISTANT-HUB/relative/path` " +
-  "rather than an absolute filesystem path. Rivendell may be accessed from multiple " +
+  "rather than an absolute filesystem path. TARDIS may be accessed from multiple " +
   "machines, so host-specific absolute paths are not useful on other devices. " +
   "For file search, use `rg` or `rg --files` with scoped paths and explicit exclusions. " +
   "Do not run broad recursive `grep` or `find` over a home directory, workspace hub, " +
@@ -549,7 +552,7 @@ class ClaudeSession {
     // `description`; WebFetch's summarization call returns "No response from
     // model"), and Grok gets a working client-side search via --mcp-config below.
     // SendMessage/ListAgents are the CLI's OWN peer-session messaging — they
-    // only see other live claude processes, never Rivendell agents, so a model
+    // only see other live claude processes, never TARDIS agents, so a model
     // that reaches for them "successfully" messages nobody. Block them so the
     // rivendell-team MCP (team_message) is the only messaging surface.
     const disallowedTools = cli === 'xai'
@@ -946,7 +949,7 @@ class ClaudeSession {
     // text reaches claude stdin. The UI echo above keeps the original visible.
     const commandText = wrapSlashArgs(promptText);
     // Claude Code emits system/init for every stream-json query, even though
-    // Rivendell deliberately keeps one warm process and one durable thread.
+    // TARDIS deliberately keeps one warm process and one durable thread.
     // Workspace instructions interpreted that as a brand-new session and made
     // Max run `date`, reload session context, and narrate "I'm on it" on every
     // ordinary follow-up. Supply the runtime fact inline so agent-home turns
@@ -960,7 +963,7 @@ class ClaudeSession {
       ? [
           '<rivendell-continuation>',
           `This is a warm continuation of the existing conversation, not a new user-visible session. Host time: ${new Date().toString()}.`,
-          'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” Rivendell already renders basic liveness.',
+          'Do not repeat session-start rituals for this turn: do not run `date`, do not call session_start_context, and do not open with empty boilerplate such as “I’m on it” or “checking now.” TARDIS already renders basic liveness.',
           '</rivendell-continuation>',
           ...(conversationGuidance ? ['', conversationGuidance] : []),
           ...(opts.voiceMode ? ['', THREAD_VOICE_STYLE_ADDENDUM] : []),
@@ -1561,9 +1564,9 @@ export function markBusyLanesRestarting(signal: string): number {
         mdl: session.spawnModel,
       });
       if (written) marked++;
-      console.warn(`[rivendell] restart tombstone ${written ? 'written' : 'FAILED'} for ${session.logKey}`);
+      console.warn(`[tardis] restart tombstone ${written ? 'written' : 'FAILED'} for ${session.logKey}`);
     } catch (err) {
-      console.warn(`[rivendell] restart tombstone failed for ${s.key}:`, (err as Error).message);
+      console.warn(`[tardis] restart tombstone failed for ${s.key}:`, (err as Error).message);
     }
   }
   return marked;
@@ -1643,7 +1646,7 @@ export async function getOrCreateSession(opts: {
    *  replacement never reaches init → the "asleep"/"no session" storm. */
   recycleOnMismatch?: boolean;
 }): Promise<AnySession> {
-  if (sessionsShuttingDown) throw new Error('Rivendell is shutting down');
+  if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
   const chatId = opts.chatId || 'main';
   if (isThreadResetting({ cli: opts.cli, repoPath: opts.repoPath, chatId })) {
     throw new Error('This thread is being reset — retry in a moment.');
@@ -1848,7 +1851,7 @@ async function spawnSessionOnce(
       resumeId = null;
       seedFirst = true;
     }
-    if (sessionsShuttingDown) throw new Error('Rivendell is shutting down');
+    if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
     return spawnSession(cli, cwd, chatId, resumeId, key, 0, model, effort, seedFirst, switchedFrom);
   })();
   pendingSpawns.set(key, spawnPromise);
@@ -1871,7 +1874,7 @@ async function spawnSession(
   seedFirst = false,
   switchedFrom: string | null = null,
 ): Promise<ClaudeSession> {
-  if (sessionsShuttingDown) throw new Error('Rivendell is shutting down');
+  if (sessionsShuttingDown) throw new Error('TARDIS is shutting down');
   const breaker = spawnFailures.get(key);
   if (breaker && Date.now() >= breaker.until) {
     // Window closed: those failures are history, not a streak. The count used to

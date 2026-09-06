@@ -6,7 +6,7 @@ import { asyncHandler } from './helpers.ts';
 export const weavingsRouter = Router();
 
 weavingsRouter.get('/queue', asyncHandler(async (_req, res) => {
-  // Weavings shows ONLY Rivendell's headless worker queue. Samwise/autofix
+  // Weavings shows ONLY TARDIS's headless worker queue. Samwise/autofix
   // queue is a different system and surfacing it here is misleading.
   res.json(await listJobs());
 }));

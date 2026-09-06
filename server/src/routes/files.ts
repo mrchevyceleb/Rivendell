@@ -76,7 +76,7 @@ filesRouter.get('/raw', asyncHandler(async (req, res) => {
   res.setHeader('Accept-Ranges', 'bytes');
   // Workspace files are user-controlled and may contain hostile scripts (a
   // saved HTML report, a malformed SVG). When we serve them inline at
-  // Rivendell's own origin, sandbox the response so any embedded JS can't
+  // TARDIS's own origin, sandbox the response so any embedded JS can't
   // reach back into /api/* routes. Mirrors the artifacts route's policy.
   if (dispositionType === 'inline') {
     res.setHeader(

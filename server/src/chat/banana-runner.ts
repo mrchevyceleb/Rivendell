@@ -1393,7 +1393,7 @@ function canonicalJson(value: unknown): string {
  *  so operator-supplied providers/agents/permissions survive. A non-JSON or
  *  unparseable existing value is ignored (logged) and only the override is
  *  used — better than crashing the spawn. */
-// ── Local LLM (LM Studio on the Rivendell host) ─────────────────────────────
+// ── Local LLM (LM Studio on the TARDIS host) ─────────────────────────────
 // The "Local" engine talks DIRECTLY to LM Studio's on-box OpenAI-compatible
 // endpoint (default http://localhost:1234/v1). We register whatever text model
 // LM Studio currently has loaded as a custom openai-compatible provider
@@ -1513,7 +1513,7 @@ export async function listLocalModels(): Promise<{ id: string; name: string }[]>
 // Drives ~/samwise/.bin/vllm so the user never touches a terminal. `serve` kicks
 // off a detached docker run that downloads the model from HF if needed; a
 // background watcher then reloads the banana serve once vLLM is up, so the new
-// model re-registers automatically (no Rivendell restart).
+// model re-registers automatically (no TARDIS restart).
 const LMS_BIN = join(homedir(), '.lmstudio', 'bin', 'lms');
 const HF_HUB_DIR = join(homedir(), '.cache', 'huggingface', 'hub');
 const LOCAL_MODEL_ID_RE = /^[A-Za-z0-9._/-]+$/;
@@ -2457,7 +2457,7 @@ export class BananaSession {
    *  recap so the brand-new opencode session inherits the prior chat's context
    *  instead of starting cold and asking "who's her?" half-way through. */
   private wipedThisTurn = false;
-  /** Set when this Rivendell process rebuilt a BananaSession from the persisted
+  /** Set when this TARDIS process rebuilt a BananaSession from the persisted
    *  event log but intentionally discarded the old opencode session id. */
   private recoverContextOnNextTurn = false;
   /** Persistent serve means readiness is per-server, not per-session. */
@@ -2715,7 +2715,7 @@ export class BananaSession {
     const fallbackHistory = this.eventLog.slice();
     const gmailApprovedDraft = opts.hidden ? null : this.approvedGmailDraftForText(text);
     // Echo for reconnect replay (banana's events don't re-emit the user prompt).
-    // Internal auto-continues are intentionally hidden; they are just Rivendell
+    // Internal auto-continues are intentionally hidden; they are just TARDIS
     // nudging Banana past an opencode compaction summary.
     if (opts.peerFrom) {
       this.emit({ type: 'turnStart' });
@@ -3980,7 +3980,7 @@ export function markBusyBananaLanesRestarting(signal: string): number {
         eng: session.cli,
       })) marked++;
     } catch (err) {
-      console.warn(`[rivendell] restart tombstone failed for ${s.key}:`, (err as Error).message);
+      console.warn(`[tardis] restart tombstone failed for ${s.key}:`, (err as Error).message);
     }
   }
   return marked;

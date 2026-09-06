@@ -814,7 +814,7 @@ function scheduleQueuedRecipient(toId: string, delayMs = 0): void {
   queuedRetryTimers.set(toId, timer);
 }
 
-/** Resume accepted fire-and-forget handoffs after a Rivendell restart. */
+/** Resume accepted fire-and-forget handoffs after a TARDIS restart. */
 export async function resumeQueuedTeamDeliveries(): Promise<number> {
   const records = await queueStoreOperation(() => queuedDeliveryStore.list());
   new Set(records.map((record) => record.toId)).forEach((toId) => scheduleQueuedRecipient(toId));

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { accountEnv } from './accountResolver.ts';
 
-test('Rivendell retry override wins while canonical Claude retry config is preserved', () => {
+test('TARDIS retry override wins while canonical Claude retry config is preserved', () => {
   const canonical = process.env.CLAUDE_CODE_MAX_RETRIES;
   const override = process.env.RIVENDELL_CLAUDE_MAX_RETRIES;
   try {

@@ -7,7 +7,7 @@
 // So: persona + compact(history − last50) + last50.
 // Compact must never be stored or described as the last 50.
 //
-// Do not send the week-long Rivendell jsonl, Claude session jsonl, or
+// Do not send the week-long TARDIS jsonl, Claude session jsonl, or
 // tool-result novels as the turn payload. A live engine process may stay up
 // (--resume is fine for process continuity) as long as the *logical* payload
 // is compact+50. Replaying a 920KB tool dump via --resume is still wrong —
@@ -17,7 +17,7 @@
 // Overflow compact: when visible turns go past 50, fold the oldest extras
 // into the compact blob (replace the file) and keep last 50 as the tail.
 //
-// The Rivendell event log is UI-only and is never trimmed here.
+// The TARDIS event log is UI-only and is never trimmed here.
 
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -289,7 +289,7 @@ export function compactSlotText(opts: {
   const aged = formatAgedTurns(kept);
   const omitted = opts.unmergedOverflow.length - kept.length;
   const agedBlock = omitted > 0
-    ? `${aged}\n\n…[${omitted} further aged-out turns omitted from this seed; they stay in the Rivendell log until compact overwrites this document]`
+    ? `${aged}\n\n…[${omitted} further aged-out turns omitted from this seed; they stay in the TARDIS log until compact overwrites this document]`
     : aged;
   if (blob && agedBlock) {
     return `${blob}\n\n---\n\nAged-out turns not yet merged into the document above:\n\n${agedBlock}`;
@@ -471,7 +471,7 @@ export function describeTurnAssembly(turn: ForeverTurn): string {
     '  1. persona / FACE / rules (tiny, injected by the runner)',
     `  2. compact = ${compactKind}`,
     `  3. last ${turn.windowTurns} visible user/assistant turns (working window)`,
-    '  NOT sent: Rivendell event-log jsonl, Claude session jsonl, tool-result novels',
+    '  NOT sent: TARDIS event-log jsonl, Claude session jsonl, tool-result novels',
     `  compact === last ${WINDOW_TURNS}? ${turn.compactIsTheLast50 ? 'YES (BUG)' : 'no'}`,
   ].join('\n');
 }

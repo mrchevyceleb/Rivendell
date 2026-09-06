@@ -1,6 +1,6 @@
 // Optional source of truth for which Claude Code / Codex profile a workspace
 // uses. A fresh clone uses each CLI's normal profile. Operators can explicitly
-// opt into a map with RIVENDELL_ACCOUNT_MAP; Rivendell never discovers an
+// opt into a map with RIVENDELL_ACCOUNT_MAP; TARDIS never discovers an
 // unrelated account configuration from the home directory.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -52,7 +52,7 @@ export function resolveAccount(cwd: string): string | null {
 
 /**
  * Env for spawning a CLI on an EXPLICITLY NAMED account, overriding the directory
- * rules. Rivendell uses this to bind a companion (not a directory) to an account:
+ * rules. TARDIS uses this to bind a companion (not a directory) to an account:
  * A custom/private picker may bind a lane to a named profile. The per-directory
  * `accountEnv` below remains authoritative for ordinary lanes. If a named
  * profile is missing from the configured map we fail closed and refuse to
@@ -91,7 +91,7 @@ export function accountEnvForAccount(account: string, cwd: string): NodeJS.Proce
  * unknown, returns process.env unchanged (safe no-op fallback).
  */
 export function accountEnv(cwd: string): NodeJS.ProcessEnv {
-  // Private/multi-profile deployments may explicitly pin Rivendell's CLI lanes
+  // Private/multi-profile deployments may explicitly pin TARDIS's CLI lanes
   // while public defaults continue to use the normal local profile.
   if (DEFAULT_CLI_ACCOUNT) return accountEnvForAccount(DEFAULT_CLI_ACCOUNT, cwd);
   const map = loadMap();

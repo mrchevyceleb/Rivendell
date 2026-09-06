@@ -2,7 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 
 // LM Studio converts OpenAI tool JSON schemas into a sampling grammar. The
-// full Rivendell tool surface contains validation-only bounds such as
+// full TARDIS tool surface contains validation-only bounds such as
 // maxLength: 4000 and large numeric maxima; llama.cpp expands those into GBNF
 // repetitions and rejects the entire request before inference. The MCP server
 // still validates every real tool call, so strip only grammar-hostile schema

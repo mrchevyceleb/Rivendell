@@ -354,11 +354,11 @@ export async function createAdminCronJob(input: Partial<RivendellCronJob>): Prom
   const data = await assistantAdminJson<{ job: AdminCron }>('/admin/api/cron/jobs', {
     method: 'POST',
     body: JSON.stringify({
-      name: input.name || 'Rivendell schedule',
+      name: input.name || 'TARDIS schedule',
       description: input.description || '',
       cron_expression: input.schedule || '0 9 * * *',
       action_type: input.actionType || 'ai_prompt',
-      action_config: actionConfigFromCron(input) || { prompt: 'Rivendell scheduled task', max_tokens: 1024 },
+      action_config: actionConfigFromCron(input) || { prompt: 'TARDIS scheduled task', max_tokens: 1024 },
       delivery_channel: input.deliveryChannel || 'log_only',
       enabled: input.status !== 'paused',
       runtime: input.runtime || 'railway',

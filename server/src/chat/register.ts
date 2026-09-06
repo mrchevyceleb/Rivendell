@@ -1214,7 +1214,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
 
         if (msg.type === 'steer') {
           if (chatQuiesced) {
-            safeSend({ type: 'error', code: 'STEER_REJECTED', clientMsgId: msg.clientMsgId, message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'error', code: 'STEER_REJECTED', clientMsgId: msg.clientMsgId, message: 'TARDIS is regenerating — try again in a few seconds.' });
             safeSend({ type: 'turnEnd' });
             return;
           }
@@ -1515,7 +1515,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           if (chatQuiesced) {
-            rejectSteer('Rivendell is restarting — try again in a few seconds.');
+            rejectSteer('TARDIS is regenerating — try again in a few seconds.');
             releaseSteer();
             safeSend({ type: 'turnEnd' });
             return;
@@ -1570,7 +1570,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           if (chatQuiesced) {
-            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'error', message: 'TARDIS is regenerating — try again in a few seconds.' });
             safeSend({ type: 'turnEnd' });
             return;
           }
@@ -1833,7 +1833,7 @@ export async function registerChat(app: express.Express, server: Server): Promis
             return;
           }
           if (chatQuiesced) {
-            safeSend({ type: 'error', message: 'Rivendell is restarting — try again in a few seconds.' });
+            safeSend({ type: 'error', message: 'TARDIS is regenerating — try again in a few seconds.' });
             safeSend({ type: 'turnEnd' });
             return;
           }

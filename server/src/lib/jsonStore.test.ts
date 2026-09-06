@@ -8,7 +8,7 @@ import { JsonStore } from './jsonStore.ts';
 type Item = { id: string; value: string };
 
 test('JsonStore writes atomically and refuses to erase corrupt state', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'rivendell-json-store-'));
+  const directory = await mkdtemp(join(tmpdir(), 'tardis-json-store-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, 'items.json');
   const store = new JsonStore<Item>('items.json', [], directory);

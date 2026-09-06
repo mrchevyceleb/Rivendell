@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * rivendell-team MCP — agent-to-agent messaging for Rivendell teammates.
+ * rivendell-team MCP — agent-to-agent messaging for TARDIS teammates.
  *
- * A tiny stdio MCP server (no deps) that fronts Rivendell's /api/team HTTP
+ * A tiny stdio MCP server (no deps) that fronts TARDIS's /api/team HTTP
  * surface on localhost. Spawned per chat session by the runners via
  * --mcp-config / codex -c overrides / banana config mirroring.
  *
@@ -120,7 +120,7 @@ async function callTool(name, args, signal) {
     const result = await api('/api/team/message', {
       method: 'POST',
       body: JSON.stringify({
-        from: process.env.RIVENDELL_AGENT_NAME || args.from || 'Teammate',
+        from: process.env.RIVENDELL_AGENT_NAME || args.from || 'Companion',
         to: args.to,
         text: args.text,
         hop: args.hop,

@@ -3,7 +3,7 @@
 // Mirrors the Pi CLI's `zz-vision-adapter` extension. When the active chat model
 // cannot natively accept images (Z.ai GLM, text-only OpenRouter models, the
 // local LM Studio chat model), we route the pasted image(s) through a LOCAL
-// LM Studio vision model running on the Rivendell host, convert each to a precise
+// LM Studio vision model running on the TARDIS host, convert each to a precise
 // text description, and inject that description into the prompt under a
 // "## Vision Adapter Context" heading. The text-only model then "sees" the
 // image as words. Vision-capable engines (Claude, Codex) never call this — they
