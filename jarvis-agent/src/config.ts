@@ -36,6 +36,8 @@ export const CONFIG = {
    * descriptor so existing deployments migrate without an env change. */
   sttModel: (process.env.JARVIS_STT || 'scribe_v2_realtime').replace(/^.*\//, '').split(':')[0],
   sttLanguage: (process.env.JARVIS_STT || '').split(':')[1] || 'en',
+  /** Seconds of silence before ElevenLabs commits a final transcript. */
+  sttSilenceSecs: Number(process.env.JARVIS_STT_SILENCE_SECS || 0.6),
   /** Rivendell Hall chat bridge */
   rivendellWsUrl: process.env.RIVENDELL_WS_URL || 'ws://127.0.0.1:8091/api/ws',
   rivendellRepo: process.env.RIVENDELL_REPO || join(homedir(), 'ASSISTANT-HUB'),

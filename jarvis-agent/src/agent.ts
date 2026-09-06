@@ -241,10 +241,19 @@ export default defineAgent({
 
     const session = new voice.AgentSession({
       vad: ctx.proc.userData.vad as silero.VAD,
+      // Scribe realtime only commits a final transcript on its own server-side
+      // VAD (commit_strategy=vad). Without serverVad the plugin runs in manual
+      // commit mode and nothing ever finalises mid-call: captions keep
+      // streaming, no user turn ends, and the reply never starts. The final
+      // transcript only arrived when the room closed ("skipping user input,
+      // speech scheduling is paused").
       stt: new elevenlabs.STT({
         apiKey: CONFIG.elevenApiKey,
         model: CONFIG.sttModel,
         languageCode: CONFIG.sttLanguage,
+        serverVad: {
+          vadSilenceThresholdSecs: CONFIG.sttSilenceSecs,
+        },
       }),
       tts: new elevenlabs.TTS({
         apiKey: CONFIG.elevenApiKey,
