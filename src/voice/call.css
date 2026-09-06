@@ -109,3 +109,10 @@
 .riv-call-ctl:active { transform: scale(0.92); }
 .riv-call-ctl.muted { background: var(--r-ink-mute); }
 .riv-call-ctl.end { background: var(--r-rose); color: #fff; }
+
+.riv-call-audio-unlock {
+  margin-bottom: 10px; padding: 9px 16px; border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--r-gold) 65%, transparent); background: color-mix(in srgb, var(--r-gold) 12%, transparent);
+  color: var(--r-elf-glow); font-size: 13px; cursor: pointer;
+}
+.riv-call-audio-unlock:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 3px; }

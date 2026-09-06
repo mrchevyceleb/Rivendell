@@ -81,6 +81,18 @@ export class CallPlayback {
     this.analyser.connect(this.ctx.destination);
   }
 
+  /** True while the browser keeps the output context suspended (autoplay
+   *  policy); a user gesture through unlock() clears it. */
+  get blocked(): boolean {
+    return this.ctx.state === 'suspended';
+  }
+
+  /** Call from a click/tap handler. Resolves true when audio can play. */
+  async unlock(): Promise<boolean> {
+    try { await this.ctx.resume(); } catch { /* still blocked */ }
+    return this.ctx.state === 'running';
+  }
+
   setMuted(muted: boolean): void {
     const now = this.ctx.currentTime;
     this.gain.gain.cancelScheduledValues(now);

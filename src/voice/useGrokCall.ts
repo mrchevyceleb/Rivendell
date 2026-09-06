@@ -32,6 +32,7 @@ export function useGrokCall() {
   const [level, setLevel] = useState(0);
   const [micLevel, setMicLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [audioBlocked, setAudioBlocked] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const playbackRef = useRef<CallPlayback | null>(null);
@@ -179,6 +180,7 @@ export function useGrokCall() {
     const tick = () => {
       if (!alive()) return;
       setLevel(playbackRef.current?.level() ?? 0);
+      setAudioBlocked(playbackRef.current?.blocked ?? false);
       levelRaf.current = requestAnimationFrame(tick);
     };
     levelRaf.current = requestAnimationFrame(tick);
@@ -204,5 +206,12 @@ export function useGrokCall() {
     wsRef.current?.send(JSON.stringify({ type: 'setVoice', voice }));
   }, []);
 
-  return { state, turns, liveUser, durationSec, muted, level, micLevel, error, start, end, toggleMute, setVoice };
+  /** Retry audio after a user gesture: autoplay policy can leave the output
+   *  context suspended when the call started outside the click itself. */
+  const unlockAudio = useCallback(() => {
+    void playbackRef.current?.unlock().then((ok) => setAudioBlocked(!ok));
+    if (ctxRef.current?.state === 'suspended') void ctxRef.current.resume().catch(() => {});
+  }, []);
+
+  return { state, turns, liveUser, durationSec, muted, level, micLevel, error, audioBlocked, start, end, toggleMute, setVoice, unlockAudio };
 }
