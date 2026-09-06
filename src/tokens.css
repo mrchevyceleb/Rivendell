@@ -147,7 +147,8 @@
   --r-rail-grad-2: rgba(244, 241, 234, 0.8);
 
   --r-roundel: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'><circle cx='48' cy='48' r='31' fill='%23e4dfd4' fill-opacity='0.55'/><circle cx='48' cy='48' r='31' fill='none' stroke='%23cfc8ba' stroke-width='1'/><circle cx='48' cy='48' r='24' fill='none' stroke='%23d9d3c7' stroke-width='0.8'/></svg>");
-  --r-roundel-page: var(--r-roundel);
+  /* Page-level roundels sit behind body text, so they are fainter than the rail's. */
+  --r-roundel-page: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'><circle cx='48' cy='48' r='31' fill='%23ebe7de' fill-opacity='0.35'/><circle cx='48' cy='48' r='31' fill='none' stroke='%23ddd8cc' stroke-width='0.9'/><circle cx='48' cy='48' r='24' fill='none' stroke='%23e4dfd4' stroke-width='0.7'/></svg>");
 }
 
 [data-theme="light"] ::selection {
