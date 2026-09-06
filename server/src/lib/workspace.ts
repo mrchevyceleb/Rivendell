@@ -350,8 +350,12 @@ export async function storeWorkspaceFile(
   const ext = extname(absPath);
   const stem = basename(absPath, ext);
   const dir = dirname(absPath);
+  // Windows and OneDrive fold case; a name that only differs by case from an
+  // existing one is a collision there even though Linux would allow it.
+  const taken = new Set((await readdir(dir)).map((name) => name.toLowerCase()));
   for (let attempt = 0; attempt < 100; attempt++) {
     const candidate = attempt === 0 ? absPath : resolve(dir, `${stem} (${attempt + 1})${ext}`);
+    if (taken.has(basename(candidate).toLowerCase())) continue;
     try {
       await writeFile(candidate, data, { flag: 'wx' });
     } catch (err: any) {

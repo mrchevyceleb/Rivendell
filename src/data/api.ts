@@ -50,6 +50,9 @@ export function deleteWorkspaceEntry(path: string): Promise<{ path: string }> {
 
 export type WorkspaceUploadResponse = { path: string; size: number; modifiedAt: string };
 
+/** Mirrors the server's upload cap. */
+export const UPLOAD_MAX_BYTES = 200 * 1024 * 1024;
+
 /** Send a file to the ship's workspace. The server keeps it under `path`,
  *  adding a numeric suffix rather than overwriting. */
 export async function uploadWorkspaceFile(path: string, file: Blob): Promise<WorkspaceUploadResponse> {

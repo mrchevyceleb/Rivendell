@@ -373,7 +373,7 @@ async function main(): Promise<void> {
     reloadServer: () => loadServer(),
     chooseWorkspace: () => void chooseWorkspace(),
     openWorkspace: () => void openWorkspace(),
-    clearFetchedCopies: () => clearFetchedCopies(),
+    clearFetchedCopies: () => void clearFetchedCopies(win),
     checkForUpdates: () => void checkForUpdatesInteractive(win, RELEASES_URL),
     openReleases: () => void shell.openExternal(RELEASES_URL),
     openRepository: () => void shell.openExternal(REPO_URL),

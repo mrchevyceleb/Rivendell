@@ -22,6 +22,16 @@ export interface OpenResult {
 // One download per workspace path at a time; a second click joins the first.
 const inflight = new Map<string, Promise<OpenResult>>();
 
+// A fetched copy is opened with the machine's default app, which for these
+// types means running it. The ship is trusted, but a compromised page there
+// must not be able to hand this machine a payload; the local synced copy is
+// the user's own and stays unrestricted.
+const NO_OPEN_FROM_SHIP = new Set([
+  '.exe', '.msi', '.msix', '.appx', '.bat', '.cmd', '.com', '.scr', '.pif', '.cpl', '.hta', '.ps1', '.psm1',
+  '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.jar', '.lnk', '.url', '.reg', '.inf', '.sct', '.msc',
+  '.sh', '.command', '.app', '.dmg', '.pkg', '.run', '.bin', '.apk', '.deb', '.rpm', '.appimage', '.desktop',
+]);
+
 const FETCH_TIMEOUT_MS = 120_000;
 // A fetched copy is buffered on disk, never in memory, and capped so one
 // stray multi-gigabyte file cannot fill the drive.
@@ -65,13 +75,20 @@ function candidates(): string[] {
   return out;
 }
 
-/** The local workspace: the saved choice, else the first well-known copy. */
+/** The local workspace: the chosen folder (even while it is unavailable,
+ *  so a missing drive never silently swaps in another copy), else the first
+ *  well-known copy on this machine. */
 export function workspaceRoot(): string | undefined {
   const saved = getSettings().workspaceRoot;
-  if (saved && isDir(saved)) return saved;
+  if (saved) return isDir(saved) ? saved : undefined;
   const found = candidates().find(isDir);
   if (found) saveSettings({ workspaceRoot: found });
   return found;
+}
+
+function workspaceUnavailable(): string | undefined {
+  const saved = getSettings().workspaceRoot;
+  return saved && !isDir(saved) ? `The local workspace folder ${saved} is not available right now.` : undefined;
 }
 
 export async function chooseWorkspaceRoot(win: BrowserWindow | null): Promise<string | undefined> {
@@ -111,13 +128,37 @@ function insideRoot(root: string, target: string): boolean {
   }
 }
 
-function cacheDir(): string {
-  return path.join(app.getPath('userData'), 'ship-cache');
+/** Fetched copies live per ship, so switching servers never mixes files. */
+function cacheDir(serverUrl: string): string {
+  const host = new URL(serverUrl).host.replace(/[^A-Za-z0-9.-]/g, '_');
+  return path.join(app.getPath('userData'), 'ship-cache', host);
 }
 
-/** Forget every fetched copy (Ship → Clear Fetched Copies). */
-export function clearFetchedCopies(): void {
-  rmSync(cacheDir(), { recursive: true, force: true });
+/** Forget every fetched copy (Ship → Clear Fetched Copies). Edits made to a
+ *  copy live only there, so this asks first and moves the folder to the
+ *  trash rather than deleting it. */
+export async function clearFetchedCopies(win: BrowserWindow | null): Promise<void> {
+  const dir = path.join(app.getPath('userData'), 'ship-cache');
+  const options: Electron.MessageBoxOptions = inflight.size > 0
+    ? { type: 'info', title: 'TARDIS', message: 'A file is still being fetched. Try again when it has finished.', buttons: ['OK'] }
+    : !existsSync(dir)
+      ? { type: 'info', title: 'TARDIS', message: 'There are no fetched copies.', buttons: ['OK'] }
+      : {
+          type: 'question',
+          title: 'TARDIS',
+          message: 'Move all fetched copies to the trash?',
+          detail: 'Edits you made to fetched copies live only in them. The trash keeps them recoverable; the next click on a link fetches a fresh copy from the ship.',
+          buttons: ['Move to Trash', 'Cancel'],
+          defaultId: 1,
+          cancelId: 1,
+        };
+  const result = win && !win.isDestroyed() ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options);
+  if (options.type !== 'question' || result.response !== 0) return;
+  try {
+    await shell.trashItem(dir);
+  } catch {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 async function openLocal(target: string): Promise<OpenResult> {
@@ -138,26 +179,30 @@ export async function openWorkspacePath(rel: string, kind: LinkKind, serverUrl: 
   if (kind === 'folder') {
     return {
       ok: false,
-      error: root
+      error: workspaceUnavailable() ?? (root
         ? 'That folder is not synced to this computer.'
-        : 'No local workspace folder is set. Use Ship → Local Workspace Folder….',
+        : 'No local workspace folder is set. Use Ship → Local Workspace Folder….'),
     };
   }
   if (!serverUrl || parts.length === 0) return { ok: false, error: 'Not connected to a ship.' };
+  if (NO_OPEN_FROM_SHIP.has(path.extname(parts[parts.length - 1]).toLowerCase())) {
+    return { ok: false, error: 'Executable files are not opened from a fetched copy. Sync the workspace to this computer to use it.' };
+  }
 
   // Not on this machine: open the copy fetched earlier, or fetch one now.
   // A fetched copy is never replaced automatically, so edits to it survive;
   // Ship → Clear Fetched Copies forgets them all.
   const relPath = parts.join('/');
-  const cached = path.join(cacheDir(), ...parts);
+  const cached = path.join(cacheDir(serverUrl), ...parts);
   if (existsSync(cached)) {
     const problem = await shell.openPath(cached);
     return problem ? { ok: false, error: problem } : { ok: true, where: 'fetched' };
   }
-  const running = inflight.get(relPath);
+  const key = `${serverUrl}|${relPath}`;
+  const running = inflight.get(key);
   if (running) return running;
-  const job = fetchAndOpen(serverUrl, relPath, cached).finally(() => inflight.delete(relPath));
-  inflight.set(relPath, job);
+  const job = fetchAndOpen(serverUrl, relPath, cached).finally(() => inflight.delete(key));
+  inflight.set(key, job);
   return job;
 }
 

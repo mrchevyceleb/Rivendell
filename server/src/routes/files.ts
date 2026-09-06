@@ -1,4 +1,4 @@
-import { Router, raw } from 'express';
+import express, { Router, raw } from 'express';
 import { createReadStream } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { extname, basename, resolve as resolvePath, sep as pathSep } from 'node:path';
@@ -199,11 +199,16 @@ function mimeFor(path: string): string {
 const UPLOAD_BODY_LIMIT = '200mb';
 const UPLOAD_TYPE = 'application/octet-stream';
 
-filesRouter.post('/upload', raw({ type: UPLOAD_TYPE, limit: UPLOAD_BODY_LIMIT }), asyncHandler(async (req, res) => {
+// Refuse untrusted origins before the body parser buffers anything.
+function requireTrustedOrigin(req: express.Request, res: express.Response, next: express.NextFunction): void {
   if (!trustedWebSocketOrigin(req)) {
     res.status(403).json({ error: 'origin not trusted' });
     return;
   }
+  next();
+}
+
+filesRouter.post('/upload', requireTrustedOrigin, raw({ type: UPLOAD_TYPE, limit: UPLOAD_BODY_LIMIT }), asyncHandler(async (req, res) => {
   const body: unknown = req.body;
   if (!Buffer.isBuffer(body)) {
     res.status(415).json({ error: `send the file as ${UPLOAD_TYPE}` });

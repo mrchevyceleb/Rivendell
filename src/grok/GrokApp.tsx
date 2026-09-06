@@ -21,7 +21,7 @@ import { useRepos } from '../chat/hooks/useRepos';
 import { useProxyViewer } from '../hooks/useProxyViewer';
 import { StudioFilesContext, type StudioFileActions } from '../shell/studio/studioFiles';
 import type { CompanionId } from '../chat/data/types';
-import { uploadWorkspaceFile } from '../data/api';
+import { UPLOAD_MAX_BYTES, uploadWorkspaceFile } from '../data/api';
 import { appendToDraft, TOAST_EVENT } from '../native/shell';
 import { BotRail } from './GrokSidebar';
 import { GrokChat } from './GrokChat';
@@ -183,6 +183,11 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
       if (!files.length) return;
       void (async () => {
         for (const file of files) {
+          if (file.size > UPLOAD_MAX_BYTES) {
+            toastEgg(`${file.name} is over 200 MB; sync it to the workspace instead.`);
+            continue;
+          }
+          toastEgg(`Sending ${file.name} to the ship…`);
           try {
             const saved = await uploadWorkspaceFile(`inbox/${file.name}`, file);
             const mention = `ASSISTANT-HUB/${saved.path}`;
@@ -190,8 +195,8 @@ export function GrokApp({ initialRoom }: { initialRoom?: string }) {
               toastEgg(`Sent to the ship · ${saved.path}`);
             } else {
               // No composer on screen (a room is open): keep the path handy.
-              await navigator.clipboard?.writeText(mention).catch(() => {});
-              toastEgg(`Sent to the ship · ${saved.path} · path copied`);
+              const copied = await navigator.clipboard?.writeText(mention).then(() => true, () => false);
+              toastEgg(copied ? `Sent to the ship · ${saved.path} · path copied` : `Sent to the ship · ${saved.path}`);
             }
           } catch (error) {
             toastEgg(`Could not send ${file.name}: ${(error as Error).message}`);
