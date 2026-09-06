@@ -1,6 +1,9 @@
 import { app, Menu, type MenuItemConstructorOptions } from 'electron';
 
 export interface MenuActions {
+  bridgeEnabled: boolean;
+  setBridgeEnabled(on: boolean): void;
+  forgetApprovals(): void;
   changeServer(): void;
   reloadServer(): void;
   chooseWorkspace(): void;
@@ -46,6 +49,14 @@ export function installMenu(actions: MenuActions): void {
         { label: 'Open Local Workspace', accelerator: 'CmdOrCtrl+Shift+O', click: actions.openWorkspace },
         { label: 'Local Workspace Folder…', click: actions.chooseWorkspace },
         { label: 'Clear Fetched Copies', click: actions.clearFetchedCopies },
+        { type: 'separator' },
+        {
+          label: 'Allow Agents on This Computer',
+          type: 'checkbox',
+          checked: actions.bridgeEnabled,
+          click: (item) => actions.setBridgeEnabled(item.checked),
+        },
+        { label: 'Forget Approvals', click: actions.forgetApprovals },
         { type: 'separator' },
         ...(isMac ? [{ role: 'close' } as MenuItemConstructorOptions] : [
           { label: 'Check for Updates…', click: actions.checkForUpdates },

@@ -26,6 +26,12 @@ export const TEAM_MCP_SCRIPT = resolveServerScript(
   'team-mcp.mjs',
 );
 
+/** Tools for the user's own computers, reached through the desktop app. */
+export const DEVICE_MCP_SCRIPT = resolveServerScript(
+  process.env.RIVENDELL_DEVICE_MCP,
+  'device-mcp.mjs',
+);
+
 /** Codex app-server → exec-JSONL adapter. App-server is required for true
  * same-turn `turn/steer`; `codex exec` cannot accept a second prompt. */
 export const CODEX_APP_TURN_SCRIPT = resolveServerScript(

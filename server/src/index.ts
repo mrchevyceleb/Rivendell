@@ -13,6 +13,7 @@ import { teamRouter } from './routes/team.ts';
 import { routinesRouter } from './routes/routines.ts';
 import { messagePinsRouter } from './routes/messagePins.ts';
 import { registerVoiceCalls } from './voice/grokCall.ts';
+import { registerDeviceBridge } from './devices/bridge.ts';
 import { voicePreviewRouter } from './voice/preview.ts';
 import { chatAttachmentsRouter } from './routes/chatAttachments.ts';
 import { startRoutineScheduler } from './chat/routines.ts';
@@ -35,6 +36,7 @@ import { summaryRouter } from './routes/summary.ts';
 import { artifactsRouter } from './routes/artifacts.ts';
 import { mcpRouter } from './routes/mcp.ts';
 import { filesRouter } from './routes/files.ts';
+import { devicesRouter } from './routes/devices.ts';
 import { jarvisRouter } from './routes/jarvis.ts';
 import { internalRouter } from './routes/internal.ts';
 import { xaiOauthRouter } from './routes/xai-oauth.ts';
@@ -90,6 +92,7 @@ app.use('/api/scribe', scribeRouter);
 app.use('/api/artifacts', artifactsRouter);
 app.use('/api/mcp', mcpRouter);
 app.use('/api/files', filesRouter);
+app.use('/api/devices', devicesRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/team', teamRouter);
 app.use('/api/routines', routinesRouter);
@@ -125,6 +128,7 @@ try {
 }
 const stopChat = await registerChat(app, server);
 registerVoiceCalls(server);
+registerDeviceBridge(server);
 startRoutineScheduler(); // agent-scoped routine scheduler (30s tick)
 registerScribeSocket(server);
 startWorkerQueue();

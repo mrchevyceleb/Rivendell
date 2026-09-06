@@ -78,6 +78,21 @@ The desktop app owns the local side of the workspace, so agent links open real f
 - **Displayed paths match this machine.** Links show the path as it exists here, whatever the folder is called.
 - **Drop a file, it is on the ship.** Drop any file onto the console and it is uploaded to the workspace `inbox/` folder; its workspace path is added to your draft so you can tell a companion about it. Images dropped on the composer stay attachments, as before. This part also works in a browser.
 
+## Letting agents use this computer
+
+While the desktop app is open, your companions can work on that machine: run a command, read or write a file, list a folder, or open something in its normal app. The app dials the server, so nothing listens for connections on your PC, and the machine appears to agents only while the app is running.
+
+**You approve the work, on the machine itself.** Every command shows a dialog with the exact command line and where it will run, and you choose *Run once*, *Always allow this exact command*, or *No*. Files inside your workspace folder are read and written without a prompt; anything outside asks first, and you can allow a folder permanently. A refusal is a normal answer, and companions are told to report it rather than work around it.
+
+**Some things are never shared, approved or not.** Credential stores are refused outright: SSH, GPG, AWS, Azure, gcloud, Kubernetes, Docker and browser profile folders, along with files such as `.npmrc`, `.netrc`, `.git-credentials`, `.env`, and private keys.
+
+Controls live in the *Ship* menu:
+
+- **Allow Agents on This Computer** turns the whole thing off and on. It is on by default.
+- **Forget Approvals** clears every "always allow" you have granted.
+
+Remember that TARDIS has no login of its own, so anyone who can reach your server can ask your computer to do these things. The approval prompts are what stand in the way; treat a command you did not expect as a reason to say no.
+
 ## What the shells handle
 
 - Links to other sites open in the default browser; the console stays in the app.

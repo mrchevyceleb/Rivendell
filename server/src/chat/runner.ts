@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { ASSISTANT_HUB_PATH } from './config.ts';
-import { TEAM_MCP_SCRIPT } from '../config.ts';
+import { DEVICE_MCP_SCRIPT, TEAM_MCP_SCRIPT } from '../config.ts';
 import { getSessionId, setSessionId, setSessionSelection } from './sessions.ts';
 import { CodexSession, getOrCreateCodexSession, activeCodexSessions } from './codex-runner.ts';
 import { BananaSession, getOrCreateBananaSession, activeBananaSessions } from './banana-runner.ts';
@@ -353,22 +353,32 @@ if (BROWSER_MCP_ENTRY && existsSync(BROWSER_MCP_ENTRY)) {
 const ASSISTANT_MCP_CONFIG = JSON.stringify({ mcpServers: optionalMcpServers });
 
 
-/** Add the rivendell-team MCP (agent-to-agent messaging) to any mcp-config
- *  JSON, stamping the calling agent's name so the tool can attribute sends. */
-let teamMcpLogged = false;
+/** Add the local MCP servers to any mcp-config JSON: rivendell-team
+ *  (agent-to-agent messaging, stamped with the calling agent's name so the
+ *  tool can attribute sends) and rivendell-device (the user's own computers,
+ *  reachable while their desktop app is open). */
+let localMcpLogged = false;
 function withTeamMcp(configJson: string, chatId: string): string {
   try {
-    if (!teamMcpLogged) {
-      teamMcpLogged = true;
+    if (!localMcpLogged) {
+      localMcpLogged = true;
       console.log(`[chat] rivendell-team MCP ${TEAM_MCP_SCRIPT}`);
+      console.log(`[chat] rivendell-device MCP ${DEVICE_MCP_SCRIPT}`);
     }
     const cfg = JSON.parse(configJson) as { mcpServers: Record<string, { type: string; command: string; args: string[]; env?: Record<string, string> }> };
     const name = agentForChatId(chatId)?.name;
+    const localUrl = `http://127.0.0.1:${process.env.PORT || '8091'}`;
     cfg.mcpServers['rivendell-team'] = {
       type: 'stdio',
       command: 'node',
       args: [TEAM_MCP_SCRIPT],
-      env: { RIVENDELL_TEAM_URL: `http://127.0.0.1:${process.env.PORT || '8091'}`, ...(name ? { RIVENDELL_AGENT_NAME: name } : {}) },
+      env: { RIVENDELL_TEAM_URL: localUrl, ...(name ? { RIVENDELL_AGENT_NAME: name } : {}) },
+    };
+    cfg.mcpServers['rivendell-device'] = {
+      type: 'stdio',
+      command: 'node',
+      args: [DEVICE_MCP_SCRIPT],
+      env: { RIVENDELL_TEAM_URL: localUrl },
     };
     return JSON.stringify(cfg);
   } catch {

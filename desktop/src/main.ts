@@ -20,6 +20,8 @@ import { installMenu } from './menu.js';
 import { normalizeServerUrl, probeServer, sameOrigin } from './server.js';
 import { canAutoUpdate, checkForUpdatesInteractive, startUpdater } from './updater.js';
 import { chooseWorkspaceRoot, clearFetchedCopies, handleNativeScheme, openWorkspacePath, workspaceRoot } from './workspace.js';
+import { startDeviceBridge, stopDeviceBridge } from './bridge.js';
+import { bridgeEnabled, forgetApprovals, setBridgeEnabled } from './approvals.js';
 
 const pkg = require('../package.json') as { repository?: { url?: string } };
 
@@ -298,6 +300,7 @@ function installIpc(): void {
     serverUrl = origin;
     saveSettings({ serverUrl: origin });
     loadServer();
+    startDeviceBridge(serverUrl);
     return { ok: true };
   });
 
@@ -369,6 +372,13 @@ async function main(): Promise<void> {
   installPermissions();
   installIpc();
   installMenu({
+    bridgeEnabled: bridgeEnabled(),
+    setBridgeEnabled: (on: boolean) => {
+      setBridgeEnabled(on);
+      if (on) startDeviceBridge(serverUrl);
+      else stopDeviceBridge();
+    },
+    forgetApprovals,
     changeServer: () => void showConnect(),
     reloadServer: () => loadServer(),
     chooseWorkspace: () => void chooseWorkspace(),
@@ -383,6 +393,9 @@ async function main(): Promise<void> {
   if (process.env.TARDIS_SHOT) scheduleScreenshot(process.env.TARDIS_SHOT);
   loadServer();
   startUpdater();
+  // The link is what lets agents use this machine; it is refused entirely
+  // while the Ship menu switch is off.
+  if (bridgeEnabled()) startDeviceBridge(serverUrl);
 }
 
 installNavigationPolicy();

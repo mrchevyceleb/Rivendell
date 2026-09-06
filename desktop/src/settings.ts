@@ -19,6 +19,14 @@ export interface Settings {
   maximized?: boolean;
   /** This machine's copy of the workspace (ASSISTANT-HUB). */
   workspaceRoot?: string;
+  /** Stable id for this machine on the ship's list of linked computers. */
+  deviceId?: string;
+  /** Whether agents may use this computer at all. */
+  bridgeEnabled?: boolean;
+  /** Commands the user chose to always allow, verbatim. */
+  allowedCommands?: string[];
+  /** Folders outside the workspace the user chose to always allow. */
+  allowedPaths?: string[];
 }
 
 let settingsPath = '';
@@ -57,6 +65,10 @@ function sanitize(raw: unknown): Settings {
   if (typeof input.serverUrl === 'string' && input.serverUrl) out.serverUrl = input.serverUrl;
   if (input.theme === 'light' || input.theme === 'dark') out.theme = input.theme;
   if (typeof input.workspaceRoot === 'string' && input.workspaceRoot) out.workspaceRoot = input.workspaceRoot;
+  if (typeof input.deviceId === 'string' && input.deviceId) out.deviceId = input.deviceId;
+  if (typeof input.bridgeEnabled === 'boolean') out.bridgeEnabled = input.bridgeEnabled;
+  out.allowedCommands = strings(input.allowedCommands);
+  out.allowedPaths = strings(input.allowedPaths);
   if (input.bounds && typeof input.bounds === 'object') {
     const b = input.bounds as Record<string, unknown>;
     if (isFinite(b.width) && isFinite(b.height) && b.width >= 320 && b.height >= 240) {
@@ -78,6 +90,10 @@ const MAX_OFFSET = 32768;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
 }
 
 function isFinite(value: unknown): value is number {
