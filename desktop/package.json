@@ -11,6 +11,7 @@
     "url": "https://github.com/mrchevyceleb/TARDIS.git"
   },
   "main": "dist/main.js",
+  "desktopName": "tardis.desktop",
   "engines": {
     "node": ">=22.22"
   },

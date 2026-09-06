@@ -46,6 +46,7 @@ linux:
     - AppImage
   icon: build/icon.png
   category: Office
+  syncDesktopName: true
   synopsis: Bigger on the inside.
   description: Desktop shell for a TARDIS server.
 appImage:
