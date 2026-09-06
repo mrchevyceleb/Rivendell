@@ -8,7 +8,7 @@ import { app, shell } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { constants as fsConstants, realpathSync } from 'node:fs';
-import { mkdir, open, readdir, stat } from 'node:fs/promises';
+import { lstat, mkdir, open, opendir, rename, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -43,8 +43,9 @@ let inflight = 0;
 // already gone (which would otherwise loop forever).
 let linkGeneration = 0;
 
-// Commands still running, so a shutdown does not leave them behind.
-const running = new Set<ChildProcess>();
+// Commands still running, by the request that started them, so the ship can
+// call one off and a shutdown does not leave any behind.
+const running = new Map<string, ChildProcess>();
 
 /** A stable id for this machine, so a reconnect replaces its own link. */
 function deviceId(): string {
@@ -80,6 +81,15 @@ function resolveOnThisMachine(raw: string): string {
   return canonical(path.isAbsolute(target) ? target : path.resolve(base, target));
 }
 
+/** Approval happened a moment ago and the disk can move underneath it. Check
+ *  the path still resolves where it did before acting on it. */
+function stillTheSamePath(approved: string): void {
+  if (canonical(approved) !== approved) {
+    throw new Error('That path changed while it was being approved; nothing was done.');
+  }
+  if (isSecretPath(approved)) throw new Error('That path holds credentials; this computer never shares it.');
+}
+
 function looksBinary(buffer: Buffer): boolean {
   return buffer.subarray(0, 8192).includes(0);
 }
@@ -98,7 +108,14 @@ function killTree(child: ChildProcess): void {
   }
 }
 
-async function runCommand(command: string, cwd: string, timeoutMs: number): Promise<unknown> {
+function cancelRequest(id: string): void {
+  const child = running.get(id);
+  if (!child) return;
+  running.delete(id);
+  killTree(child);
+}
+
+async function runCommand(id: string, command: string, cwd: string, timeoutMs: number): Promise<unknown> {
   if (running.size >= MAX_RUNNING_COMMANDS) {
     throw new Error('That computer is already running as many commands as it will take at once.');
   }
@@ -114,7 +131,7 @@ async function runCommand(command: string, cwd: string, timeoutMs: number): Prom
       // Its own process group, so a timeout can take the whole tree with it.
       detached: process.platform !== 'win32',
     });
-    running.add(child);
+    running.set(id, child);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -131,12 +148,12 @@ async function runCommand(command: string, cwd: string, timeoutMs: number): Prom
     child.stderr?.on('data', (chunk: Buffer) => { stderr = cap(stderr, chunk); });
     child.on('error', (error) => {
       clearTimeout(timer);
-      running.delete(child);
+      running.delete(id);
       reject(error);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      running.delete(child);
+      running.delete(id);
       resolve({
         code: code ?? (timedOut ? 124 : 0),
         stdout,
@@ -149,7 +166,7 @@ async function runCommand(command: string, cwd: string, timeoutMs: number): Prom
   });
 }
 
-async function handle(op: string, params: Record<string, unknown>): Promise<unknown> {
+async function handle(id: string, op: string, params: Record<string, unknown>): Promise<unknown> {
   if (!bridgeEnabled()) throw new Error('This computer is not accepting agent requests (Ship menu → Allow Agents on This Computer).');
   const budget = Number(params.timeoutMs) || 60_000;
   const deadline = Date.now() + budget;
@@ -166,7 +183,7 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
     // so nothing keeps running after the ship has stopped listening.
     const remaining = deadline - Date.now();
     if (remaining < 1_000) throw new Error('Approval came too late to start this command.');
-    return runCommand(command, cwd, remaining);
+    return runCommand(id, command, cwd, remaining);
   }
 
   const target = resolveOnThisMachine(String(params.path ?? ''));
@@ -176,16 +193,22 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
     if (await approvePath(target, 'read', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to share this file.');
     }
-    const handle = await open(target, fsConstants.O_RDONLY | NOFOLLOW);
+    stillTheSamePath(target);
+    const file = await open(target, fsConstants.O_RDONLY | NOFOLLOW);
     try {
-      const info = await handle.stat();
-      if (!info.isFile()) throw new Error('That path is not a file.');
+      const info = await file.stat();
+      // A pipe or device would block for ever, and a file that grows after
+      // its size was read would sail past the cap.
+      if (!info.isFile()) throw new Error('That path is not a regular file.');
       if (info.size > FILE_CAP) throw new Error(`That file is ${Math.round(info.size / 1024)} KB; too large to read over the link.`);
-      const buffer = await handle.readFile();
-      if (looksBinary(buffer)) throw new Error('That file is not text.');
-      return { path: target, size: info.size, content: buffer.toString('utf8') };
+      const buffer = Buffer.alloc(FILE_CAP + 1);
+      const { bytesRead } = await file.read(buffer, 0, FILE_CAP + 1, 0);
+      if (bytesRead > FILE_CAP) throw new Error('That file grew past the size this link will carry.');
+      const content = buffer.subarray(0, bytesRead);
+      if (looksBinary(content)) throw new Error('That file is not text.');
+      return { path: target, size: bytesRead, content: content.toString('utf8') };
     } finally {
-      await handle.close();
+      await file.close();
     }
   }
 
@@ -195,41 +218,66 @@ async function handle(op: string, params: Record<string, unknown>): Promise<unkn
     if (await approvePath(target, 'write', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to write this file.');
     }
-    await mkdir(path.dirname(target), { recursive: true });
-    const handle = await open(target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | NOFOLLOW, 0o644);
+    stillTheSamePath(target);
     try {
-      await handle.writeFile(content, 'utf8');
-      const info = await handle.stat();
-      return { path: target, size: info.size };
-    } finally {
-      await handle.close();
+      const existing = await lstat(target);
+      if (existing.isSymbolicLink()) throw new Error('That path is a link; this computer will not write through it.');
+      if (existing.isFile() && existing.nlink > 1) throw new Error('That file has more than one name on disk; refusing to overwrite it.');
+      if (existing.isDirectory()) throw new Error('That path is a folder.');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    // Write beside it and swap, so a failure never leaves a half-written or
+    // truncated file where the original was.
+    await mkdir(path.dirname(target), { recursive: true });
+    const temporary = path.join(path.dirname(target), `.tardis-${randomUUID()}.part`);
+    const file = await open(temporary, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NOFOLLOW, 0o600);
+    try {
+      await file.writeFile(content, 'utf8');
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    try {
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+    const info = await stat(target);
+    return { path: target, size: info.size };
   }
 
   if (op === 'ls') {
     if (await approvePath(target, 'read', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to list this folder.');
     }
-    const found = await readdir(target, { withFileTypes: true });
+    stillTheSamePath(target);
     const entries = [];
-    for (const entry of found.slice(0, LS_CAP)) {
-      const full = path.join(target, entry.name);
+    let truncated = false;
+    const dir = await opendir(target);
+    for await (const entry of dir) {
+      if (entries.length >= LS_CAP) {
+        truncated = true;
+        break;
+      }
       let size: number | undefined;
       let modifiedAt: string | undefined;
       try {
-        const info = await stat(full);
+        const info = await lstat(path.join(target, entry.name));
         size = info.isFile() ? info.size : undefined;
         modifiedAt = info.mtime.toISOString();
       } catch { /* vanished or unreadable */ }
       entries.push({ name: entry.name, type: entry.isDirectory() ? 'directory' : 'file', size, modifiedAt });
     }
-    return { path: target, entries, truncated: found.length > LS_CAP };
+    return { path: target, entries, truncated };
   }
 
   if (op === 'open') {
     if (await approvePath(target, 'open', root, deadline) === 'deny') {
       throw new Error('The person at that computer declined to open this, or it is a file the computer would run.');
     }
+    stillTheSamePath(target);
     const problem = await shell.openPath(target);
     if (problem) throw new Error(problem);
     return { path: target };
@@ -286,6 +334,10 @@ function connect(generation: number): void {
       ws.send(JSON.stringify({ type: 'pong' }));
       return;
     }
+    if (msg.type === 'cancel') {
+      cancelRequest(String(msg.id ?? ''));
+      return;
+    }
     if (msg.type !== 'request') return;
     const id = String(msg.id ?? '');
     const op = String(msg.op ?? '');
@@ -300,7 +352,7 @@ function connect(generation: number): void {
       return;
     }
     inflight += 1;
-    void handle(op, params)
+    void handle(id, op, params)
       .then(
         (result) => answer({ ok: true, result }),
         (error: unknown) => answer({ ok: false, error: error instanceof Error ? error.message : String(error) }),
@@ -313,12 +365,18 @@ function connect(generation: number): void {
     // Only the socket that still owns the link may ask for another one.
     if (generation !== linkGeneration) return;
     console.log(`[tardis] device link closed; retrying in ${Math.round(backoff / 1000)}s`);
-    cancelPendingApprovals();
+    stopEverything();
     scheduleReconnect(generation);
   });
   ws.addEventListener('error', () => {
     try { ws.close(); } catch { /* already closing */ }
   });
+}
+
+/** Nobody is listening any more: drop the dialogs and the work. */
+function stopEverything(): void {
+  cancelPendingApprovals();
+  for (const id of [...running.keys()]) cancelRequest(id);
 }
 
 function scheduleReconnect(generation: number): void {
@@ -359,7 +417,7 @@ function teardown(): void {
   // A new generation orphans every callback belonging to the old link.
   linkGeneration += 1;
   clearTimeout(retryTimer);
-  cancelPendingApprovals();
+  stopEverything();
   const ws = socket;
   socket = null;
   if (ws) {
@@ -370,8 +428,6 @@ function teardown(): void {
 export function stopDeviceBridge(): void {
   teardown();
   currentUrl = undefined;
-  for (const child of running) killTree(child);
-  running.clear();
 }
 
 export function deviceLinkState(): 'off' | 'linked' | 'connecting' {

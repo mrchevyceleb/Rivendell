@@ -1,15 +1,17 @@
 // Who decides what an agent may do on this computer: the person sitting at
 // it. The ship can only ask.
 //
-// Three rules keep the layer honest:
+// Four rules keep the layer honest:
 //   - Callers pass CANONICAL paths (symlinks already resolved). A lexical
 //     check would let `workspace/link -> ~/.ssh` walk straight out.
 //   - A grant covers one mode. Allowing a folder for reading never silently
 //     allows writing to it or launching things from it.
-//   - There is no permanent grant for a command. The same words can run
-//     different code once a file changes, and the ship can change files in
-//     the workspace without asking; so "allow" is either this once, or every
-//     command for a short, stated window the user can see ending.
+//   - Commands are never granted in advance. The same words run different
+//     code once a script changes, and one blanket "yes" would hand an agent
+//     that has read a poisoned web page a free hand on this machine.
+//   - This dialog is the whole boundary, so what it shows is sanitised: no
+//     newlines, no direction overrides, nothing long enough to push the
+//     dangerous part out of view.
 import { app, BrowserWindow, dialog } from 'electron';
 import { statSync } from 'node:fs';
 import path from 'node:path';
@@ -36,7 +38,7 @@ const SECRET_FILES = new Set([
 const SECRET_PREFIXES = ['id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa', '.env', '.masterkey'];
 const SECRET_SUFFIXES = [
   '.pem', '.key', '.p12', '.pfx', '.jks', '.keystore', '.ppk', '.asc', '.gpg', '.kdbx',
-  '.p8', '.der', '.crt.key', '_rsa', '.secrets.json',
+  '.p8', '.der', '_rsa', '.secrets.json',
 ];
 
 /** Types the operating system RUNS when you "open" them. Writing one still
@@ -68,19 +70,22 @@ export function isSecretPath(target: string): boolean {
   return SECRET_SUFFIXES.some((suffix) => leaf.endsWith(suffix));
 }
 
-/** True when the system would run this rather than display it: a known
- *  launchable type, something with no extension at all, or (on macOS and
- *  Linux) a file carrying the execute bit. */
+/** True when opening this would run it rather than show it. Folders open
+ *  normally; a regular file with no extension, a known launchable type, or
+ *  the execute bit set does not. */
 export function wouldRun(target: string): boolean {
+  let info;
+  try {
+    info = statSync(target);
+  } catch {
+    // Nothing there yet: judge on the name alone.
+    return isLaunchable(target) || !path.extname(target);
+  }
+  if (info.isDirectory()) return false;
   if (isLaunchable(target)) return true;
   if (!path.extname(target)) return true;
   if (process.platform === 'win32') return false;
-  try {
-    const info = statSync(target);
-    return info.isFile() && (info.mode & 0o111) !== 0;
-  } catch {
-    return false;
-  }
+  return info.isFile() && (info.mode & 0o111) !== 0;
 }
 
 export function bridgeEnabled(): boolean {
@@ -89,10 +94,7 @@ export function bridgeEnabled(): boolean {
 
 export function setBridgeEnabled(on: boolean): void {
   saveSettings({ bridgeEnabled: on });
-  if (!on) {
-    trustUntil = 0;
-    cancelPendingApprovals();
-  }
+  if (!on) cancelPendingApprovals();
 }
 
 function isInside(root: string | undefined, target: string): boolean {
@@ -101,18 +103,10 @@ function isInside(root: string | undefined, target: string): boolean {
   return inside === '' || (!inside.startsWith('..') && !path.isAbsolute(inside));
 }
 
-// Blanket permission for commands, in minutes rather than forever, and only
-// in memory: quitting the app ends it.
-const TRUST_MS = 15 * 60 * 1000;
-let trustUntil = 0;
-
-export function commandTrustRemainingMs(): number {
-  return Math.max(0, trustUntil - Date.now());
-}
-
 // A standing path grant is keyed by mode and folder, so nothing widens by
-// accident. A NUL cannot appear in a path, so no two grants can be confused.
-const SEP = '\u0000';
+// accident. The mode is one of three words with no space in it, so the split
+// is unambiguous however the folder is named.
+const SEP = ' ';
 
 function pathKey(mode: PathMode, folder: string): string {
   return `${mode}${SEP}${folder}`;
@@ -124,8 +118,20 @@ function pathGrants(): string[] {
 
 /** Clear every standing allowance (Ship → Forget Approvals). */
 export function forgetApprovals(): void {
-  trustUntil = 0;
   saveSettings({ allowedPaths: [] });
+}
+
+// What the dialog is allowed to render. Control characters, direction
+// overrides and sheer length are all ways to make a dangerous command look
+// harmless, and this dialog is the only thing standing in the way.
+const DISPLAY_CAP = 600;
+const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g;
+
+export function safeForDisplay(text: string): string {
+  const flattened = text.replace(/\r\n?/g, '\n').replace(/\n/g, ' ⏎ ').replace(UNSAFE_TEXT, '�');
+  return flattened.length > DISPLAY_CAP
+    ? `${flattened.slice(0, DISPLAY_CAP)}\n\n[… ${flattened.length - DISPLAY_CAP} more characters not shown. Say no unless you know what this is.]`
+    : flattened;
 }
 
 // One question at a time, a hard cap on how many can be waiting, and a
@@ -168,27 +174,21 @@ async function ask(options: Electron.MessageBoxOptions, deadline: number): Promi
   }
 }
 
-/** Ask before running a command. Either this once, or everything for the next
- *  fifteen minutes: an "always allow this command" would be a permanent
- *  capability that later edits to a script or a package file could quietly
- *  turn into something else. */
+/** Ask before running a command. Always: there is no standing grant for a
+ *  command, because approving words rather than behaviour is not a promise
+ *  this machine can keep. */
 export async function approveCommand(command: string, cwd: string, deadline: number): Promise<Decision> {
   if (isSecretPath(cwd)) return 'deny';
-  if (Date.now() < trustUntil) return 'allow';
   const answer = await ask({
     type: 'warning',
     title: 'TARDIS',
     message: 'Run this on your computer?',
-    detail: `${command}\n\nin ${cwd}\n\nAn agent on your TARDIS asked for this. If you did not just ask for something like it, say no.`,
-    buttons: ['Run once', 'Allow all commands for 15 minutes', 'No'],
+    detail: `${safeForDisplay(command)}\n\nin ${safeForDisplay(cwd)}\n\nAn agent on your TARDIS asked for this. If you did not just ask for something like it, say no.`,
+    buttons: ['Run once', 'No'],
     defaultId: 0,
-    cancelId: 2,
+    cancelId: 1,
     noLink: true,
   }, deadline);
-  if (answer === 1) {
-    trustUntil = Date.now() + TRUST_MS;
-    return 'allow';
-  }
   return answer === 0 ? 'allow' : 'deny';
 }
 
@@ -219,12 +219,12 @@ export async function approvePath(
     : '\n\nThis is outside your workspace folder.';
   const buttons = risky
     ? [`${verb} once`, 'No']
-    : [`${verb} once`, `Always allow ${verb.toLowerCase()} in ${folder}`, 'No'];
+    : [`${verb} once`, `Always allow ${verb.toLowerCase()} in this folder`, 'No'];
   const answer = await ask({
     type: 'warning',
     title: 'TARDIS',
     message: `${verb} this file on your computer?`,
-    detail: `${target}${why}\n\nAn agent on your TARDIS asked for it.`,
+    detail: `${safeForDisplay(target)}${why}\n\nAn agent on your TARDIS asked for it.`,
     buttons,
     defaultId: 0,
     cancelId: buttons.length - 1,

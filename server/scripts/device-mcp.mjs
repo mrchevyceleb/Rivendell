@@ -31,7 +31,8 @@ const TOOLS = [
     name: 'device_list',
     description:
       "List the user's computers that are linked right now, with their platform and the folder each one keeps its workspace copy in. " +
-      'A computer is only reachable while its TARDIS desktop app is running. Call this first when the user asks for something on "my PC", "my laptop", or "this machine".',
+      'A computer is only reachable while its TARDIS desktop app is running. Call this first when the user asks for something on "my PC", "my laptop", or "this machine". ' +
+      'Pass the id rather than the name when two machines share a name.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {

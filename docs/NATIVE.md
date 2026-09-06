@@ -82,16 +82,20 @@ The desktop app owns the local side of the workspace, so agent links open real f
 
 While the desktop app is open, your companions can work on that machine: run a command, read or write a file, list a folder, or open something in its normal app. The app dials the server, so nothing listens for connections on your PC, and the machine appears to agents only while the app is running.
 
-**You approve the work, on the machine itself.** Every command shows a dialog with the exact command line and where it will run, and you choose *Run once*, *Always allow this exact command*, or *No*. Files inside your workspace folder are read and written without a prompt; anything outside asks first, and you can allow a folder permanently. A refusal is a normal answer, and companions are told to report it rather than work around it.
+**You approve every command, on the machine itself.** Each one shows a dialog with the exact command line and the folder it will run in, and the only answers are *Run once* and *No*. There is deliberately no "always allow this command": the same words run different code once a script or a package file changes, and an agent that has read a poisoned web page should never inherit a standing licence on your PC. A refusal is a normal answer, and companions are told to report it rather than work around it.
 
-**Some things are never shared, approved or not.** Credential stores are refused outright: SSH, GPG, AWS, Azure, gcloud, Kubernetes, Docker and browser profile folders, along with files such as `.npmrc`, `.netrc`, `.git-credentials`, `.env`, and private keys.
+**Files are gentler.** Reading and writing inside your workspace folder needs no prompt. Anything outside asks first, and you can allow a folder for one kind of access: allowing reads in a folder never also allows writes or launches there. Writing a file your computer would run always asks, even inside the workspace.
+
+**Some things are never shared, approved or not.** Credential stores are refused outright: SSH, GPG, AWS, Azure, gcloud, Kubernetes, Docker, keyrings and browser profiles, along with files such as `.npmrc`, `.netrc`, `.git-credentials`, `.env*`, and private keys or certificates. Opening a file the system would run is refused too, so an agent cannot write a script and then launch it without a command ever appearing on screen.
 
 Controls live in the *Ship* menu:
 
 - **Allow Agents on This Computer** turns the whole thing off and on. It is on by default.
 - **Forget Approvals** clears every "always allow" you have granted.
 
-Remember that TARDIS has no login of its own, so anyone who can reach your server can ask your computer to do these things. The approval prompts are what stand in the way; treat a command you did not expect as a reason to say no.
+Remember that TARDIS has no login of its own, so anyone who can reach your server can ask your computer to do these things, and so can an agent that has been talked into it by something it read. The approval prompts are what stand in the way; treat a command you did not expect as a reason to say no.
+
+Two limits worth knowing. A path is checked after resolving symlinks and opened without following one, but no operating system lets an app hold a folder still while a person reads a dialog, so this is a strong guard rather than a sealed box. And a command you approve runs as you, with everything you can reach; the prompt is a decision about trust, not a sandbox.
 
 ## What the shells handle
 

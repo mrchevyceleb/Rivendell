@@ -67,11 +67,21 @@ export function findDevice(idOrName: string): DeviceInfo | undefined {
     return devices.size === 1 ? [...devices.values()][0].info : undefined;
   }
   for (const device of devices.values()) {
-    if (device.info.id.toLowerCase() === needle || device.info.name.toLowerCase() === needle) {
-      return device.info;
-    }
+    if (device.info.id.toLowerCase() === needle) return device.info;
   }
+  // Two machines can share a hostname. Rather than guess which one runs the
+  // command, say so and make the caller use the id.
+  const byName = [...devices.values()].filter((device) => device.info.name.toLowerCase() === needle);
+  if (byName.length === 1) return byName[0].info;
+  if (byName.length > 1) throw new AmbiguousDeviceError(byName.map((device) => device.info));
   return undefined;
+}
+
+export class AmbiguousDeviceError extends Error {
+  constructor(readonly matches: DeviceInfo[]) {
+    super(`More than one linked computer is called ${matches[0].name}. Use its id: ${matches.map((m) => m.id).join(', ')}.`);
+    this.name = 'AmbiguousDeviceError';
+  }
 }
 
 /** Ask a linked computer to do something. Never throws: a refusal, a timeout,
@@ -82,7 +92,12 @@ export function callDevice(
   params: Record<string, unknown>,
   timeoutMs = DEVICE_DEFAULT_TIMEOUT_MS,
 ): Promise<DeviceReply> {
-  const info = findDevice(idOrName);
+  let info: DeviceInfo | undefined;
+  try {
+    info = findDevice(idOrName);
+  } catch (error) {
+    return Promise.resolve({ ok: false, error: (error as Error).message });
+  }
   if (!info) {
     const linked = listDevices();
     return Promise.resolve({
@@ -102,7 +117,12 @@ export function callDevice(
   return new Promise<DeviceReply>((resolve) => {
     const timer = setTimeout(() => {
       device.pending.delete(id);
-      resolve({ ok: false, error: `${info.name} did not answer within ${Math.round(budget / 1000)}s.` });
+      // Tell the machine to stop; otherwise the command keeps running there
+      // long after anyone is listening for its output.
+      try {
+        device.socket.send(JSON.stringify({ type: 'cancel', id }));
+      } catch { /* the link is already gone */ }
+      resolve({ ok: false, error: `${info!.name} did not answer within ${Math.round(budget / 1000)}s.` });
     }, budget + 5_000);
     timer.unref?.();
     device.pending.set(id, { resolve, timer });
@@ -117,8 +137,11 @@ export function callDevice(
 }
 
 function settleAll(device: Device, error: string): void {
-  for (const [, pending] of device.pending) {
+  for (const [id, pending] of device.pending) {
     clearTimeout(pending.timer);
+    try {
+      device.socket.send(JSON.stringify({ type: 'cancel', id }));
+    } catch { /* the link is already gone */ }
     pending.resolve({ ok: false, error });
   }
   device.pending.clear();
