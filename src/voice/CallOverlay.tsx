@@ -4,7 +4,7 @@
 // transcript ticker, mute/end circles, and a voice picker that swaps the
 // Grok voice mid-call.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Mic, MicOff, PhoneOff, ChevronUp, ChevronDown } from 'lucide-react';
 import { useGrokCall, GROK_VOICES, type VoiceId } from './useGrokCall';
 import { agentColor, agentAvatarUrl, type Agent } from '../grok/agents';
@@ -21,6 +21,7 @@ const STATE_LABEL: Record<string, string> = {
 };
 
 const FOCUSABLE = 'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+const VOICE_GRID_ID = 'riv-call-voice-grid';
 
 function fmt(sec: number): string {
   const m = Math.floor(sec / 60);
@@ -49,7 +50,9 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
     if (startedRef.current) return;
     startedRef.current = true;
     call.start(agent.id, voice).catch((e: Error) => {
-      // Stay on screen so the reason is readable; End closes the overlay.
+      // Release whatever was already opened (mic, contexts, socket), then stay
+      // on screen so the reason is readable; End closes the overlay.
+      callRef.current.end();
       setStartError(e.message || 'could not start the call');
       console.error('[call] failed to start:', e.message);
     });
@@ -63,37 +66,40 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
     return () => window.clearTimeout(timer);
   }, [call.state, onClose]);
 
-  // Modal behaviour: focus lands inside, Tab cycles inside, Escape hangs up,
-  // and focus goes back where it came from.
+  // Modal behaviour: focus lands inside on mount and goes back where it came
+  // from on unmount. Keys are handled on the dialog itself (below), so only
+  // events raised inside it are affected.
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     dialogRef.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        hangUp();
+    return () => previous?.focus?.();
+  }, []);
+
+  const onDialogKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      // First Escape closes the voice picker; the next one hangs up.
+      if (voiceOpen) {
+        setVoiceOpen(false);
         return;
       }
-      if (event.key !== 'Tab' || !dialogRef.current) return;
-      const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
-      if (items.length === 0) return;
-      const first = items[0];
-      const last = items[items.length - 1];
-      const active = document.activeElement;
-      if (event.shiftKey && (active === first || active === dialogRef.current)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      previous?.focus?.();
-    };
-  }, [hangUp]);
+      hangUp();
+      return;
+    }
+    if (event.key !== 'Tab' || !dialogRef.current) return;
+    const items = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || active === dialogRef.current)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, [hangUp, voiceOpen]);
 
   const bars = useMemo(() => Array.from({ length: 5 }, (_, i) => i), []);
   const voiceLabel = GROK_VOICES.find((v) => v.id === voice)?.label ?? voice;
@@ -101,7 +107,7 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
   const error = call.error ?? startError;
 
   return (
-    <div ref={dialogRef} tabIndex={-1} className="riv-call" role="dialog" aria-modal="true" aria-label={`Voice call with ${agent.name}`}>
+    <div ref={dialogRef} tabIndex={-1} className="riv-call" role="dialog" aria-modal="true" aria-label={`Voice call with ${agent.name}`} onKeyDown={onDialogKeyDown}>
       <div className="riv-call-top">
         <span className="riv-call-chip" role="status" aria-live="polite">
           <span className={`riv-call-dot riv-call-dot-${call.state}`} />
@@ -146,11 +152,11 @@ export function CallOverlay({ agent, initialVoice, onClose }: { agent: Agent; in
       {error ? <div className="riv-call-error" role="alert">{error}</div> : null}
 
       <div className="riv-call-voice">
-        <button type="button" className="riv-call-voicebtn" onClick={() => setVoiceOpen((o) => !o)} aria-expanded={voiceOpen}>
+        <button type="button" className="riv-call-voicebtn" onClick={() => setVoiceOpen((o) => !o)} aria-expanded={voiceOpen} aria-controls={VOICE_GRID_ID}>
           Voice · {voiceLabel} {voiceOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
         </button>
         {voiceOpen ? (
-          <div className="riv-call-voicegrid bt-fade" role="group" aria-label="Grok voice">
+          <div id={VOICE_GRID_ID} className="riv-call-voicegrid bt-fade" role="group" aria-label="Grok voice">
             {GROK_VOICES.map((v) => (
               <button
                 type="button"
