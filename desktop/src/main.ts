@@ -36,10 +36,11 @@ const PAGES = path.join(app.getAppPath(), 'pages');
 // The only local pages the window may show, and the only senders allowed to
 // drive the shell over IPC. Compared by path (case-folded on Windows).
 const SHELL_PAGES = new Set(['connect.html', 'offline.html'].map((name) => shellPageKey(pathToFileURL(path.join(PAGES, name)).href)));
+// Granted to the server origin only. `media` is narrowed further to audio:
+// the console talks, it never films.
 const PERMISSIONS = new Set<string>([
   'media',
   'notifications',
-  'clipboard-read',
   'clipboard-sanitized-write',
   'fullscreen',
   'pointerLock',
@@ -233,10 +234,21 @@ function installPermissions(): void {
   const ses = session.defaultSession;
   ses.setPermissionRequestHandler((contents, permission, callback, details) => {
     const from = details.requestingUrl || contents.getURL();
-    callback(PERMISSIONS.has(permission) && sameOrigin(from, serverUrl));
+    if (!PERMISSIONS.has(permission) || !sameOrigin(from, serverUrl)) {
+      callback(false);
+      return;
+    }
+    if (permission === 'media') {
+      const types = (details as { mediaTypes?: string[] }).mediaTypes ?? [];
+      callback(types.length > 0 && types.every((type) => type === 'audio'));
+      return;
+    }
+    callback(true);
   });
-  ses.setPermissionCheckHandler((_contents, permission, requestingOrigin) => {
-    return PERMISSIONS.has(permission) && sameOrigin(requestingOrigin, serverUrl);
+  ses.setPermissionCheckHandler((_contents, permission, requestingOrigin, details) => {
+    if (!PERMISSIONS.has(permission) || !sameOrigin(requestingOrigin, serverUrl)) return false;
+    if (permission === 'media') return (details as { mediaType?: string }).mediaType === 'audio';
+    return true;
   });
 }
 

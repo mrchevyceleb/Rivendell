@@ -94,13 +94,17 @@
             android:textColor="@color/ink_mute"
             android:textSize="13sp" />
 
-        <TextView
+        <Button
             android:id="@+id/skip_check"
+            style="?android:attr/borderlessButtonStyle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:padding="8dp"
+            android:minHeight="40dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
             android:text="@string/save_without_check"
+            android:textAllCaps="false"
             android:textColor="@color/ink_faint"
             android:textSize="13sp"
             android:visibility="gone" />

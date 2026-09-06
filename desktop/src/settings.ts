@@ -57,15 +57,24 @@ function sanitize(raw: unknown): Settings {
   if (input.bounds && typeof input.bounds === 'object') {
     const b = input.bounds as Record<string, unknown>;
     if (isFinite(b.width) && isFinite(b.height) && b.width >= 320 && b.height >= 240) {
-      out.bounds = { width: Math.round(b.width), height: Math.round(b.height) };
+      out.bounds = { width: clamp(b.width, 320, MAX_SIZE), height: clamp(b.height, 240, MAX_SIZE) };
       if (isFinite(b.x) && isFinite(b.y)) {
-        out.bounds.x = Math.round(b.x);
-        out.bounds.y = Math.round(b.y);
+        out.bounds.x = clamp(b.x, -MAX_OFFSET, MAX_OFFSET);
+        out.bounds.y = clamp(b.y, -MAX_OFFSET, MAX_OFFSET);
       }
     }
   }
   if (typeof input.maximized === 'boolean') out.maximized = input.maximized;
   return out;
+}
+
+// Generous, but finite: a corrupt settings file must never produce a window
+// Chromium refuses to create.
+const MAX_SIZE = 16384;
+const MAX_OFFSET = 32768;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)));
 }
 
 function isFinite(value: unknown): value is number {

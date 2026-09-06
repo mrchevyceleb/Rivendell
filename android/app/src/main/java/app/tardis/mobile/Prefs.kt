@@ -10,7 +10,8 @@ object Prefs {
     private const val FILE = "tardis"
     private const val KEY_SERVER = "server_url"
 
-    private val LOOPBACK = setOf("localhost", "127.0.0.1", "::1", "[::1]")
+    // Matches the cleartext allowance in res/xml/network_security_config.xml.
+    private val LOOPBACK = setOf("localhost", "127.0.0.1", "10.0.2.2")
     private val HAS_SCHEME = Regex("""^[a-zA-Z][a-zA-Z0-9+.-]*://""")
 
     fun serverUrl(context: Context): String? =
@@ -36,7 +37,8 @@ object Prefs {
         var input = raw.trim()
         if (input.isEmpty()) return null
         if (!HAS_SCHEME.containsMatchIn(input)) {
-            val host = input.substringBefore('/').substringBefore(':').lowercase()
+            val authority = input.substringBefore('/')
+            val host = (if (authority.startsWith("[")) authority.substringBefore(']') + "]" else authority.substringBefore(':')).lowercase()
             input = (if (host in LOOPBACK) "http://" else "https://") + input
         }
         val uri = try {

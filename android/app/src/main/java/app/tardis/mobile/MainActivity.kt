@@ -146,20 +146,28 @@ class MainActivity : ComponentActivity() {
     private inner class ShipClient : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             val uri = request.url
-            return when (uri.scheme?.lowercase()) {
-                "http", "https" -> if (isShipUrl(uri)) false else {
+            val scheme = uri.scheme?.lowercase()
+            val isWeb = scheme == "http" || scheme == "https"
+            // Frames load web content inline and may not launch anything.
+            if (!request.isForMainFrame) return !isWeb
+            return when {
+                isWeb && isShipUrl(uri) -> false
+                isWeb -> {
                     openOutside(uri)
                     true
                 }
-                "file", "about", "blob", "data", "javascript" -> false
-                "intent" -> {
+                scheme in INLINE_SCHEMES -> false
+                // Custom-scheme launches need a real tap; scripts cannot fire them.
+                !request.hasGesture() -> true
+                scheme == "intent" -> {
                     openIntentUri(uri.toString())
                     true
                 }
-                else -> {
+                scheme in EXTERNAL_SCHEMES -> {
                     openOutside(uri)
                     true
                 }
+                else -> true
             }
         }
 
@@ -340,6 +348,8 @@ class MainActivity : ComponentActivity() {
         const val OFFLINE_PAGE = "file:///android_asset/offline.html"
         const val BRIDGE_OBJECT = "TardisShell"
         const val THEME_OBJECT = "TardisTheme"
+        val INLINE_SCHEMES = setOf("file", "about", "blob", "data", "javascript")
+        val EXTERNAL_SCHEMES = setOf("mailto", "tel", "sms", "geo")
 
         // Mirrors the console theme onto the system bars. Idempotent per page.
         const val THEME_HOOK = "(function(){if(window.__tardisThemeHook||!window.TardisTheme)return;window.__tardisThemeHook=true;" +

@@ -18,7 +18,8 @@ export function normalizeServerUrl(raw: string): string | null {
   let input = raw.trim();
   if (!input) return null;
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(input)) {
-    const host = input.split('/')[0].split(':')[0].toLowerCase();
+    const authority = input.split('/')[0];
+    const host = (authority.startsWith('[') ? `${authority.split(']')[0]}]` : authority.split(':')[0]).toLowerCase();
     input = `${LOOPBACK.has(host) ? 'http' : 'https'}://${input}`;
   }
   let url: URL;
@@ -41,14 +42,19 @@ export function sameOrigin(url: string, origin: string | undefined): boolean {
   }
 }
 
-/** Ask /api/health whether there is a TARDIS at this origin. */
+/** Ask /api/health whether there is a TARDIS at this origin. Redirects are
+ *  not followed: the origin that answers is the origin that gets trusted. */
 export async function probeServer(origin: string, timeoutMs = 6000): Promise<ProbeResult> {
   try {
     const response = await net.fetch(`${origin}/api/health`, {
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(timeoutMs),
       cache: 'no-store',
+      redirect: 'manual',
     });
+    if (response.status >= 300 && response.status < 400) {
+      return { ok: false, error: `${origin} redirects elsewhere. Enter the address the server actually answers on.` };
+    }
     if (!response.ok) return { ok: false, error: `The server at ${origin} answered ${response.status}.` };
     const body = (await response.json()) as { ok?: unknown; app?: unknown; brand?: unknown; version?: unknown };
     if (body.ok !== true || body.app !== 'rivendell') {
