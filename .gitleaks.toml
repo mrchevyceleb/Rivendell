@@ -1,4 +1,4 @@
-title = "Rivendell Gitleaks configuration"
+title = "TARDIS Gitleaks configuration"
 
 [extend]
 useDefault = true

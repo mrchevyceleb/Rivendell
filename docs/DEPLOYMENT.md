@@ -1,6 +1,6 @@
 # Home server deployment
 
-Rivendell is designed to run continuously on a computer you control. An ordinary Linux mini PC, NAS with a full Node.js environment, repurposed laptop, or cloud VM inside a private network is enough. A GPU is only needed when you choose a local model.
+TARDIS is designed to run continuously on a computer you control. An ordinary Linux mini PC, NAS with a full Node.js environment, repurposed laptop, or cloud VM inside a private network is enough. A GPU is only needed when you choose a local model.
 
 ## Recommended baseline
 
@@ -14,7 +14,7 @@ Rivendell is designed to run continuously on a computer you control. An ordinary
 ## Install
 
 ```bash
-git clone https://github.com/mrchevyceleb/Rivendell.git "$HOME/rivendell"
+git clone https://github.com/mrchevyceleb/TARDIS.git "$HOME/rivendell"
 cd "$HOME/rivendell"
 npm ci
 mkdir -p "$HOME/.config/rivendell"
@@ -50,7 +50,7 @@ Create `~/.config/systemd/user/rivendell.service`:
 
 ```ini
 [Unit]
-Description=Rivendell multi-agent office
+Description=TARDIS multi-agent office
 After=network-online.target
 Wants=network-online.target
 

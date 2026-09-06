@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Rivendell.
+Thanks for helping improve TARDIS.
 
 ## Development
 
@@ -10,7 +10,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Use only test credentials and a disposable workspace while developing. Rivendell can launch local agent CLIs and read files beneath `ELROND_WORKSPACE_PATH`.
+Use only test credentials and a disposable workspace while developing. TARDIS can launch local agent CLIs and read files beneath `ELROND_WORKSPACE_PATH`.
 
 Before opening a pull request:
 

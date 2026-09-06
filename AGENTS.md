@@ -1,8 +1,10 @@
-# Rivendell contributor guide
+# TARDIS contributor guide
 
 ## Project
 
-Rivendell is a local-first, always-on multi-agent office. It serves a React PWA and an Express/WebSocket backend from one Node process. There is no app-layer authentication; loopback or a trusted private proxy is the security boundary.
+TARDIS (formerly TARDIS) is a local-first, always-on multi-agent office. It serves a React PWA and an Express/WebSocket backend from one Node process. There is no app-layer authentication; loopback or a trusted private proxy is the security boundary.
+
+Internal identifiers keep the old name on purpose and must never be renamed: `RIVENDELL_*` / `ELROND_WORKSPACE_PATH` env vars, `~/.rivendell`, `rivendell:*` localStorage keys and DOM events, the `rivendell://` scheme and `rivendell-doc:` / `rivendell-folder:` links, the `rivendell-team` / `rivendell-browser` MCPs and `<rivendell-…>` prompt tags, `_rivendellTombstone`, the `rivendell_jobs` tables, the manifest `id`, and the `x-rivendell-*` headers. User-facing copy lives in `src/theme/voice.ts` and room labels in `src/data/roomNames.ts`.
 
 ## Stack
 
@@ -23,7 +25,7 @@ npm start
 
 The development frontend runs on `:5173` and proxies API/WebSocket traffic to `127.0.0.1:8091`. Production serves `dist/` from the Express server.
 
-Never restart a live Rivendell service while `/api/health` reports `busyTurns > 0` unless interruption is explicitly intended.
+Never restart a live TARDIS service while `/api/health` reports `busyTurns > 0` unless interruption is explicitly intended.
 
 ## Layout
 

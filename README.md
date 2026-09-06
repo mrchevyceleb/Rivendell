@@ -1,20 +1,20 @@
-# Rivendell
+# TARDIS
 
-[![CI](https://github.com/mrchevyceleb/Rivendell/actions/workflows/ci.yml/badge.svg)](https://github.com/mrchevyceleb/Rivendell/actions/workflows/ci.yml)
+[![CI](https://github.com/mrchevyceleb/TARDIS/actions/workflows/ci.yml/badge.svg)](https://github.com/mrchevyceleb/TARDIS/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-gold.svg)](LICENSE)
 
-A local-first, always-on multi-agent office for Claude Code, Codex, Grok, GLM, OpenRouter, Fireworks, and local models.
+Bigger on the inside. A local-first, always-on multi-agent office for Claude Code, Codex, Grok, GLM, OpenRouter, Fireworks, and local models.
 
-Rivendell gives each teammate a durable home thread, editable role, model/effort controls, scheduled routines, and a shared team bus. Conversations survive browser changes, service restarts, model switches, and rolling context compaction without turning the visible transcript into disposable model state.
+TARDIS is a ship's mind with a crew of Companions: each companion gets a durable home thread, an editable role, model/effort controls, scheduled routines, and a shared team bus. Conversations survive browser changes, service restarts (regenerations), model switches, and rolling context compaction without turning the visible transcript into disposable model state.
 
 > [!WARNING]
-> Rivendell can read workspace files and launch powerful local agents. It has **no app-layer authentication**. The server binds to `127.0.0.1` by default. Only expose it through an authentication boundary you trust, such as a locked-down Tailscale tailnet. Never publish port `8091` directly to the internet.
+> TARDIS can read workspace files and launch powerful local agents. It has **no app-layer authentication**. The server binds to `127.0.0.1` by default. Only expose it through an authentication boundary you trust, such as a locked-down Tailscale tailnet. Never publish port `8091` directly to the internet.
 
 ## What it includes
 
-- **Persistent teammates** — one forever-thread and editable persona per agent.
+- **Persistent companions** — one forever-thread and editable persona per agent.
 - **Multi-engine conversations** — Claude Code, Codex, xAI Grok, Z.ai GLM, OpenRouter, Fireworks, and local OpenAI-compatible models.
-- **Agent collaboration** — teammates can message one another through Rivendell's built-in team MCP.
+- **Agent collaboration** — companions can message one another through the ship's built-in team MCP.
 - **Durable memory** — append-only event logs, rolling compaction, restart recovery, and cross-device replay.
 - **Human-first scheduling** — routines defer while a person is actively using a thread and remain draft/review-first for external side effects.
 - **Workspace desk** — browse and edit an `ASSISTANT-HUB`, open artifacts, pin messages, and use the classic Studio at `/studio`.
@@ -36,14 +36,14 @@ Optional integrations such as Supabase, LiveKit, Railway, an external MCP backen
 ## Quick start
 
 ```bash
-git clone https://github.com/mrchevyceleb/Rivendell.git
-cd Rivendell
+git clone https://github.com/mrchevyceleb/TARDIS.git
+cd TARDIS
 npm install
 cp .env.example .env
 npm run dev
 ```
 
-Open <http://localhost:5173>. Vite proxies API and WebSocket traffic to the Rivendell server on `127.0.0.1:8091`.
+Open <http://localhost:5173>. Vite proxies API and WebSocket traffic to the TARDIS server on `127.0.0.1:8091`.
 
 At minimum, set an absolute workspace path in `.env`:
 
@@ -51,7 +51,7 @@ At minimum, set an absolute workspace path in `.env`:
 ELROND_WORKSPACE_PATH=/absolute/path/to/your/ASSISTANT-HUB
 ```
 
-The workspace can be any local folder. Rivendell presents it as `ASSISTANT-HUB` so links remain portable between machines.
+The workspace can be any local folder. TARDIS presents it as `ASSISTANT-HUB` so links remain portable between machines.
 
 ## Commands
 
@@ -91,9 +91,9 @@ Start with [`.env.example`](.env.example). Important groups:
 | Persistence | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
 | Voice | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `ELEVENLABS_API_KEY`, `PICOVOICE_ACCESS_KEY` |
 
-Secrets belong in environment variables or a secret manager, never in tracked files. Rivendell does not automatically read global Railway credentials or neighboring repositories.
+Secrets belong in environment variables or a secret manager, never in tracked files. TARDIS does not automatically read global Railway credentials or neighboring repositories.
 
-By default, Claude Code and Codex use their normal authenticated CLI profiles. Advanced multi-profile routing is opt-in through `RIVENDELL_ACCOUNT_MAP`; point it at JSON containing `accounts`, `default_account`, and path-prefix `rules`. Set `RIVENDELL_DEFAULT_CLI_ACCOUNT` only when every Rivendell Claude/Codex lane should use one named profile regardless of workspace rules. It requires a matching account entry in `RIVENDELL_ACCOUNT_MAP`; Rivendell refuses to launch those CLIs rather than silently using the wrong profile. Keep the map private and outside the repository.
+By default, Claude Code and Codex use their normal authenticated CLI profiles. Advanced multi-profile routing is opt-in through `RIVENDELL_ACCOUNT_MAP`; point it at JSON containing `accounts`, `default_account`, and path-prefix `rules`. Set `RIVENDELL_DEFAULT_CLI_ACCOUNT` only when every TARDIS Claude/Codex lane should use one named profile regardless of workspace rules. It requires a matching account entry in `RIVENDELL_ACCOUNT_MAP`; TARDIS refuses to launch those CLIs rather than silently using the wrong profile. Keep the map private and outside the repository.
 
 For a two-source calendar feed, `RIVENDELL_CALENDAR_SECONDARY_MARKERS` accepts comma-separated substrings matched against upstream source, account, calendar ID, calendar name, and organizer fields. For example, `work,company.example` groups matching events into the secondary calendar. Labels, names, and colors come from the corresponding `RIVENDELL_CALENDAR_*` variables in `.env.example`.
 
@@ -111,7 +111,7 @@ An external scheduler can surface read-only jobs in Forge by setting `RIVENDELL_
 
 ## Run it on your own home server
 
-Rivendell does not require specialized hardware. An always-on Linux mini PC, NAS with a normal Node.js environment, repurposed laptop, or private VM works well; a GPU is only needed for local models. The complete install, systemd, update, Tailscale, macOS, and Windows instructions are in **[Home server deployment](docs/DEPLOYMENT.md)**.
+TARDIS does not require specialized hardware. An always-on Linux mini PC, NAS with a normal Node.js environment, repurposed laptop, or private VM works well; a GPU is only needed for local models. The complete install, systemd, update, Tailscale, macOS, and Windows instructions are in **[Home server deployment](docs/DEPLOYMENT.md)**.
 
 Build first, then run the Node server under your process manager:
 

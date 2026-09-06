@@ -1,6 +1,6 @@
 # Architecture
 
-Rivendell is a React application and an Express/WebSocket server in one repository.
+TARDIS is a React application and an Express/WebSocket server in one repository.
 
 ## Runtime shape
 
@@ -53,7 +53,7 @@ TanStack Query owns request caching. Chat events are streamed over one WebSocket
 
 The visible transcript is not the model process. Every semantic event is appended to a per-thread JSONL log under `RIVENDELL_STATE_DIR` (default `~/.rivendell`). Native provider session IDs are stored separately.
 
-When a thread grows, Rivendell:
+When a thread grows, TARDIS:
 
 1. extracts complete visible turns from durable history,
 2. generates a credential-redacted rolling compact,
@@ -71,7 +71,7 @@ The built-in `rivendell-team` MCP is created for each Claude-family process. It 
 
 ## Optional integrations
 
-Rivendell starts without private service dependencies. Features activate only when configured:
+TARDIS starts without private service dependencies. Features activate only when configured:
 
 - Supabase for durable queue/Scribe storage.
 - An assistant admin/MCP backend for task, mail, calendar, and tool integrations.

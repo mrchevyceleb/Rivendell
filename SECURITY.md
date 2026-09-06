@@ -10,7 +10,7 @@ Please report vulnerabilities privately through GitHub's **Security → Report a
 
 ## Deployment boundary
 
-Rivendell is a powerful local operator, not a public SaaS server:
+TARDIS is a powerful local operator, not a public SaaS server:
 
 - It has no app-layer authentication.
 - It can read and edit files beneath its configured workspace.

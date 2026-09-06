@@ -1,12 +1,12 @@
 {
-  "name": "rivendell",
+  "name": "tardis",
   "private": true,
   "version": "0.1.0",
-  "description": "A local-first, always-on multi-agent office for Claude, Codex, Grok, GLM, and local models.",
+  "description": "Bigger on the inside. A local-first, always-on multi-agent office for Claude, Codex, Grok, GLM, and local models.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mrchevyceleb/Rivendell.git"
+    "url": "https://github.com/mrchevyceleb/TARDIS.git"
   },
   "type": "module",
   "engines": {

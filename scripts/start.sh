@@ -18,7 +18,7 @@ export PORT="${PORT:-8091}"
 export HOST="${HOST:-127.0.0.1}"
 # Optional remote MCP mirroring is opt-in for a clean public install.
 export RIVENDELL_BANANA_REMOTE_MCP="${RIVENDELL_BANANA_REMOTE_MCP:-0}"
-# Rivendell is an always-on headless daemon. Claude/Codex authentication must
+# TARDIS is an always-on headless daemon. Claude/Codex authentication must
 # fail visibly in chat/logs rather than launching OAuth tabs on a headless server's dormant
 # desktop session. Override with RIVENDELL_CLI_BROWSER only for intentional,
 # attended maintenance.
