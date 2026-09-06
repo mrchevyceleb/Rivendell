@@ -24,6 +24,7 @@ import { normalizeWorkspacePath } from '../chat/utils/proxyLinks';
 import { useWorkspaceTree } from '../hooks/useRoomData';
 import { Evenstar, StarField } from '../theme/Ornaments';
 import { ROOM_NAMES } from '../data/roomNames';
+import { applyTheme } from '../theme/applyTheme';
 import { FileTree } from './studio/FileTree';
 import { FileTab } from './studio/FileTab';
 import { ChatTab, type ChatTabApi } from './studio/ChatTab';
@@ -138,7 +139,7 @@ export function Studio() {
   const pendingAsk = useRef<Map<string, string>>(new Map());
 
   // ── persistence ──
-  useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('rivendell:theme', theme); }, [theme]);
+  useEffect(() => { applyTheme(theme); }, [theme]);
   useEffect(() => { localStorage.setItem('rivendell:zoom', String(zoom)); }, [zoom]);
   useEffect(() => { localStorage.setItem('rivendell:studio-tree-w', String(Math.round(treeWidth))); }, [treeWidth]);
   useEffect(() => { localStorage.setItem(STUDIO_TABS_KEY, JSON.stringify(tabs)); }, [tabs]);

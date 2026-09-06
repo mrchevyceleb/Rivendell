@@ -46,7 +46,7 @@
   --r-gold-soft:   #8a6a32;
   --r-emerald:     #6fa887;     /* success, desaturated */
   --r-amber:       #e08a3c;     /* warning: Gallifrey burnt orange */
-  --r-rose:        #d9534f;     /* danger */
+  --r-rose:        #cc4744;     /* danger: 4.7:1 under white labels, 4.9:1 as text on the panels */
   --r-blood:       #8c2f2b;
 
   /* TARDIS blue — rationed: brand mark, focus rings, active-nav rule */
@@ -102,7 +102,7 @@
   --r-ink:         #1c1915;
   --r-ink-soft:    #3f3a32;
   --r-ink-mute:    #6c665b;
-  --r-ink-faint:   #756e62;    /* ≥4.5:1 on the wall for 9–12px metadata */
+  --r-ink-faint:   #6f685c;    /* 4.9:1 on the wall for 9–12px metadata */
   --r-ink-ghost:   #c2bbae;
 
   --r-silver:      #5c574d;

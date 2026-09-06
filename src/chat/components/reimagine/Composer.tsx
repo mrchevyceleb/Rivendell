@@ -157,6 +157,11 @@ export function Composer(props: ComposerProps) {
     // While the backend still owns a turn, any text OR image is queued guidance.
     // Only an explicit click/tap on an empty red Stop button may cancel.
     // Keyboard Enter with an empty/stale draft is a no-op, never an interrupt.
+    // A bare trigger phrase bursts sparks (presentation only); the text still
+    // sends or steers exactly as typed, so this sits before the busy branch.
+    if (isEggPhrase(v) && props.onMellon && sendRef.current) {
+      props.onMellon(sendRef.current.getBoundingClientRect());
+    }
     if (props.busy) {
       if (hasLiveContent && props.onSteer) {
         props.onSteer(v, imgs);
@@ -168,10 +173,6 @@ export function Composer(props: ComposerProps) {
       return;
     }
     if (!v && !imgs?.length) return;
-    // A bare trigger phrase bursts sparks; the message still sends unchanged.
-    if (isEggPhrase(v) && props.onMellon && sendRef.current) {
-      props.onMellon(sendRef.current.getBoundingClientRect());
-    }
     props.onSend(v, imgs);
     props.onChange('');
     clearImages();
