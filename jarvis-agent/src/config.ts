@@ -27,6 +27,14 @@ export function teammateVoiceId(voice: string | undefined): string {
   return (voice && TEAMMATE_VOICE_IDS[voice]) || CONFIG.voiceId;
 }
 
+// An unusable endpointing value would make ElevenLabs reject the realtime
+// session and bring back the never-answers call, so anything outside a sane
+// window falls back to the default.
+function silenceSeconds(raw: string | undefined): number {
+  const value = Number.parseFloat((raw ?? "").trim());
+  return Number.isFinite(value) && value >= 0.1 && value <= 5 ? value : 0.6;
+}
+
 export const CONFIG = {
   /** ElevenLabs TTS */
   elevenApiKey: process.env.ELEVENLABS_API_KEY ?? '',
@@ -37,7 +45,7 @@ export const CONFIG = {
   sttModel: (process.env.JARVIS_STT || 'scribe_v2_realtime').replace(/^.*\//, '').split(':')[0],
   sttLanguage: (process.env.JARVIS_STT || '').split(':')[1] || 'en',
   /** Seconds of silence before ElevenLabs commits a final transcript. */
-  sttSilenceSecs: Number(process.env.JARVIS_STT_SILENCE_SECS || 0.6),
+  sttSilenceSecs: silenceSeconds(process.env.JARVIS_STT_SILENCE_SECS),
   /** Rivendell Hall chat bridge */
   rivendellWsUrl: process.env.RIVENDELL_WS_URL || 'ws://127.0.0.1:8091/api/ws',
   rivendellRepo: process.env.RIVENDELL_REPO || join(homedir(), 'ASSISTANT-HUB'),
