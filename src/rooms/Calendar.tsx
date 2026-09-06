@@ -21,14 +21,14 @@ const DEFAULT_ACCOUNTS: Record<CalendarAccount, CalendarAccountMeta> = {
     email: 'Primary account',
     sourceName: 'Primary calendar',
     className: 'source-primary',
-    color: '#6aa3ff',
+    color: 'var(--r-elf-blue)',
   },
   workspace2: {
     label: 'Secondary',
     email: 'Secondary account',
     sourceName: 'Secondary calendar',
     className: 'source-ypp',
-    color: '#d4af63',
+    color: 'var(--r-silver)',
   },
 };
 

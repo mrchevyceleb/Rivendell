@@ -1,5 +1,5 @@
 /* ============================================================
-   Rivendell chat reimagining — shared design layer
+   TARDIS chat — shared design layer
    ------------------------------------------------------------
    Ports the two approved HTML prototypes (desktop + mobile) into
    the real app. Every value was extracted from src/tokens.css
@@ -53,11 +53,11 @@
 
 /* --shadow differs per theme (dark: near-black, light: warm brown) and is only
    used inside the chat shell, so scope it there. */
-.rc { --shadow: #04050a; --radius-xl: 20px; }
-[data-theme="light"] .rc { --shadow: #4a381e; }
+.rc { --shadow: #08080a; --radius-xl: 20px; }
+[data-theme="light"] .rc { --shadow: #3a2e1a; }
 
 /* ── §2 motion keyframes ───────────────────────────────────────── */
-@keyframes rc-spring-in { from { opacity: 0; transform: translateY(16px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes rc-spring-in { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: none; } }
 @keyframes rc-tok { from { opacity: 0; } to { opacity: 1; } }
 @keyframes rc-caret { 0%,100% { opacity: 1; transform: scaleY(1); } 50% { opacity: .45; transform: scaleY(.82); } }
 @keyframes rc-breathe { 0%,100% { opacity: .7; } 50% { opacity: 1; } }
@@ -92,8 +92,10 @@
 .rc .sky .st { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: var(--star);
   box-shadow: 0 0 6px color-mix(in oklch, var(--star) 70%, transparent); animation: rc-twinkle var(--d, 3s) ease-in-out var(--dl, 0s) infinite; }
 .rc .sky .mote { position: absolute; bottom: -12px; width: 3px; height: 3px; border-radius: 50%;
-  background: color-mix(in oklch, var(--gold) 60%, transparent); opacity: 0; animation: rc-rise var(--d, 24s) linear var(--dl, 0s) infinite; }
-[data-theme="light"] .rc .sky .st { display: none; } /* stars hide at dawn (--r-star-show: 0) */
+  background: color-mix(in oklch, var(--r-vortex-3) 60%, transparent); opacity: 0; animation: rc-rise var(--d, 24s) linear var(--dl, 0s) infinite; }
+.rc .sky .mote:nth-child(3n) { background: color-mix(in oklch, var(--r-vortex-1) 70%, transparent); }
+.rc .sky .mote:nth-child(3n+1) { background: color-mix(in oklch, var(--r-vortex-2) 70%, transparent); }
+[data-theme="light"] .rc .sky .st { display: none; } /* no stars through the Classic walls (--r-star-show: 0) */
 
 /* ============================================================
    Shared message anatomy (both screens) — §3.8
@@ -102,7 +104,7 @@
 .rc .daymark::before, .rc .daymark::after { content: ''; height: 1px; background: linear-gradient(90deg, transparent, var(--border-gold), transparent); }
 .rc .daymark span { font-family: var(--font-display); font-style: italic; font-size: 14px; color: var(--muted); }
 
-.rc .msg { animation: rc-spring-in .5s var(--spring) both; }
+.rc .msg { animation: rc-spring-in .35s var(--spring) both; }
 .rc .m-user { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 /* attached image thumbnails on user bubbles */
 .rc .uimg-row { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -127,6 +129,19 @@
 .rc .caret { display: inline-block; width: 8px; height: 15px; margin-left: 2px; vertical-align: -2px; border-radius: 2px;
   background: linear-gradient(180deg, var(--accent-glow), var(--accent)); box-shadow: var(--glow-accent);
   animation: rc-caret .8s ease-in-out infinite; }
+
+/* ── the vortex ring — the one "working" glyph (active turn / reconnecting /
+   tool running). Violet → teal → amber conic ring, counter-rotating inner glow. */
+.rc .vortex { position: relative; display: inline-block; width: 16px; height: 16px; flex: none; }
+.rc .vortex::before { content: ''; position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--r-vortex-1), var(--r-vortex-2), var(--accent), var(--r-vortex-1));
+  -webkit-mask: radial-gradient(circle, transparent 50%, #000 55%); mask: radial-gradient(circle, transparent 50%, #000 55%);
+  animation: rc-spin 2.4s linear infinite; }
+.rc .vortex::after { content: ''; position: absolute; inset: 4px; border-radius: 50%;
+  background: conic-gradient(from 180deg, transparent 0 40%, color-mix(in oklch, var(--r-vortex-2) 70%, transparent) 55%, transparent 70%);
+  filter: blur(.8px); animation: rc-spin 3.2s linear infinite reverse; }
+/* console lights — three amber lamps blinking in sequence */
+@keyframes rc-console-blink { 0%, 100% { opacity: .28; box-shadow: none; } 50% { opacity: 1; box-shadow: 0 0 6px var(--accent); } }
 
 /* action pills (copy / pin) */
 .rc .acts { display: flex; gap: 6px; height: 24px; opacity: 0; transition: opacity .18s ease; }
@@ -156,13 +171,6 @@
 .rc .terminal-error strong { display: block; margin-bottom: 2px; color: var(--fg); font-weight: 600; }
 .rc .terminal-error-copy { display: block; color: var(--muted); }
 
-/* ── thinking indicator — §3.4 ─────────────────────────────────── */
-.rc .think { display: flex; align-items: center; gap: 10px; color: var(--muted); animation: rc-spring-in .4s var(--spring) both; }
-.rc .think .spin { width: 18px; height: 18px; color: var(--accent-glow); animation: rc-spin 2.6s linear infinite; flex: none; }
-.rc .think .ph { font-family: var(--font-display); font-style: italic; font-size: 15.5px; transition: opacity .3s ease; }
-.rc .think .dots span { display: inline-block; width: 3px; height: 3px; margin-left: 4px; border-radius: 50%; background: var(--muted); animation: rc-hop 1.2s ease-in-out infinite; }
-.rc .think .dots span:nth-child(2) { animation-delay: .15s; } .rc .think .dots span:nth-child(3) { animation-delay: .3s; }
-
 /* Persistent proof of life. Unlike the cold-start typing bubble, this remains
    visible after prose/tools appear and only leaves on the real turn boundary. */
 .rc .active-turn {
@@ -175,7 +183,7 @@
   min-height: 34px;
   padding: 7px 11px;
   overflow: hidden;
-  border: 1px solid color-mix(in oklch, var(--accent) 28%, var(--border));
+  border: 1px solid color-mix(in oklch, var(--accent) 30%, var(--border));
   border-radius: 999px;
   background: color-mix(in oklch, var(--surface-soft) 92%, transparent);
   color: var(--fg-soft);
@@ -186,16 +194,17 @@
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(100deg, transparent 30%, var(--accent-soft) 50%, transparent 70%);
+  background: linear-gradient(100deg, transparent 30%, color-mix(in oklch, var(--r-vortex-1) 22%, transparent) 42%, color-mix(in oklch, var(--r-vortex-2) 22%, transparent) 50%, color-mix(in oklch, var(--accent) 18%, transparent) 58%, transparent 70%);
   background-size: 220% 100%;
   animation: rc-sheen 2.4s linear infinite;
 }
-.rc .active-turn-star { width: 14px; height: 14px; flex: none; color: var(--accent-glow); animation: rc-spin 2.4s linear infinite; }
-.rc .active-turn-label { min-width: 52px; font-size: 12.5px; font-weight: 600; }
+.rc .active-turn-star { width: 14px; height: 14px; flex: none; }
+.rc .active-turn-label { min-width: 15ch; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
+.bot-app .rc .active-turn-label, .rc-mobile .active-turn-label { max-width: 18ch; }
 .rc .active-turn-dots { display: inline-flex; align-items: center; gap: 3px; }
-.rc .active-turn-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent-glow); animation: rc-hop 1.2s ease-in-out infinite; }
-.rc .active-turn-dots i:nth-child(2) { animation-delay: .15s; }
-.rc .active-turn-dots i:nth-child(3) { animation-delay: .3s; }
+.rc .active-turn-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: rc-console-blink 1.5s ease-in-out infinite; }
+.rc .active-turn-dots i:nth-child(2) { animation-delay: .5s; }
+.rc .active-turn-dots i:nth-child(3) { animation-delay: 1s; }
 .rc .active-turn-time { min-width: 31px; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); text-align: right; }
 
 /* Explicit terminal/transport states: no animation means "finished", never
@@ -224,19 +233,20 @@
   border: 1px solid color-mix(in oklch, var(--amber) 28%, var(--border));
   background: color-mix(in oklch, var(--amber) 7%, transparent);
 }
-.rc .connection-state-star { width: 12px; height: 12px; animation: rc-spin 2.4s linear infinite; }
+.rc .connection-state-star { width: 12px; height: 12px; }
 .rc .delivery-state { font-family: var(--font-mono); font-size: 10px; opacity: 1; }
 .rc .delivery-state.queued { color: var(--amber); animation: rc-breathe 1.8s ease-in-out infinite; }
-.rc .delivery-state.failed { color: #ef4444; }
+.rc .delivery-state.failed { color: var(--r-rose); }
 
 /* ── tool card (collapsible working card) — §3.5 ───────────────── */
 .rc .tool { position: relative; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface-soft); max-width: 560px; }
 .rc .tool.running::after { content: ''; position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(100deg, transparent 32%, var(--accent-soft) 50%, transparent 68%);
+  background: linear-gradient(100deg, transparent 32%, color-mix(in oklch, var(--accent) 14%, transparent) 50%, transparent 68%);
   background-size: 220% 100%; animation: rc-sheen 1.9s linear infinite; }
 .rc .tool-head { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; text-align: left; }
 .rc .tool-head .tstar { width: 15px; height: 15px; color: var(--accent-glow); flex: none; }
-.rc .tool.running .tstar { animation: rc-spin 2s linear infinite; }
+.rc .tool.running .tstar:not(.vortex) { animation: rc-spin 2s linear infinite; }
+.rc .tool-head .vortex { width: 15px; height: 15px; }
 .rc .tool.done .tstar { color: var(--emerald); animation: none; }
 .rc .tool-title { font-size: 13px; font-weight: 500; color: var(--fg-soft); }
 .rc .tool-meta { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); }
@@ -299,14 +309,14 @@
 .rc .send .stop-txt { display: none; font: 600 12.5px/1 var(--font-display); letter-spacing: .02em; }
 .rc .send.streaming { width: auto; min-width: 40px; padding: 0 14px; border-radius: 999px;
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  background: #DC2626; border-color: transparent; color: #fff;
+  background: var(--r-rose); border-color: transparent; color: #fff;
   animation: rc-stop-pulse 1.8s ease-in-out infinite; }
 .rc .send.streaming:hover { transform: scale(1.05); }
 .rc .send.streaming svg { width: 14px; height: 14px; }
 .rc .send.streaming .stop-txt { display: inline; }
 @keyframes rc-stop-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, .45); }
-  50% { box-shadow: 0 0 0 7px rgba(220, 38, 38, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217, 83, 79, .45); }
+  50% { box-shadow: 0 0 0 7px rgba(217, 83, 79, 0); }
 }
 @media (prefers-reduced-motion: reduce) {
   .rc .send.streaming { animation: none; }
@@ -330,7 +340,7 @@
   overflow: hidden; opacity: 0; transform: translateY(6px) scale(.99); pointer-events: none;
   transition: opacity .18s ease, transform .18s var(--spring); }
 .rc .pop.show { opacity: 1; transform: none; pointer-events: auto; }
-.rc .pop-h { padding: 8px 14px 4px; font-family: var(--font-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+.rc .pop-h { padding: 8px 14px 4px; font-family: var(--r-sign); font-weight: 400; font-size: 9.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
 .rc .cmd { display: flex; align-items: baseline; gap: 12px; width: 100%; padding: 8px 14px; text-align: left; min-height: 38px; }
 .rc .cmd:hover { background: var(--surface-hover); }
 .rc .cmd .cn { font-family: var(--font-mono); font-size: 12.5px; color: var(--fg-soft); }
@@ -361,7 +371,7 @@
 .rc .lane.on .ring { border-color: color-mix(in oklch, var(--accent) 50%, transparent); color: var(--accent-glow); box-shadow: var(--glow-accent); }
 .rc .lane.on .nm { color: var(--fg); } .rc .lane.on .tick { opacity: 1; }
 .rc .lane-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 2px 14px 10px 51px; }
-.rc .ctl-lab { flex-basis: 100%; font-family: var(--font-mono); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); padding-top: 4px; }
+.rc .ctl-lab { flex-basis: 100%; font-family: var(--r-sign); font-weight: 400; font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); padding-top: 4px; }
 .rc .mini { padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border); font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); transition: all .15s ease; min-height: 30px; display: inline-flex; align-items: center; }
 .rc .mini:hover { border-color: var(--border-strong); color: var(--fg-soft); }
 .rc .mini.on { border-color: color-mix(in oklch, var(--accent) 55%, transparent); color: var(--accent-glow); background: color-mix(in oklch, var(--accent) 10%, transparent); }
@@ -397,7 +407,7 @@
 .rc .pulse { border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: rc-breathe 2s ease-in-out infinite; }
 .rc .presence { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 
-/* sparkle easter-egg bursts (sigil / mellon) */
+/* spark bursts (sigil / allons-y / geronimo / fantastic / mellon) — see theme/eggs.css */
 .rc .spark { position: fixed; width: 5px; height: 5px; pointer-events: none; z-index: 50; color: var(--gold); }
 .rc .spark svg { width: 100%; height: 100%; }
 
@@ -452,7 +462,7 @@
   background: radial-gradient(ellipse 500px 360px at 85% -5%, color-mix(in oklch, var(--accent) 7%, transparent), transparent 60%),
               radial-gradient(ellipse 420px 320px at 10% 108%, color-mix(in oklch, var(--gold) 5%, transparent), transparent 60%),
               var(--bg); }
-.rc-mobile .head { position: relative; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 6px 16px 8px; flex: none; }
+.rc-mobile .head { position: relative; z-index: 2; display: flex; align-items: center; gap: 10px; padding: calc(6px + env(safe-area-inset-top, 0px)) 16px 8px; flex: none; }
 .rc-mobile .head .sigil { width: 44px; height: 44px; }
 .rc-mobile .head .sigil:active { transform: scale(.88) rotate(-10deg); }
 .rc-mobile .head .sigil svg { width: 17px; height: 17px; }
@@ -483,11 +493,9 @@
 .rc-mobile .tool { max-width: none; }
 .rc-mobile .tool-head { min-height: 44px; padding: 8px 14px; }
 .rc-mobile .tool-body pre { padding: 2px 14px 12px 38px; font-size: 10.5px; }
-.rc-mobile .think .spin { width: 17px; height: 17px; }
-.rc-mobile .think .ph { font-size: 15px; }
 .rc-mobile .jump { bottom: 108px; }
 
-.rc-mobile .dock { position: relative; z-index: 3; padding: 8px 12px 4px; flex: none; }
+.rc-mobile .dock { position: relative; z-index: 3; padding: 8px 12px calc(4px + env(safe-area-inset-bottom, 0px)); flex: none; }
 .rc-mobile .composer { display: flex; align-items: flex-end; gap: 8px; padding: 7px; }
 .rc-mobile .composer textarea { flex: 1; min-height: 44px; max-height: 128px; padding: 11px 4px; line-height: 1.45; }
 .rc-mobile .attach { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); border: 1px solid var(--border); transition: all .2s var(--spring); flex: none; }

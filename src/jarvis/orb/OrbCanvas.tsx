@@ -1,13 +1,13 @@
-// The Jarvis orb: Canvas-2D, audio-reactive, in the Rivendell palette (gold
-// core, elf-blue aura). States: breathe (idle/listening), ripple (listening),
+// The Jarvis orb: Canvas-2D, audio-reactive, in the TARDIS palette (brass
+// core, vortex-teal aura). States: breathe (idle/listening), ripple (listening),
 // swirl (thinking/connecting), waveform pulse (speaking, analyser-driven).
 
 import { useEffect, useRef } from 'react';
 import type { JarvisPhase } from '../useJarvisSession';
 
-const GOLD = '212, 175, 99'; // --r-gold
-const BLUE = '106, 163, 255'; // --r-elf-blue
-const STAR = '230, 242, 255'; // --r-star
+const GOLD = '217, 168, 90'; // --r-gold (brass)
+const BLUE = '58, 160, 166'; // vortex teal, lifted for canvas
+const STAR = '245, 239, 226'; // --r-star
 
 export function OrbCanvas(props: {
   phase: JarvisPhase;

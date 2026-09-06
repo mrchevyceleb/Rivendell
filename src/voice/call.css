@@ -1,12 +1,12 @@
-/* Voice call overlay — iPhone-call anatomy on Rivendell's sand palette. */
+/* Voice call overlay — iPhone-call anatomy in the TARDIS console palette. */
 
 .riv-call {
   position: fixed; inset: 0; z-index: 90;
-  background: #070707;
+  background: var(--r-bg);
   display: flex; flex-direction: column;
   align-items: center;
   padding: max(18px, env(safe-area-inset-top)) 20px max(26px, env(safe-area-inset-bottom));
-  color: #FCFCFC;
+  color: var(--r-ink);
   animation: riv-call-in 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 @keyframes riv-call-in {
@@ -17,16 +17,16 @@
 .riv-call-top { width: 100%; display: flex; justify-content: center; }
 .riv-call-chip {
   display: inline-flex; align-items: center; gap: 8px;
-  font-size: 12.5px; color: #B7B7B7;
-  background: #161616; border: 1px solid rgba(119, 119, 119, 0.28);
+  font-size: 12.5px; color: var(--r-ink-mute);
+  background: var(--r-bg-raised); border: 1px solid var(--r-line-gold);
   border-radius: 999px; padding: 7px 14px;
 }
-.riv-call-dot { width: 7px; height: 7px; border-radius: 50%; background: #777; }
-.riv-call-dot-listening { background: #34C759; animation: riv-pulse 1.6s infinite; }
-.riv-call-dot-speaking { background: #34C759; }
-.riv-call-dot-connecting { background: #FFD60A; animation: riv-pulse 0.9s infinite; }
-.riv-call-dot-thinking { background: #FFD60A; animation: riv-pulse 0.6s infinite; }
-.riv-call-dot-ended, .riv-call-dot-error { background: #FF453A; }
+.riv-call-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--r-ink-ghost); }
+.riv-call-dot-listening { background: var(--r-emerald); animation: riv-pulse 1.6s infinite; }
+.riv-call-dot-speaking { background: var(--r-emerald); }
+.riv-call-dot-connecting { background: var(--r-elf-blue); animation: riv-pulse 0.9s infinite; }
+.riv-call-dot-thinking { background: var(--r-elf-blue); animation: riv-pulse 0.6s infinite; }
+.riv-call-dot-ended, .riv-call-dot-error { background: var(--r-rose); }
 @keyframes riv-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 .riv-call-hero {
@@ -38,23 +38,23 @@
 .riv-call-disc {
   width: 116px; height: 116px; border-radius: 50%;
   display: grid; place-items: center;
-  font-size: 44px; font-weight: 600; color: #FCFCFC;
+  font-size: 44px; font-weight: 600; color: #f5efe2;
   overflow: hidden;
-  border: 1px solid rgba(119, 119, 119, 0.35);
+  border: 1px solid var(--r-line-gold);
   transition: box-shadow 0.3s ease, transform 0.3s ease;
 }
 .riv-call-disc img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .riv-call-disc.speaking {
-  box-shadow: 0 0 0 10px rgba(252, 252, 252, 0.06), 0 0 60px rgba(252, 252, 252, 0.12);
+  box-shadow: 0 0 0 10px color-mix(in srgb, var(--r-gold) 8%, transparent), 0 0 60px color-mix(in srgb, var(--r-gold) 14%, transparent);
   transform: scale(1.03);
 }
 
 .riv-call-name { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; }
-.riv-call-sub { font-size: 13px; color: #B7B7B7; margin-top: -6px; }
+.riv-call-sub { font-size: 13px; color: var(--r-ink-mute); margin-top: -6px; }
 
 .riv-call-wave { display: flex; align-items: center; gap: 5px; height: 34px; margin-top: 8px; }
 .riv-call-bar {
-  width: 4px; border-radius: 2px; background: #FCFCFC;
+  width: 4px; border-radius: 2px; background: var(--r-elf-blue);
   height: 30%;
   animation: riv-bar 1s ease-in-out infinite;
 }
@@ -66,43 +66,43 @@
   max-height: 150px; overflow: hidden;
   text-align: center;
 }
-.riv-call-line { font-size: 13.5px; color: #B7B7B7; line-height: 1.45; }
-.riv-call-line:last-child { color: #FCFCFC; }
+.riv-call-line { font-size: 13.5px; color: var(--r-ink-mute); line-height: 1.45; }
+.riv-call-line:last-child { color: var(--r-ink); }
 .riv-call-line-user { font-style: italic; }
-.riv-call-line-tool { color: #D4AF63; font-size: 12.5px; }
+.riv-call-line-tool { color: var(--r-gold); font-size: 12.5px; }
 
 .riv-call-error {
-  font-size: 12.5px; color: #FF453A; margin-bottom: 8px;
+  font-size: 12.5px; color: var(--r-rose); margin-bottom: 8px;
 }
 .riv-call-audio-unlock {
   margin-bottom: 10px; padding: 9px 16px; border-radius: 999px;
-  border: 1px solid rgba(212, 175, 99, 0.65); background: rgba(212, 175, 99, 0.12);
-  color: #F4D58A; font-size: 13px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--r-gold) 65%, transparent); background: color-mix(in srgb, var(--r-gold) 12%, transparent);
+  color: var(--r-elf-glow); font-size: 13px; cursor: pointer;
 }
-.riv-call-audio-unlock:focus-visible { outline: 2px solid #D4AF63; outline-offset: 3px; }
+.riv-call-audio-unlock:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 3px; }
 
 .riv-call-voice { width: 100%; max-width: 520px; display: flex; flex-direction: column; align-items: center; }
 .riv-call-voicebtn {
   display: inline-flex; align-items: center; gap: 6px;
-  background: transparent; border: 1px solid rgba(119, 119, 119, 0.35);
-  color: #FCFCFC; border-radius: 999px;
+  background: transparent; border: 1px solid var(--r-line-gold);
+  color: var(--r-ink); border-radius: 999px;
   font-size: 13px; padding: 8px 16px; cursor: pointer;
 }
-.riv-call-voicebtn:hover { border-color: rgba(119, 119, 119, 0.7); }
-.riv-call-voice > span.riv-call-voicebtn { cursor: default; color: #B7B7B7; }
+.riv-call-voicebtn:hover { border-color: var(--r-gold); }
+.riv-call-voice > span.riv-call-voicebtn { cursor: default; color: var(--r-ink-mute); }
 .riv-call-voicegrid {
   margin-top: 10px;
   display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
   max-width: 460px;
 }
 .riv-call-voicechip {
-  background: #161616; color: #B7B7B7;
-  border: 1px solid rgba(119, 119, 119, 0.28);
+  background: var(--r-bg-raised); color: var(--r-ink-mute);
+  border: 1px solid var(--r-line-gold);
   border-radius: 999px; font-size: 12.5px;
   padding: 7px 14px; cursor: pointer;
 }
-.riv-call-voicechip.on { border-color: #FCFCFC; color: #FCFCFC; }
-.riv-call-voicechip:hover { color: #FCFCFC; }
+.riv-call-voicechip.on { border-color: var(--r-gold); color: var(--r-ink); }
+.riv-call-voicechip:hover { color: var(--r-ink); }
 
 .riv-call-controls {
   display: flex; gap: 26px; margin-top: 22px;
@@ -110,10 +110,10 @@
 .riv-call-ctl {
   width: 66px; height: 66px; border-radius: 50%;
   display: grid; place-items: center;
-  background: #FCFCFC; color: #070707;
+  background: var(--r-gold); color: var(--r-bg);
   cursor: pointer;
   transition: transform 0.12s ease;
 }
 .riv-call-ctl:active { transform: scale(0.92); }
-.riv-call-ctl.muted { background: #B7B7B7; }
-.riv-call-ctl.end { background: #FF453A; color: #FCFCFC; }
+.riv-call-ctl.muted { background: var(--r-ink-mute); }
+.riv-call-ctl.end { background: var(--r-rose); color: #fff; }

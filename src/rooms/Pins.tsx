@@ -345,7 +345,7 @@ function accentFor(pin: PinItem): string {
     case 'blue':
       return 'var(--r-elf-blue)';
     case 'violet':
-      return '#9b70ff';
+      return 'var(--r-violet)';
     case 'emerald':
       return 'var(--r-emerald)';
     case 'rose':

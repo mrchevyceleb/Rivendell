@@ -146,7 +146,7 @@
 .sw-btn-primary,
 button.sw-btn.sw-btn-primary {
   background: var(--r-elf-blue);
-  color: #fff !important;
+  color: #1a120a !important;
   border-color: var(--r-elf-blue);
 }
 .sw-btn-primary:hover { background: var(--r-elf-glow); border-color: var(--r-elf-glow); }

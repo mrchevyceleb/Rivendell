@@ -1,11 +1,11 @@
 /* ============================================================
-   Studio — the Rivendell IDE shell
+   Studio — the TARDIS IDE shell
    Top bar · (tree | tabbed content) · status bar
    ============================================================ */
 
 .studio {
   display: grid;
-  grid-template-rows: 46px 1fr 24px;
+  grid-template-rows: 46px 1fr auto;
   height: 100vh;
   height: 100dvh;
   background: var(--r-bg);
@@ -37,11 +37,12 @@
   flex-shrink: 0;
 }
 .studio-brand strong {
-  font-family: var(--r-display);
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--r-star);
-  letter-spacing: 0.01em;
+  font-family: var(--r-sign);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--r-ink);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
 }
 
 .studio-tree-toggle,
@@ -120,7 +121,7 @@
 .studio-tab:hover { color: var(--r-ink-soft); background: color-mix(in srgb, var(--r-bg-hover) 50%, transparent); }
 .studio-tab.active {
   color: var(--r-ink);
-  border-bottom-color: var(--r-gold);
+  border-bottom-color: var(--r-tardis-lit);
   background: var(--r-bg);
 }
 .studio-tab.active .studio-tab-main svg { color: var(--r-gold); }
@@ -210,7 +211,8 @@
   min-height: 0;
   overflow: hidden;
   border-right: 1px solid var(--r-line);
-  background: var(--r-bg-deep);
+  background-color: var(--r-bg-deep);
+  background-image: var(--r-roundel);
 }
 .studio-body.tree-collapsed .studio-tree { border-right: none; }
 
@@ -224,10 +226,11 @@
 }
 .studio-tree-title {
   flex: 1;
-  font-family: var(--r-mono);
-  font-size: 10.5px;
+  font-family: var(--r-sign);
+  font-weight: 400;
+  font-size: 9px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.14em;
   color: var(--r-ink-mute);
   white-space: nowrap;
   overflow: hidden;
@@ -254,7 +257,8 @@
 .studio-content {
   position: relative;
   min-height: 0;
-  background: var(--r-bg);
+  background-color: var(--r-bg);
+  background-image: var(--r-roundel-page);
 }
 .studio-pane {
   position: absolute;
@@ -371,7 +375,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 0 14px;
+  padding: 0 14px env(safe-area-inset-bottom, 0px);
+  min-height: 24px;
   border-top: 1px solid var(--r-line);
   background: var(--r-bg-soft);
   font-family: var(--r-mono);
@@ -392,14 +397,14 @@
    ============================================================ */
 @media (max-width: 760px) {
   /* Two rows: controls on top, a full-width tab strip below → size to content */
-  .studio { grid-template-rows: auto 1fr 22px; }
+  .studio { grid-template-rows: auto 1fr auto; }
 
   /* Top bar wraps: [tree] [mark] …… [+ new] [⋯] on row 1, tabs on row 2 */
   .studio-topbar {
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
-    padding: 6px 8px;
+    padding: calc(6px + env(safe-area-inset-top, 0px)) 8px 6px;
     row-gap: 0;
   }
   .studio-tree-toggle { order: 0; }

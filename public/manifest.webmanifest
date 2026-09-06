@@ -1,13 +1,13 @@
 {
-  "name": "Rivendell",
-  "short_name": "Rivendell",
-  "description": "A local-first, always-on multi-agent office.",
+  "name": "TARDIS",
+  "short_name": "TARDIS",
+  "description": "Bigger on the inside. A local-first, always-on multi-agent office.",
   "start_url": "/?app=rivendell",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#04050a",
-  "theme_color": "#0c1428",
+  "background_color": "#08080a",
+  "theme_color": "#08080a",
   "icons": [
     {
       "src": "/icon-192.png",

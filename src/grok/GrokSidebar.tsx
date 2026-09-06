@@ -36,7 +36,7 @@ import {
   X,
 } from 'lucide-react';
 import { BotMark } from './GrokLogo';
-import { agentMark, agentColor, agentAvatarUrl, sameChatId, type Agent } from './agents';
+import { agentMark, DISC_INK, agentColor, agentAvatarUrl, sameChatId, type Agent } from './agents';
 import { useLive } from '../chat/hooks/useLive';
 import type { HistoryItem } from './history';
 import { NativeOpenHelper } from '../components/NativeOpenHelper';
@@ -301,7 +301,7 @@ export function BotRail(props: BotRailProps) {
                 onDrop={(e) => { e.preventDefault(); commitReorder(); }}
                 onDragEnd={() => { setDragId(null); setDropBefore(null); }}
               >
-                <span className="bt-disc bt-has-presence" style={{ color: '#FCFCFC', background: agentColor(a.name) }}>
+                <span className="bt-disc bt-has-presence" style={{ color: DISC_INK, background: agentColor(a.name) }}>
                   {agentAvatarUrl(a) ? <img className="bt-disc-img" src={agentAvatarUrl(a) ?? undefined} alt={a.name} /> : agentMark(a)}
                   {liveAgents.has(a.id) ? <span className="bt-presence" aria-label="online now" /> : null}
                 </span>

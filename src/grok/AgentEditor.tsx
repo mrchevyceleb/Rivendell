@@ -16,7 +16,7 @@ import {
 import { CLAUDE_EFFORTS, CLAUDE_MODELS } from '../chat/components/CodexEnginePicker';
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL, codexEffortsForModel, codexModelSpec } from '../chat/codexModels';
 import { FIREWORKS_PROVIDER, OPENROUTER_PROVIDER } from '../chat/hooks/useBananaModel';
-import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, agentColor, type Agent } from './agents';
+import { AgentUpdateConflictError, createAgent, updateAgentReq, deleteAgentReq, uploadAgentAvatar, removeAgentAvatar, agentAvatarUrl, DISC_INK, agentColor, type Agent } from './agents';
 import { GROK_VOICES } from '../voice/useGrokCall';
 
 type BrainModelOption = { id: string; label: string };
@@ -386,7 +386,7 @@ export function AgentEditor({ open, agent, onClose, onSaved, onDeleted }: AgentE
                 const version = avatarVersion === -1 ? undefined : avatarVersion ?? agent.avatar;
                 return version
                   ? <img src={`/api/agents/${encodeURIComponent(agent.id)}/avatar?v=${version}`} alt={agent.name} />
-                  : <span style={{ background: agentColor(agent.name), width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: '#FCFCFC' }}>{agent.name.slice(0, 1).toUpperCase()}</span>;
+                  : <span style={{ background: agentColor(agent.name), width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: DISC_INK }}>{agent.name.slice(0, 1).toUpperCase()}</span>;
               })()}
             </div>
             <input

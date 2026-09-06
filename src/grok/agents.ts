@@ -150,8 +150,13 @@ export async function removeAgentAvatar(id: string): Promise<Agent> {
     .then((r) => (r as { agent: Agent }).agent ?? (r as Agent));
 }
 
-// Deterministic disc color per agent name — a calm sand-palette rotation.
-const DISC_COLORS = ['#8A8F98', '#7FA6A0', '#A6937F', '#8F7FA6', '#A67F93', '#7F92A6', '#9AA67F'];
+// Deterministic disc color per companion name — console-room rotation
+// (slate, teal-steel, brass, dusk violet, mauve, copper, olive), all readable
+// under the lamp-white initial in both themes.
+const DISC_COLORS = ['#5b6b7a', '#3f6b78', '#7a5c34', '#5a4a7a', '#7a4a5a', '#8a5a3a', '#5f6b4a'];
+/** Initial ink on a disc — a literal, not var(--r-ink), because discs stay
+    mid-tone in Classic mode while the ink goes near-black. */
+export const DISC_INK = '#f5efe2';
 export function agentColor(name: string): string {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;

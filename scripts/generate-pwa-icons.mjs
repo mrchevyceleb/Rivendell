@@ -18,7 +18,7 @@ for (const target of targets) {
   const inner = Math.round(target.size * (1 - (target.padding ?? 0) * 2));
   const offset = Math.round((target.size - inner) / 2);
   const rendered = await sharp(svg, { density: 384 })
-    .resize(inner, inner, { fit: 'contain', background: { r: 4, g: 5, b: 10, alpha: 1 } })
+    .resize(inner, inner, { fit: 'contain', background: { r: 8, g: 8, b: 10, alpha: 1 } })
     .png()
     .toBuffer();
   const composed = await sharp({
@@ -26,7 +26,7 @@ for (const target of targets) {
       width: target.size,
       height: target.size,
       channels: 4,
-      background: { r: 4, g: 5, b: 10, alpha: 1 },
+      background: { r: 8, g: 8, b: 10, alpha: 1 },
     },
   })
     .composite([{ input: rendered, top: offset, left: offset }])

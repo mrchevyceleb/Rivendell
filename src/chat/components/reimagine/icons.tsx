@@ -1,6 +1,6 @@
-// Inline SVG icons for the reimagined chat, matching the two HTML prototypes
-// verbatim. Kept dependency-free (no lucide) so the LOTR glyph shapes (8-point
-// star sigil, etc.) are pixel-faithful to the approved mocks.
+// Inline SVG icons for the chat kit, matching the two HTML prototypes
+// verbatim. Kept dependency-free (no lucide) so the glyph shapes (the 4-point
+// star that spins, sparks and marks the sigil) stay pixel-faithful.
 
 import type { SVGProps } from 'react';
 

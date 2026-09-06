@@ -1,20 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
   <defs>
-    <radialGradient id="bg" cx="50%" cy="50%" r="60%">
-      <stop offset="0%" stop-color="#0c1428" />
-      <stop offset="100%" stop-color="#04050a" />
+    <radialGradient id="bg" cx="50%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#15151b" />
+      <stop offset="100%" stop-color="#08080a" />
     </radialGradient>
-    <radialGradient id="glow" cx="50%" cy="50%" r="55%">
-      <stop offset="0%" stop-color="#e6f2ff" stop-opacity="0.55" />
-      <stop offset="60%" stop-color="#c5cee0" stop-opacity="0.12" />
-      <stop offset="100%" stop-color="#04050a" stop-opacity="0" />
+    <radialGradient id="lamp" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffd08a" stop-opacity="0.9" />
+      <stop offset="45%" stop-color="#f2b95f" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#f2b95f" stop-opacity="0" />
     </radialGradient>
   </defs>
   <rect width="32" height="32" rx="6" fill="url(#bg)" />
-  <circle cx="16" cy="16" r="13" fill="url(#glow)" />
-  <g fill="none" stroke="#d4af63" stroke-width="0.6" stroke-linecap="round">
-    <path d="M16 2 L18 14 L30 16 L18 18 L16 30 L14 18 L2 16 L14 14 Z" fill="#d4af63" fill-opacity="0.18" />
-    <path d="M16 5 L17 15 L27 16 L17 17 L16 27 L15 17 L5 16 L15 15 Z" stroke="#e6f2ff" stroke-width="0.7" />
-    <circle cx="16" cy="16" r="1.4" fill="#e6f2ff" stroke="none" />
-  </g>
+  <circle cx="16" cy="3.6" r="5" fill="url(#lamp)" />
+  <path fill="#1d3557" stroke="#3d6ea6" stroke-width="0.6" stroke-linejoin="round"
+        d="M7 30.5 H25 V28.5 H24 V10.5 H24.6 V8.6 H22.2 V6.6 H19 V4.9 H17 V4 H15 V4.9 H13 V6.6 H9.8 V8.6 H7.4 V10.5 H8 V28.5 H7 Z" />
+  <rect x="8" y="10.5" width="16" height="2.6" fill="#0b1526" />
+  <rect x="10" y="11.5" width="12" height="0.7" fill="#7fb0e0" opacity="0.9" />
+  <rect x="9.6" y="14.2" width="5.2" height="3.4" fill="#f2d9a0" />
+  <rect x="17.2" y="14.2" width="5.2" height="3.4" fill="#f2d9a0" />
+  <rect x="9.6" y="18.8" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.7" />
+  <rect x="17.2" y="18.8" width="5.2" height="3.4" fill="#f2d9a0" opacity="0.7" />
+  <rect x="15.6" y="23.2" width="0.8" height="4.8" fill="#08080a" opacity="0.8" />
+  <circle cx="16" cy="3.4" r="1.6" fill="#f2b95f" />
 </svg>

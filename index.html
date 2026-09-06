@@ -2,23 +2,55 @@
 <html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0c1428" />
-    <meta name="application-name" content="Rivendell" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#08080a" />
+    <meta name="description" content="Bigger on the inside. A local-first, always-on multi-agent office." />
+    <meta name="application-name" content="TARDIS" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="Rivendell" />
+    <meta name="apple-mobile-web-app-title" content="TARDIS" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <title>Rivendell</title>
+    <title>TARDIS</title>
+    <script>
+      // Apply the persisted theme BEFORE first paint so Classic-console users
+      // never see a dark flash. The React shells set it again in an effect.
+      try { var t = localStorage.getItem('rivendell:theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+    </script>
+    <style>
+      /* Boot: the box materialises. Pure CSS, never blocks input
+         (pointer-events: none), and self-expires at 1.4s even if JS never
+         runs. App.tsx fades it out once React has mounted. */
+      html { background: #08080a; }
+      html[data-theme="light"] { background: #f4f1ea; }
+      #boot { position: fixed; inset: 0; z-index: 9999; display: grid; place-items: center; background: #08080a; pointer-events: none; animation: boot-out .2s ease 1.4s both; }
+      html[data-theme="light"] #boot { background: #f4f1ea; }
+      #boot.out { animation: boot-out-now .2s ease both; }
+      #boot svg { width: 46px; height: 46px; opacity: 0; animation: boot-lamp .7s ease-out both; filter: drop-shadow(0 0 12px rgba(242, 185, 95, .35)); }
+      /* two soft pulses (~2.9 Hz on a 46px glyph, under the 3 Hz flash line) */
+      @keyframes boot-lamp { 0% { opacity: 0; } 30% { opacity: .95; } 55% { opacity: .4; } 80% { opacity: 1; } 100% { opacity: .85; } }
+      @keyframes boot-out { to { opacity: 0; visibility: hidden; } }
+      @keyframes boot-out-now { to { opacity: 0; visibility: hidden; } }
+      @media (prefers-reduced-motion: reduce) {
+        #boot svg { animation: none; opacity: .85; }
+        #boot { animation-delay: .6s; }
+      }
+    </style>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Jost:ital,wght@0,400;0,500;0,600;1,400&family=Michroma&display=swap" rel="stylesheet" />
   </head>
   <body>
+    <div id="boot" aria-hidden="true">
+      <svg viewBox="0 0 100 100">
+        <path fill="#3d6ea6" fill-rule="evenodd" d="M24 97 H76 V93 H73 V28 H75 V24 H69 V19 H62 V14 H54 V11 H46 V14 H38 V19 H31 V24 H25 V28 H27 V93 H24 Z M31 31 H69 V33.5 H31 Z M33 40 H47 V50 H33 Z M53 40 H67 V50 H53 Z M33 54 H47 V64 H33 Z M53 54 H67 V64 H53 Z M49.2 68 H50.8 V90 H49.2 Z" />
+        <circle cx="50" cy="7.5" r="7" fill="#f2b95f" opacity="0.18" />
+        <circle cx="50" cy="7.5" r="3.6" fill="#f2b95f" />
+      </svg>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -1,6 +1,7 @@
 /* ============================================================
-   Rivendell — design tokens
-   Elven, refined, parchment + silver + starlight, cool & ethereal
+   TARDIS — design tokens
+   Console room at night: void black, brass + amber instruments,
+   roundel walls, a rationed police-box blue. Vortex only in motion.
    ============================================================ */
 
 :root {
@@ -9,123 +10,165 @@
   color-scheme: dark;
 }
 
-/* ---------- Dark theme: "Imladris by night" ---------- */
+/* ---------- Dark theme: "Console room" ---------- */
 :where([data-theme="dark"]),
 :where(html:not([data-theme])) {
   color-scheme: dark;
-  /* ---------- Color: Mithril/Starlight (Cool dark) ---------- */
-  /* Backgrounds — deep midnight, almost black with a blue cast */
-  --r-bg:        #07090f;          /* page */
-  --r-bg-deep:   #04050a;          /* deepest, behind cards */
-  --r-bg-soft:   #0d111c;          /* surface */
-  --r-bg-card:   #111623;          /* card */
-  --r-bg-raised: #161c2c;          /* raised card / input */
-  --r-bg-hover:  #1a2134;
+  /* Backgrounds — the void, then console panels */
+  --r-bg:        #08080a;          /* page */
+  --r-bg-deep:   #050506;          /* deepest, behind cards */
+  --r-bg-soft:   #0f0f13;          /* rail / tree */
+  --r-bg-card:   #15151b;          /* card */
+  --r-bg-raised: #1c1c24;          /* raised card / input */
+  --r-bg-hover:  #23232d;
 
-  /* Lines & rules */
-  --r-line:        rgba(196, 213, 247, 0.08);
-  --r-line-strong: rgba(196, 213, 247, 0.16);
-  --r-line-gold:   rgba(212, 175, 99, 0.28);
+  /* Lines & rules — brass hairlines */
+  --r-line:        rgba(217, 168, 90, 0.12);
+  --r-line-strong: rgba(217, 168, 90, 0.18);
+  --r-line-gold:   rgba(217, 168, 90, 0.32);
 
-  /* Ink */
-  --r-ink:         #e8ecf6;     /* primary ivory text */
-  --r-ink-soft:    #b6bdd0;
-  --r-ink-mute:    #7c849a;
-  --r-ink-faint:   #565d72;
-  --r-ink-ghost:   #353a4a;
+  /* Ink — warm lamp-lit off-white */
+  --r-ink:         #ebe6da;
+  --r-ink-soft:    #cfc9bb;
+  --r-ink-mute:    #a39e91;
+  --r-ink-faint:   #7d786c;
+  --r-ink-ghost:   #57534a;
 
-  /* Accents */
-  --r-silver:      #c5cee0;     /* mithril */
-  --r-silver-soft: #8a93ab;
-  --r-star:        #e6f2ff;     /* starlight (page-title accent) */
-  --r-elf-blue:    #6aa3ff;     /* arwen-evenstar blue */
-  --r-elf-glow:    #8fb6ff;     /* glow tone */
-  --r-deep-blue:   #2a4a8a;
-  --r-gold:        #d4af63;     /* rare accent only */
-  --r-gold-soft:   #b69447;
-  --r-emerald:     #6dbf9e;     /* green light */
-  --r-amber:       #d99e57;     /* lantern */
-  --r-rose:        #c46a85;     /* warning */
-  --r-blood:       #8a3a4a;     /* danger */
+  /* Accents — brass structure, amber-glow instruments */
+  --r-silver:      #b8b2a4;     /* pewter console metal */
+  --r-silver-soft: #86806f;
+  --r-star:        #f5efe2;     /* lamp-white heading ink */
+  --r-elf-blue:    #f2b95f;     /* ACCENT: amber glow (lit instrument) */
+  --r-elf-glow:    #ffd08a;     /* accent text/icon on dark */
+  --r-deep-blue:   #8a6a32;     /* dim brass */
+  --r-gold:        #d9a85a;     /* primary brass */
+  --r-gold-soft:   #8a6a32;
+  --r-emerald:     #6fa887;     /* success, desaturated */
+  --r-amber:       #e08a3c;     /* warning: Gallifrey burnt orange */
+  --r-rose:        #d9534f;     /* danger */
+  --r-blood:       #8c2f2b;
+
+  /* TARDIS blue — rationed: brand mark, focus rings, active-nav rule */
+  --r-brass:       #d9a85a;
+  --r-brass-soft:  #8a6a32;
+  --r-tardis:      #1d3557;
+  --r-tardis-lit:  #3d6ea6;
+  --r-tardis-hi:   #7fb0e0;
+  /* Time vortex — gradients and motion only */
+  --r-vortex-1:    #4a2a86;
+  --r-vortex-2:    #137a7f;
+  --r-vortex-3:    #f2b95f;
+  --r-violet:      #9b84c9;     /* categorical */
 
   /* Glows — used very surgically */
-  --r-glow-elf:    0 0 20px rgba(106, 163, 255, 0.25), 0 0 40px rgba(106, 163, 255, 0.12);
-  --r-glow-gold:   0 0 18px rgba(212, 175, 99, 0.28);
-  --r-glow-soft:   0 0 30px rgba(196, 213, 247, 0.06);
+  --r-glow-brass:  0 0 18px rgba(217, 168, 90, 0.28), 0 0 42px rgba(217, 168, 90, 0.10);
+  --r-glow-tardis: 0 0 0 3px rgba(61, 110, 166, 0.28), 0 0 18px rgba(61, 110, 166, 0.22);
+  --r-glow-elf:    0 0 20px rgba(242, 185, 95, 0.22), 0 0 40px rgba(242, 185, 95, 0.10);
+  --r-glow-gold:   var(--r-glow-brass);
+  --r-glow-soft:   0 0 30px rgba(217, 168, 90, 0.05);
 
-  /* Theme-aware backdrops */
-  --r-page-glow-1: rgba(106, 163, 255, 0.06);
-  --r-page-glow-2: rgba(212, 175, 99, 0.04);
-  --r-page-glow-3: rgba(196, 213, 247, 0.02);
-  --r-star-color:  #e6f2ff;
+  /* Theme-aware backdrops — a faint vortex haze */
+  --r-page-glow-1: rgba(74, 42, 134, 0.10);
+  --r-page-glow-2: rgba(217, 168, 90, 0.05);
+  --r-page-glow-3: rgba(19, 122, 127, 0.04);
+  --r-star-color:  #f5efe2;
   --r-star-show:   1;          /* 1 = show stars, 0 = hide (light) */
-  --r-sidebar-grad-1: rgba(7,9,15,0.6);
-  --r-sidebar-grad-2: rgba(7,9,15,0.95);
-  --r-rail-grad-1: rgba(7,9,15,0.4);
-  --r-rail-grad-2: rgba(7,9,15,0.7);
+  --r-sidebar-grad-1: rgba(8,8,10,0.6);
+  --r-sidebar-grad-2: rgba(8,8,10,0.95);
+  --r-rail-grad-1: rgba(8,8,10,0.4);
+  --r-rail-grad-2: rgba(8,8,10,0.7);
+
+  /* Roundel walls — barely there in the dark, the whole point in Classic */
+  --r-roundel: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'><circle cx='48' cy='48' r='31' fill='none' stroke='%23d9a85a' stroke-opacity='0.055' stroke-width='1'/><circle cx='48' cy='48' r='24' fill='none' stroke='%23d9a85a' stroke-opacity='0.03' stroke-width='0.8'/></svg>");
+  --r-roundel-page: none;
 }
 
-/* ---------- Light theme: "Imladris at dawn" ---------- */
-/* Warm parchment + ink + soft golden light. Same accents, lighter surfaces. */
+/* ---------- Light theme: "Classic console" ---------- */
+/* 1963 white roundel walls, pale recesses, brass darkened for contrast. */
 [data-theme="light"] {
   color-scheme: light;
-  --r-bg:        #f4ede0;     /* warm parchment */
-  --r-bg-deep:   #ebe1cf;     /* deeper parchment behind cards */
-  --r-bg-soft:   #faf3e3;     /* surface */
-  --r-bg-card:   #fbf6e9;     /* card */
-  --r-bg-raised: #ffffff;     /* raised card / input — bright vellum */
-  --r-bg-hover:  #f1e8d2;
+  --r-bg:        #f4f1ea;     /* warm off-white wall */
+  --r-bg-deep:   #ebe7de;     /* roundel recess grey */
+  --r-bg-soft:   #f9f7f2;     /* surface */
+  --r-bg-card:   #fdfcf9;     /* card */
+  --r-bg-raised: #ffffff;     /* white panel */
+  --r-bg-hover:  #eee9df;
 
-  --r-line:        rgba(74, 56, 30, 0.12);
-  --r-line-strong: rgba(74, 56, 30, 0.22);
-  --r-line-gold:   rgba(168, 122, 40, 0.45);
+  --r-line:        rgba(122, 92, 40, 0.16);
+  --r-line-strong: rgba(122, 92, 40, 0.26);
+  --r-line-gold:   rgba(122, 92, 40, 0.44);
 
-  --r-ink:         #2a2014;     /* primary ink — warm near-black */
-  --r-ink-soft:    #4f4230;
-  --r-ink-mute:    #7a6a52;
-  --r-ink-faint:   #a5957a;
-  --r-ink-ghost:   #cdbfa3;
+  --r-ink:         #1c1915;
+  --r-ink-soft:    #3f3a32;
+  --r-ink-mute:    #6c665b;
+  --r-ink-faint:   #8f887b;
+  --r-ink-ghost:   #c2bbae;
 
-  --r-silver:      #5b5a55;
-  --r-silver-soft: #888579;
-  --r-star:        #1f160a;    /* page-title accent — deep ink for contrast on parchment */
-  --r-elf-blue:    #2c5db8;    /* deepened for contrast on parchment */
-  --r-elf-glow:    #1f4a96;
-  --r-deep-blue:   #1a3a78;
-  --r-gold:        #a87a28;    /* deepened gold — readable on parchment */
-  --r-gold-soft:   #876018;
-  --r-emerald:     #3a8862;
-  --r-amber:       #b8782a;
-  --r-rose:        #a8385a;
-  --r-blood:       #7a2638;
+  --r-silver:      #5c574d;
+  --r-silver-soft: #847e70;
+  --r-star:        #141210;
+  --r-elf-blue:    #9a6118;    /* accent darkened for the wall */
+  --r-elf-glow:    #7d4e12;
+  --r-deep-blue:   #5e4620;
+  --r-gold:        #7a5c28;    /* brass darkened */
+  --r-gold-soft:   #5e4620;
+  --r-emerald:     #3d7a5a;
+  --r-amber:       #b0641e;
+  --r-rose:        #b5403c;
+  --r-blood:       #7a2a27;
 
-  --r-glow-elf:    0 0 16px rgba(44, 93, 184, 0.18);
-  --r-glow-gold:   0 0 14px rgba(168, 122, 40, 0.22);
-  --r-glow-soft:   0 0 24px rgba(74, 56, 30, 0.06);
+  --r-brass:       #7a5c28;
+  --r-brass-soft:  #5e4620;
+  --r-tardis:      #1d3557;
+  --r-tardis-lit:  #2f5c8f;
+  --r-tardis-hi:   #3d6ea6;
+  --r-vortex-1:    #5b3f8c;
+  --r-vortex-2:    #1f7f84;
+  --r-vortex-3:    #c98a3a;
+  --r-violet:      #5b3f8c;
+
+  --r-glow-brass:  0 0 14px rgba(122, 92, 40, 0.22);
+  --r-glow-tardis: 0 0 0 3px rgba(47, 92, 143, 0.22);
+  --r-glow-elf:    0 0 16px rgba(154, 97, 24, 0.18);
+  --r-glow-gold:   var(--r-glow-brass);
+  --r-glow-soft:   0 0 24px rgba(60, 48, 30, 0.06);
 
   /* Theme-aware backdrops */
-  --r-page-glow-1: rgba(168, 122, 40, 0.06);
-  --r-page-glow-2: rgba(44, 93, 184, 0.04);
-  --r-page-glow-3: rgba(74, 56, 30, 0.02);
-  --r-star-color:  #a87a28;
-  --r-star-show:   0;          /* hide stars on parchment */
-  --r-sidebar-grad-1: rgba(244, 237, 224, 0.85);
-  --r-sidebar-grad-2: rgba(235, 225, 207, 0.95);
-  --r-rail-grad-1: rgba(250, 243, 227, 0.5);
-  --r-rail-grad-2: rgba(244, 237, 224, 0.8);
+  --r-page-glow-1: rgba(122, 92, 40, 0.05);
+  --r-page-glow-2: rgba(31, 127, 132, 0.03);
+  --r-page-glow-3: rgba(60, 48, 30, 0.02);
+  --r-star-color:  #7a5c28;
+  --r-star-show:   0;          /* no stars through the walls */
+  --r-sidebar-grad-1: rgba(244, 241, 234, 0.85);
+  --r-sidebar-grad-2: rgba(235, 231, 222, 0.95);
+  --r-rail-grad-1: rgba(249, 247, 242, 0.5);
+  --r-rail-grad-2: rgba(244, 241, 234, 0.8);
+
+  --r-roundel: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='96' height='96' viewBox='0 0 96 96'><circle cx='48' cy='48' r='31' fill='%23e4dfd4' fill-opacity='0.55'/><circle cx='48' cy='48' r='31' fill='none' stroke='%23cfc8ba' stroke-width='1'/><circle cx='48' cy='48' r='24' fill='none' stroke='%23d9d3c7' stroke-width='0.8'/></svg>");
+  --r-roundel-page: var(--r-roundel);
 }
 
 [data-theme="light"] ::selection {
-  background: rgba(168, 122, 40, 0.28);
+  background: rgba(122, 92, 40, 0.28);
   color: var(--r-ink);
 }
 
+/* Baked brass in the ornament data-URIs darkens on the Classic wall. */
+[data-theme="light"] .r-divider-knot,
+[data-theme="light"] .r-illuminated::before,
+[data-theme="light"] .r-illuminated::after,
+[data-theme="light"] .r-illuminated > .r-corner-tl,
+[data-theme="light"] .r-illuminated > .r-corner-br { filter: brightness(0.55); }
+
 /* ---------- Type & shape — theme-agnostic ---------- */
 :root {
-  --r-display: 'Cormorant Garamond', 'EB Garamond', Georgia, serif;
-  --r-body:    'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --r-display: 'Jost', 'Futura', 'Century Gothic', 'Josefin Sans', system-ui, sans-serif;
+  --r-sign:    'Michroma', 'Syncopate', 'Eurostile', 'Bank Gothic', sans-serif;
+  --r-body:    'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --r-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  --r-rune:    'Cormorant Garamond', serif;
+  --r-rune:    var(--r-sign);
+  --r-sans:         var(--r-body);      /* studio.css referenced this undefined */
+  --r-font-display: var(--r-display);  /* jarvis.css referenced this undefined */
   --r-radius-sm: 4px;
   --r-radius:    8px;
   --r-radius-lg: 14px;
@@ -154,13 +197,13 @@ html, body {
 [data-theme="dark"] html,
 [data-theme="dark"],
 [data-theme="dark"] body {
-  background-color: #07090f;
-  color: #e8ecf6;
+  background-color: #08080a;
+  color: #ebe6da;
 }
 [data-theme="light"],
 [data-theme="light"] body {
-  background-color: #f4ede0;
-  color: #2a2014;
+  background-color: #f4f1ea;
+  color: #1c1915;
 }
 
 body {
@@ -171,37 +214,43 @@ body {
     radial-gradient(ellipse 600px 600px at 50% 50%, var(--r-page-glow-3), transparent 70%),
     var(--r-bg);
   min-height: 100vh;
+  min-height: 100dvh;
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
-::selection { background: rgba(106, 163, 255, 0.32); color: var(--r-star); }
+::selection { background: rgba(217, 168, 90, 0.30); color: var(--r-star); }
+
+/* Keyboard focus is the one place the police-box blue is always allowed. */
+:focus-visible { outline: 2px solid var(--r-tardis-lit); outline-offset: 2px; }
 
 /* ============================================================
    Type utilities
    ============================================================ */
-.r-display    { font-family: var(--r-display); font-weight: 500; letter-spacing: 0; }
+.r-display    { font-family: var(--r-display); font-weight: 500; letter-spacing: 0.01em; }
 .r-display-i  { font-family: var(--r-display); font-style: italic; font-weight: 400; }
 .r-mono       { font-family: var(--r-mono); }
 .r-eyebrow    {
-  font-family: var(--r-body);
-  font-size: 10.5px;
+  font-family: var(--r-sign);
+  font-size: 9.5px;
   text-transform: uppercase;
-  letter-spacing: 0;
-  font-weight: 500;
+  letter-spacing: 0.16em;
+  font-weight: 400; /* Michroma ships one weight; font-synthesis is off */
   color: var(--r-ink-mute);
 }
 .r-eyebrow-gold {
-  font-family: var(--r-body);
-  font-size: 10.5px;
+  font-family: var(--r-sign);
+  font-size: 9.5px;
   text-transform: uppercase;
-  letter-spacing: 0;
-  font-weight: 600;
+  letter-spacing: 0.16em;
+  font-weight: 400;
   color: var(--r-gold);
 }
 .r-rune {
-  font-family: var(--r-display);
-  font-style: italic;
-  letter-spacing: 0;
+  font-family: var(--r-sign);
+  font-style: normal;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
 }
 
 /* Drop cap for prose */
@@ -214,7 +263,7 @@ body {
   float: left;
   margin: 0.12em 0.12em 0 0;
   color: var(--r-gold);
-  background: linear-gradient(135deg, var(--r-gold) 0%, #e8c987 100%);
+  background: linear-gradient(135deg, var(--r-gold) 0%, #f2b95f 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -236,7 +285,7 @@ body {
 }
 .r-panel {
   background:
-    linear-gradient(180deg, rgba(196, 213, 247, 0.02), rgba(196, 213, 247, 0)),
+    linear-gradient(180deg, rgba(217, 168, 90, 0.02), rgba(217, 168, 90, 0)),
     var(--r-bg-soft);
   border: 1px solid var(--r-line);
   border-radius: var(--r-radius-lg);
@@ -248,7 +297,7 @@ body {
   border: 1px solid var(--r-line-gold);
   border-radius: var(--r-radius-lg);
   background:
-    linear-gradient(180deg, rgba(212, 175, 99, 0.04), transparent 30%),
+    linear-gradient(180deg, rgba(217, 168, 90, 0.04), transparent 30%),
     linear-gradient(180deg, var(--r-bg-card), var(--r-bg-soft));
 }
 .r-illuminated::before,
@@ -258,7 +307,7 @@ body {
   content: "";
   position: absolute;
   width: 36px; height: 36px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 36' fill='none' stroke='%23d4af63' stroke-width='1' stroke-linecap='round'><path d='M2 14 V2 H14'/><path d='M2 8 H8 V2'/><circle cx='8' cy='8' r='1.6' fill='%23d4af63' stroke='none'/><path d='M14 4 Q18 6 14 8' /></svg>");
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 36 36' fill='none' stroke='%23d9a85a' stroke-width='1' stroke-linecap='round'><path d='M2 20 A18 18 0 0 1 20 2'/><path d='M2 11 A9 9 0 0 1 11 2' stroke-width='0.6' opacity='0.7'/><path d='M2 29 A27 27 0 0 1 29 2' stroke-width='0.5' opacity='0.45'/><circle cx='2' cy='2' r='1.6' fill='%23d9a85a' stroke='none'/></svg>");
   background-size: contain;
   background-repeat: no-repeat;
   pointer-events: none;
@@ -288,7 +337,7 @@ body {
   align-items: center;
   gap: 6px;
 }
-.r-btn:hover { background: var(--r-bg-hover); border-color: rgba(106, 163, 255, 0.4); }
+.r-btn:hover { background: var(--r-bg-hover); border-color: var(--r-line-gold); }
 
 .r-btn-ghost {
   background: transparent;
@@ -298,20 +347,20 @@ body {
 .r-btn-ghost:hover { color: var(--r-ink); border-color: var(--r-line-strong); }
 
 .r-btn-elf {
-  background: linear-gradient(180deg, rgba(106, 163, 255, 0.16), rgba(106, 163, 255, 0.06));
-  border: 1px solid rgba(106, 163, 255, 0.36);
+  background: linear-gradient(180deg, rgba(242, 185, 95, 0.14), rgba(242, 185, 95, 0.05));
+  border: 1px solid rgba(242, 185, 95, 0.36);
   color: var(--r-elf-glow);
   box-shadow: var(--r-glow-elf);
 }
-.r-btn-elf:hover { color: var(--r-star); border-color: rgba(106, 163, 255, 0.6); }
+.r-btn-elf:hover { color: var(--r-star); border-color: rgba(242, 185, 95, 0.6); }
 
 .r-btn-gold {
-  background: linear-gradient(180deg, rgba(212, 175, 99, 0.18), rgba(212, 175, 99, 0.06));
+  background: linear-gradient(180deg, rgba(217, 168, 90, 0.18), rgba(217, 168, 90, 0.06));
   border: 1px solid var(--r-gold-soft);
   color: var(--r-gold);
 }
 .r-btn-gold:hover {
-  color: #f0d699;
+  color: var(--r-elf-glow);
   box-shadow: var(--r-glow-gold);
 }
 
@@ -331,7 +380,7 @@ body {
   transition: all 0.15s ease;
 }
 .r-input::placeholder { color: var(--r-ink-faint); font-style: italic; }
-.r-input:focus { border-color: rgba(106, 163, 255, 0.5); box-shadow: 0 0 0 3px rgba(106, 163, 255, 0.1); }
+.r-input:focus { border-color: var(--r-tardis-lit); box-shadow: var(--r-glow-tardis); }
 
 /* ============================================================
    Scrollbar
@@ -339,10 +388,10 @@ body {
 .r-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .r-scroll::-webkit-scrollbar-track { background: transparent; }
 .r-scroll::-webkit-scrollbar-thumb {
-  background: rgba(196, 213, 247, 0.1);
+  background: rgba(217, 168, 90, 0.14);
   border-radius: 8px;
 }
-.r-scroll::-webkit-scrollbar-thumb:hover { background: rgba(196, 213, 247, 0.18); }
+.r-scroll::-webkit-scrollbar-thumb:hover { background: rgba(217, 168, 90, 0.24); }
 
 /* ============================================================
    Animations
@@ -372,8 +421,8 @@ body {
   to   { transform: translateX(0); }
 }
 @keyframes r-glow-pulse {
-  0%, 100% { box-shadow: 0 0 20px rgba(106, 163, 255, 0.16); }
-  50%      { box-shadow: 0 0 30px rgba(106, 163, 255, 0.34); }
+  0%, 100% { box-shadow: 0 0 20px rgba(242, 185, 95, 0.16); }
+  50%      { box-shadow: 0 0 30px rgba(242, 185, 95, 0.34); }
 }
 @keyframes r-spin-slow {
   to { transform: rotate(360deg); }
@@ -396,7 +445,7 @@ body {
    ============================================================ */
 .r-divider-knot {
   height: 22px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 22' fill='none' stroke='%23d4af63' stroke-width='0.8' stroke-linecap='round' opacity='0.7'><line x1='0' y1='11' x2='80' y2='11'/><line x1='120' y1='11' x2='200' y2='11'/><circle cx='100' cy='11' r='4'/><circle cx='100' cy='11' r='1.5' fill='%23d4af63' stroke='none'/><path d='M86 11 Q92 4 100 7 Q108 4 114 11'/><path d='M86 11 Q92 18 100 15 Q108 18 114 11'/></svg>");
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 22' fill='none' stroke='%23d9a85a' stroke-width='0.8' stroke-linecap='round' opacity='0.75'><line x1='0' y1='11' x2='84' y2='11'/><line x1='116' y1='11' x2='200' y2='11'/><circle cx='100' cy='11' r='7'/><circle cx='100' cy='11' r='3.5' stroke-width='0.6' opacity='0.7'/><circle cx='100' cy='11' r='1.4' fill='%23d9a85a' stroke='none'/><circle cx='88' cy='11' r='1.2' fill='%23d9a85a' stroke='none'/><circle cx='112' cy='11' r='1.2' fill='%23d9a85a' stroke='none'/></svg>");
   background-position: center;
   background-repeat: no-repeat;
   background-size: auto 100%;
@@ -418,7 +467,7 @@ body {
   height: 1px;
   background: var(--r-star);
   border-radius: 50%;
-  box-shadow: 0 0 4px rgba(230, 242, 255, 0.8);
+  box-shadow: 0 0 4px rgba(245, 239, 226, 0.8);
 }
 
 /* Used to denote "live" things */
@@ -454,27 +503,27 @@ body {
   font-size: 10.5px;
   font-weight: 500;
   letter-spacing: 0;
-  background: rgba(196, 213, 247, 0.06);
+  background: rgba(217, 168, 90, 0.06);
   border: 1px solid var(--r-line);
   color: var(--r-ink-soft);
 }
 .r-chip-gold {
-  background: rgba(212, 175, 99, 0.1);
+  background: rgba(217, 168, 90, 0.10);
   border-color: var(--r-line-gold);
   color: var(--r-gold);
 }
 .r-chip-elf {
-  background: rgba(106, 163, 255, 0.1);
-  border-color: rgba(106, 163, 255, 0.32);
+  background: rgba(242, 185, 95, 0.10);
+  border-color: rgba(242, 185, 95, 0.32);
   color: var(--r-elf-glow);
 }
 .r-chip-rose {
-  background: rgba(196, 106, 133, 0.1);
-  border-color: rgba(196, 106, 133, 0.32);
+  background: rgba(217, 83, 79, 0.10);
+  border-color: rgba(217, 83, 79, 0.32);
   color: var(--r-rose);
 }
 .r-chip-emerald {
-  background: rgba(109, 191, 158, 0.1);
-  border-color: rgba(109, 191, 158, 0.3);
+  background: rgba(111, 168, 135, 0.10);
+  border-color: rgba(111, 168, 135, 0.30);
   color: var(--r-emerald);
 }
